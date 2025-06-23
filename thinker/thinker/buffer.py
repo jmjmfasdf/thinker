@@ -1,27 +1,56 @@
 import numpy as np
-import time
 import timeit
 from operator import itemgetter
 import os
+import datetime
+import time
 import ray
 import thinker.util as util
 from thinker.core.file_writer import FileWriter
 import torch
+from datetime import datetime
 AB_CAN_WRITE, AB_FULL, AB_FINISH = 0, 1, 2
 
 @ray.remote
 class ActorBuffer:
-    def __init__(self, batch_size=32):
+    def __init__(self, batch_size=32, buffer_save_size=10, save_dir=None):
         self.batch_size = batch_size
         self.buffer = []
         self.buffer_state = []
         self.finish = False
+        
+        # Parameters for saving buffer data
+        self.buffer_save_size = buffer_save_size  # Number of episodes to save when saving buffer data
+        self.save_dir = save_dir
+        self.max_episode_return = 0
+        
+        # 에피소드 버퍼
+        self.episode_buffer = []  # 완료된 에피소드들을 저장하는 버퍼
+        
+        # 버퍼 크기 제한
+        self.max_episode_buffer = self.buffer_save_size * 2  # cap for episode_buffer size
+        
+        # 디버깅을 위한 카운터 추가
+        self.total_transitions_received = 0
+        self.last_debug_time = time.time()
+        self.debug_interval = 60  # 60초마다 디버그 정보 출력
+        
+        # 실제 학습 스텝 카운터
+        self.real_step = 0
 
-    def write(self, data, state):
-        # Write data, a named tuple of numpy arrays each with shape (t, b, ...)
-        # and state, a tuple of numpy arrays each with shape (*,b, ...)
-        self.buffer.append(data)
-        self.buffer_state.append(state)
+    # ------------------------------------------------------------------
+    # Helper utilities (defined at class level right after __init__)
+    # ------------------------------------------------------------------
+    def _log(self, msg):
+        """Simple print-based logger for ActorBuffer."""
+        print(msg, flush=True)
+
+    def _trim_buffers(self):
+        """Ensure episode buffer does not grow beyond predefined limits."""
+        # Trim completed episode buffer
+        if hasattr(self, 'max_episode_buffer') and len(self.episode_buffer) > self.max_episode_buffer:
+            excess = len(self.episode_buffer) - self.max_episode_buffer
+            del self.episode_buffer[:excess]
 
     def available_for_read(self):
         # Return True if the total size of data in the buffer is larger than the batch size
@@ -100,6 +129,211 @@ class ActorBuffer:
 
     def set_finish(self):
         self.finish = True
+        
+    def update_real_step(self, step):
+        """
+        외부에서 실제 학습 스텝을 업데이트하는 메서드
+        ActorLearner나 ModelLearner에서 호출됨
+        """
+        if step > self.real_step:
+            self.real_step = step
+            # 디버깅 정보 출력
+            current_time = time.time()
+            if current_time - self.last_debug_time > self.debug_interval:
+                self._log(f"] Real step updated to {step}, total transitions: {self.total_transitions_received}")
+                self.last_debug_time = current_time
+
+    def save_buffer_data(self, data=None, state=None):
+        """Save buffer data when a new max episode return is found"""
+        try:
+            # 저장 디렉토리 확인 및 생성
+            if self.save_dir is None:
+                # 학습 로그 디렉토리 안에 buffer_saves 폴더 생성
+                log_dir = os.environ.get('THINKER_LOG_DIR', None)
+                if log_dir is not None and os.path.exists(log_dir):
+                    self.save_dir = os.path.join(log_dir, 'replay_buffer')
+                    self._log(f"] Using log directory for buffer saves: {self.save_dir}")
+                else:
+                    self.save_dir = 'replay_buffer'
+                    self._log(f"] THINKER_LOG_DIR not found, using default: {self.save_dir}")
+                os.makedirs(self.save_dir, exist_ok=True)
+            
+            # data와 state가 제공되면 처리
+            if data is not None and state is not None:
+                # 디버깅 카운터 업데이트
+                self.total_transitions_received += 1
+                
+                # 완료된 에피소드 탐지
+                if hasattr(data, 'done'):
+                    # done 필드의 차원에 따라 처리 방식 변경
+                    done_indices = np.where(data.done)[1] if data.done.ndim > 1 else np.where(data.done)[0]
+                    
+                    # 완료된 에피소드 데이터 추출
+                    for idx in done_indices:
+                        # 현재 에피소드의 데이터 추출
+                        episode_data = self._extract_episode_data(data, idx)
+                        episode_state = self._extract_episode_state(state, idx)
+                        if episode_data is not None and episode_state is not None:
+                            # 에피소드 리턴 가져오기
+                            ep_return = None
+                            # 직접 episode_return 필드에서 값을 가져옴
+                            if hasattr(episode_data, 'episode_return'):
+                                try:
+                                    episode_return_arr = getattr(episode_data, 'episode_return')
+                                    if episode_return_arr is not None:
+                                        # episode_return 배열의 구조 처리
+                                        # 배열이 다차원일 수 있으므로 numpy로 변환하여 처리
+                                        if hasattr(episode_return_arr, 'shape') and len(episode_return_arr.shape) > 0:
+                                            # numpy 배열인 경우
+                                            ep_return = float(episode_return_arr.item(0))
+                                        elif isinstance(episode_return_arr, (list, tuple)) and len(episode_return_arr) > 0:
+                                            # 리스트나 튜플인 경우
+                                            ep_return = float(episode_return_arr[0])
+                                        else:
+                                            # 단일 값인 경우
+                                            ep_return = float(episode_return_arr)
+                                        self._log(f"] Using episode_return field: {ep_return}")
+                                except Exception as e:
+                                    self._log(f"] Error getting episode_return: {e}")
+                                    ep_return = None
+                            
+                            # 만약 episode_return이 없으면 reward로 계산
+                            if ep_return is None and hasattr(episode_data, 'reward'):
+                                try:
+                                    reward_arr = getattr(episode_data, 'reward')
+                                    if reward_arr is not None:
+                                        ep_return = float(np.sum(reward_arr))
+                                        self._log(f"] Calculated from rewards: {ep_return}")
+                                except Exception as e:
+                                    self._log(f"] Error calculating from rewards: {e}")
+                                    ep_return = None
+
+                            # 새로운 최고 리턴을 발견하면 즉시 저장
+                            self._log(f"] Processing episode with return {ep_return}, current max: {self.max_episode_return}")
+                            if ep_return is not None and ep_return > self.max_episode_return:
+                                old_max = self.max_episode_return
+                                self.max_episode_return = ep_return
+                                timestamp_best = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                best_filename = os.path.join(
+                                    self.save_dir,
+                                    f"best_ep_return_{ep_return:.2f}_{timestamp_best}.npz",
+                                )
+                                self._log(f"] New max episode return: {old_max} -> {ep_return} (improvement: {ep_return - old_max})")
+                                try:
+                                    best_data = {}
+                                    # 데이터 필드 저장
+                                    if hasattr(episode_data, '_fields'):
+                                        for field_name in episode_data._fields:
+                                            value = getattr(episode_data, field_name)
+                                            if value is not None:
+                                                best_data[field_name] = value
+                                    # 상태 데이터 저장 (구성 요소별 이름 지정 포함)
+                                    if episode_state is not None:
+                                        if isinstance(episode_state, tuple):
+                                            # ----- 구성 요소 이름 산출 로직 -----
+                                            num_components = len(episode_state)
+                                            base_lstm_components = 4
+                                            extra_states = num_components % base_lstm_components
+                                            has_attention = has_memory_slot_mask = has_global_memory = False
+                                            if extra_states == 1:
+                                                has_attention = True
+                                            elif extra_states == 2:
+                                                has_attention = True; has_memory_slot_mask = True
+                                            elif extra_states == 3:
+                                                has_attention = True; has_memory_slot_mask = True; has_global_memory = True
+                                            num_lstm_layers = (
+                                                num_components - (1 if has_attention else 0) - (1 if has_memory_slot_mask else 0) - (1 if has_global_memory else 0)
+                                            ) // base_lstm_components
+                                            state_component_names = []
+                                            for layer in range(num_lstm_layers):
+                                                state_component_names.extend([
+                                                    f'lstm_layer_{layer+1}_hidden_state',
+                                                    f'lstm_layer_{layer+1}_cell_state',
+                                                    f'lstm_layer_{layer+1}_attention_keys',
+                                                    f'lstm_layer_{layer+1}_attention_values',
+                                                ])
+                                            if has_attention:
+                                                state_component_names.append('attention_mask')
+                                            if has_memory_slot_mask:
+                                                state_component_names.append('memory_slot_mask')
+                                            if has_global_memory:
+                                                state_component_names.append('global_memory_state')
+                                            # fallback names if mismatch
+                                            if len(state_component_names) != num_components:
+                                                state_component_names = [f'state_component_{i}' for i in range(num_components)]
+                                            # 실제 데이터 저장
+                                            for comp_idx, comp in enumerate(episode_state):
+                                                if comp is not None:
+                                                    best_data[state_component_names[comp_idx]] = comp
+                                        else:
+                                            best_data['state'] = episode_state
+                                    np.savez_compressed(best_filename, **best_data)
+                                    self._log(f"] Saved new best episode with return {ep_return} to {best_filename}")
+                                except Exception as e:
+                                    self._log(f"] Error saving best episode: {e}")
+                            # 버퍼에 추가
+                            self.episode_buffer.append((episode_data, episode_state))
+                            self._trim_buffers()
+        except Exception as e:
+            print(f"Error saving buffer data: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _extract_episode_data(self, data, env_idx):
+        """특정 환경 인덱스의 에피소드 데이터를 추출"""
+        try:
+            # 결과를 저장할 딕셔너리
+            episode_data = {}
+            
+            # 원본 데이터와 동일한 타입의 객체 생성
+            if hasattr(data, '_fields'):
+                for field_name in data._fields:
+                    field_value = getattr(data, field_name)
+                    if field_value is not None:
+                        if isinstance(field_value, np.ndarray):
+                            # 해당 환경 인덱스의 데이터만 추출
+                            if field_value.ndim > 1 and field_value.shape[1] > env_idx:
+                                episode_data[field_name] = field_value[:, env_idx:env_idx+1]
+                            else:
+                                self._log(f"] Field {field_name} shape {field_value.shape} does not contain env_idx {env_idx}")
+                
+                # 원본과 동일한 named tuple 타입 생성
+                from collections import namedtuple
+                EpisodeData = namedtuple(type(data).__name__, data._fields)
+                return EpisodeData(**{field: episode_data.get(field) for field in data._fields})
+            
+            return None
+        except Exception as e:
+            self._log(f"] Error extracting episode data: {e}")
+            return None
+    
+    def _extract_episode_state(self, state, env_idx):
+        try:
+            if state is None:
+                return None
+            episode_state = []
+            for state_component in state:
+                if state_component is not None and isinstance(state_component, np.ndarray):
+                    if state_component.ndim > 1 and state_component.shape[0] > env_idx:
+                        episode_state.append(state_component[env_idx:env_idx+1])
+                    else:
+                        episode_state.append(None)
+                else:
+                    episode_state.append(None)
+            
+            return tuple(episode_state)
+        except Exception as e:
+            return None
+            
+    def write(self, data, state):
+        """Write data to buffer"""
+        # 원래 버퍼에 추가
+        self.buffer.append(data)
+        self.buffer_state.append(state)
+        
+        # 에피소드 처리 및 저장 로직 실행
+        self.save_buffer_data(data, state)
+
 
 class SModelBuffer:
     def __init__(self, buffer_n, max_rank, batch_size, alpha=1., warm_up_n=0):
@@ -584,7 +818,7 @@ class SelfPlayBuffer:
 
         if int(time.strftime("%M")) // 10 != self.ckp_start_time:
             self.save_checkpoint()
-            self.ckp_start_time = int(time.strftime("%M")) // 10     
+            self.ckp_start_time = int(time.strftime("%M")) // 10
 
         return self.real_step  
     

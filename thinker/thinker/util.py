@@ -298,7 +298,12 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
     if save_flags and not flags.ckp:        
         ckpdir = full_path(flags.ckpdir)
         if not os.path.exists(ckpdir):   
-            os.makedirs(ckpdir)        
+            os.makedirs(ckpdir)
+            
+        # Set environment variable for the replay buffer to use
+        os.environ['THINKER_LOG_DIR'] = ckpdir
+        print(f"Set THINKER_LOG_DIR environment variable to: {ckpdir}")
+            
         try:
             # create sym link for the latest run
             symlink = os.path.join(full_path(flags.savedir), "latest")

@@ -130,6 +130,9 @@ class SActorLearner:
             self.norm_stats = [None,] * self.num_rewards
         self.anneal_c = 1
         self.n = 0
+        
+        # 버퍼 크기 설정 (오래된 데이터 저장 관련 코드 제거)
+        self.buffer_save_size = getattr(self.flags, 'buffer_save_size', 1000)  # 기본값 1000
 
         self.crnorm = None
 
@@ -254,6 +257,18 @@ class SActorLearner:
         last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
         self.real_step += torch.sum(last_step_real).item()
         self.tot_eps += torch.sum(train_actor_out.real_done).item()
+        
+        # ActorBuffer의 real_step도 함께 업데이트
+        if self.flags.parallel_actor and hasattr(self, 'actor_buffer'):
+            try:
+                # Ray 원격 객체 메서드 호출 방식으로 수정
+                update_future = self.actor_buffer.update_real_step.remote(int(self.real_step))
+                # 비동기 호출이므로 결과를 기다리지 않음
+                if self.real_step % 1000 == 0:
+                    self._logger.info(f"Sent real_step update to ActorBuffer: {self.real_step}")
+            except Exception as e:
+                self._logger.error(f"Error updating ActorBuffer real_step: {e}")
+                traceback.print_exc()
 
         if not self.ppo_enable: return self.consume_data_single(data, timing)        
         TrainActorOut= type(train_actor_out)
@@ -353,7 +368,7 @@ class SActorLearner:
             self.optimizer.step()
         if timing is not None:
             timing.time("grad descent")
-
+    
         self.scheduler.last_epoch = (
             max(self.real_step - 1, 0)
         )  # scheduler does not support setting epoch directly
@@ -433,9 +448,33 @@ class SActorLearner:
                 if timing is not None:
                     print(timing.summary())
 
+            # 시간 기반 체크포인트 저장
             if int(time.strftime("%M")) // 10 != self.ckp_start_time:
                 self.save_checkpoint()
                 self.ckp_start_time = int(time.strftime("%M")) // 10
+                
+            # step 기반 체크포인트 저장
+            has_interval = hasattr(self.flags, 'checkpoint_interval')
+            if has_interval:
+                interval = self.flags.checkpoint_interval
+                if interval > 0:
+                    # 더 직관적인 방법: 현재 step이 어떤 마일스톤에 속하는지 확인
+                    current_milestone = (self.real_step // interval) * interval
+                    next_milestone = current_milestone + interval
+                    
+                    # 정적 변수를 사용하여 마일스톤 지남 여부 추적
+                    if not hasattr(self, 'last_checkpoint_milestone'):
+                        self.last_checkpoint_milestone = -1
+                    
+                    # 새로운 마일스톤에 도달했는지 확인
+                    milestone_reached = current_milestone > self.last_checkpoint_milestone
+                    
+                    #self._logger.info(f"Actor step checkpoint check: has_interval={has_interval}, interval={interval}, real_step={self.real_step}, current_milestone={current_milestone}, last_milestone={self.last_checkpoint_milestone}, milestone_reached={milestone_reached}")
+                    
+                    if milestone_reached:
+                        self._logger.info(f"Triggering actor step-based checkpoint at step {self.real_step} (milestone {current_milestone})")
+                        self.save_checkpoint(force=True)
+                        self.last_checkpoint_milestone = current_milestone
             del train_actor_out, losses, total_loss, stats, total_norm
         else:
             del train_actor_out, losses, total_loss, total_norm
@@ -754,7 +793,7 @@ class SActorLearner:
                 stats["norm_rmean_cur_episode_return"] = (stats["rmean_cur_episode_return"] / self.norm_stats[n][2]).item()
         return stats
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, force=False):
         self._logger.info("Saving actor checkpoint to %s" % self.ckp_path)
         d = {
                 "step": self.step,
@@ -769,10 +808,20 @@ class SActorLearner:
                 "flags": vars(self.flags),
             }      
         try:
+            # Save regular checkpoint
             torch.save(d, self.ckp_path + ".tmp")
             os.replace(self.ckp_path + ".tmp", self.ckp_path)
-        except:       
-            pass
+            
+            # Save step-specific checkpoint if forced or at checkpoint interval
+            if force or (hasattr(self.flags, 'checkpoint_interval') and 
+                         self.flags.checkpoint_interval > 0 and 
+                         self.real_step % self.flags.checkpoint_interval == 0):
+                checkpoint_path = f"{self.ckp_path}_step_{self.real_step}"
+                torch.save(d, checkpoint_path + ".tmp")
+                os.replace(checkpoint_path + ".tmp", checkpoint_path)
+                self._logger.info(f"Saved actor checkpoint at step {self.real_step} to {checkpoint_path}")
+        except Exception as e:       
+            self._logger.error(f"Error saving actor checkpoint: {e}")
 
     def load_checkpoint(self, ckp_path: str):
         train_checkpoint = torch.load(ckp_path, torch.device("cpu"))

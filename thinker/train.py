@@ -30,7 +30,10 @@ if __name__ == "__main__":
     gpu_n = min(int(num_gpus_available - 1), 3)    
     if flags.auto_res: flags = util.alloc_res(flags, gpu_n)
     if flags.parallel_actor:
-        actor_buffer = ActorBuffer.options(num_cpus=1).remote(batch_size=flags.actor_batch_size) 
+        actor_buffer = ActorBuffer.options(num_cpus=1).remote(
+            batch_size=flags.actor_batch_size,
+            buffer_save_size=flags.buffer_save_size if hasattr(flags, 'buffer_save_size') else 1
+        ) 
         actor_param_buffer = GeneralBuffer.options(num_cpus=1).remote()  
     else:
         actor_buffer = None

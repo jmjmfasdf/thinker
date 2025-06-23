@@ -812,7 +812,7 @@ cdef class cModelWrapper(cWrapper):
         if pass_idx_step.size() > 0:
             with torch.no_grad():
                 obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
-                pass_action_py = torch.tensor(pass_action, dtype=long, device=self.device).unsqueeze(0).unsqueeze(-1)
+                pass_action_py = torch.tensor(pass_action, dtype=torch.long, device=self.device).unsqueeze(0).unsqueeze(-1)
                 done_py = torch.tensor(done, dtype=torch.bool, device=self.device)
                 if pass_idx_step.size() == self.env_n:
                     self.initial_per_state = self.per_state
@@ -836,7 +836,7 @@ cdef class cModelWrapper(cWrapper):
             with torch.no_grad():
                 pass_model_states = dict({md: torch.stack([ms[i] for ms in pass_model_states], dim=0)
                         for i, md in enumerate(self.model_states_keys)})
-                pass_model_action_py = torch.tensor(pass_model_action, dtype=long, device=self.device).unsqueeze(-1)                
+                pass_model_action_py = torch.tensor(pass_model_action, dtype=torch.long, device=self.device).unsqueeze(-1)                
                 model_net_out_4 = model_net.forward_single(
                     state=pass_model_states,
                     action=pass_model_action_py)  

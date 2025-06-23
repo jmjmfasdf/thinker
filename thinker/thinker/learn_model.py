@@ -210,9 +210,33 @@ class SModelLearner:
                     )
                 if self.time: self.timing.time("update_weight")
 
+                # 시간 기반 체크포인트 저장
                 if int(time.strftime("%M")) // 10 != self.ckp_start_time:
                     self.save_checkpoint()
                     self.ckp_start_time = int(time.strftime("%M")) // 10
+                    
+                # step 기반 체크포인트 저장
+                has_interval = hasattr(self.flags, 'checkpoint_interval')
+                if has_interval:
+                    interval = self.flags.checkpoint_interval
+                    if interval > 0:
+                        # 더 직관적인 방법: 현재 step이 어떤 마일스톤에 속하는지 확인
+                        current_milestone = (self.real_step // interval) * interval
+                        next_milestone = current_milestone + interval
+                        
+                        # 정적 변수를 사용하여 마일스톤 지남 여부 추적
+                        if not hasattr(self, 'last_checkpoint_milestone'):
+                            self.last_checkpoint_milestone = -1
+                        
+                        # 새로운 마일스톤에 도달했는지 확인
+                        milestone_reached = current_milestone > self.last_checkpoint_milestone
+                        
+                        #self._logger.info(f"Model step checkpoint check: has_interval={has_interval}, interval={interval}, real_step={self.real_step}, current_milestone={current_milestone}, last_milestone={self.last_checkpoint_milestone}, milestone_reached={milestone_reached}")
+                        
+                        if milestone_reached:
+                            self._logger.info(f"Triggering model step-based checkpoint at step {self.real_step} (milestone {current_milestone})")
+                            self.save_checkpoint(force=True)
+                            self.last_checkpoint_milestone = current_milestone
                 if self.timing is not None:
                     self.timing.time("misc")
 
@@ -776,7 +800,7 @@ class SModelLearner:
                 break                
             time.sleep(0.1)  
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, force=False):
         self._logger.info("Saving model checkpoint to %s" % self.ckp_path)
         d = {
             "step": self.step,
@@ -794,10 +818,20 @@ class SModelLearner:
                 }
             )
         try:
+            # Save regular checkpoint
             torch.save(d, self.ckp_path + ".tmp")
             os.replace(self.ckp_path + ".tmp", self.ckp_path)
-        except:       
-            pass
+            
+            # Save step-specific checkpoint if forced or at checkpoint interval
+            if force or (hasattr(self.flags, 'checkpoint_interval') and 
+                         self.flags.checkpoint_interval > 0 and 
+                         self.real_step % self.flags.checkpoint_interval == 0):
+                checkpoint_path = f"{self.ckp_path}_step_{self.real_step}"
+                torch.save(d, checkpoint_path + ".tmp")
+                os.replace(checkpoint_path + ".tmp", checkpoint_path)
+                self._logger.info(f"Saved model checkpoint at step {self.real_step} to {checkpoint_path}")
+        except Exception as e:       
+            self._logger.error(f"Error saving model checkpoint: {e}")
 
     def load_checkpoint(self, ckp_path: str):
         train_checkpoint = torch.load(ckp_path, torch.device("cpu"))

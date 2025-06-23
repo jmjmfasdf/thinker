@@ -54,7 +54,7 @@ wrapper_type: 0 # 0: default Thinker; 1: raw env; 2: Thinker w/ perfect model; 3
 require_prob: false # whether to use prob to train model instead of sampled action
 rec_t: 20 # stage length
 test_rec_t: -1 # stage length for testing; non-positive for being the same as rec_t
-max_depth: 5 # maximum search depth before forceful reset
+max_depth: 10 # maximum search depth before forceful reset
 tree_carry: true # whether to carry the tree across stages
 reset_mode: 0 # 0 for conventional thinker; 1 for no expansion if reset - return the root node as the current node
 return_h: true # whether to return model's hidden state
@@ -94,6 +94,7 @@ ckp: false # whether to load checkpoint; if set to true, will load checkpoint fr
 preload: '' # path for the folder that consists ckp_model.tar, which is used to initialize  actor
 # savedir: '../logs/__project__' # base log directory
 savedir: 'logs' # base log directory
+checkpoint_interval: 100000 # frequency in real steps to save checkpoints (set to 0 to disable)
 # misc
 profile: false # whether to output all the time statistics of the run
 parallel: false # whether to use a parallel ray actor for training the model
