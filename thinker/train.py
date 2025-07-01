@@ -7,6 +7,8 @@ from thinker.self_play import SelfPlayWorker
 from thinker.logger import LogWorker
 from thinker.main import ray_init
 from thinker import util
+import sys
+sys.path.append('/home/jmme425/thinker/thinker')
 
 if __name__ == "__main__":
     logger = util.logger()

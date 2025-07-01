@@ -394,7 +394,7 @@ def visualize(
 
     actor_net = ActorNet(**actor_param)
     checkpoint = torch.load(
-        os.path.join(ckpdir, "ckp_actor.tar"), torch.device("cpu")
+        os.path.join(ckpdir, "ckp_actor.tar"), torch.device("cpu"), weights_only = False
     )
     actor_net.set_weights(checkpoint["actor_net_state_dict"])
     actor_state = actor_net.initial_state(batch_size=1)

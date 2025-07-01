@@ -192,10 +192,10 @@ class ActorBuffer:
                                         else:
                                             # 단일 값인 경우
                                             ep_return = float(episode_return_arr)
-                                        self._log(f"] Using episode_return field: {ep_return}")
                                 except Exception as e:
                                     self._log(f"] Error getting episode_return: {e}")
                                     ep_return = None
+                                    raise e
                             
                             # 만약 episode_return이 없으면 reward로 계산
                             if ep_return is None and hasattr(episode_data, 'reward'):
@@ -209,7 +209,6 @@ class ActorBuffer:
                                     ep_return = None
 
                             # 새로운 최고 리턴을 발견하면 즉시 저장
-                            self._log(f"] Processing episode with return {ep_return}, current max: {self.max_episode_return}")
                             if ep_return is not None and ep_return > self.max_episode_return:
                                 old_max = self.max_episode_return
                                 self.max_episode_return = ep_return
@@ -401,8 +400,28 @@ class SModelBuffer:
         if sample_n < b or self.processed_n < self.warm_up_n: return None
 
         flat_priority = priority_.flatten()
-        p = (flat_priority**self.alpha)
-        p = p / max(p.sum(), 1e-8)
+        # Handle potential NaN or negative values in flat_priority
+        mask = ~np.isnan(flat_priority) & (flat_priority > 0)
+        if not np.any(mask):
+            # If all values are NaN or non-positive, use uniform distribution
+            p = np.ones(flat_priority.size) / flat_priority.size
+        else:
+            # Filter out NaN and non-positive values
+            valid_flat_priority = np.where(mask, flat_priority, 0)
+            p = (valid_flat_priority**self.alpha)
+            p_sum = p.sum()
+            if p_sum > 0:
+                p = p / p_sum
+            else:
+                # Fallback to uniform distribution if sum is zero
+                p = np.ones(flat_priority.size) / flat_priority.size
+        
+        # Double-check for NaN values before calling np.random.choice
+        if np.any(np.isnan(p)):
+            # Log the issue and use uniform distribution
+            print("WARNING: NaN values detected in probability array, using uniform distribution")
+            p = np.ones(flat_priority.size) / flat_priority.size
+            
         flat_idx = np.random.choice(flat_priority.size, size=b, p=p, replace=False)
         t_idx, b_idx = np.unravel_index(flat_idx, priority_.shape)
         idx = (t_idx, b_idx, self.write_time[t_idx, b_idx])

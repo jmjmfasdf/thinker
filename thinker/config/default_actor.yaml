@@ -87,8 +87,8 @@ xpid: '' # name of the run, automatically set if not given
 ckp: false # whether to load checkpoint; if set to true, will load checkpoint from savedir/xpid
 preload_actor: '' # path for the folder that consists ckp_actor.tar, which is used to initialize  actor
 savedir: '../logs/__project__' # base log directory
-checkpoint_interval: 1000000 # frequency in real steps to save checkpoints (set to 0 to disable)
-buffer_save_size: 2 # number of episodes to save when saving buffer data
+checkpoint_interval: 100000 # frequency in real steps to save checkpoints (set to 0 to disable)
+buffer_save_size: 1 # number of episodes to save when saving buffer data
 use_wandb: True # whether to use wandb; need to have global variable WANDB_USER set to wandb user
 wandb_ckp_freq: 500000 # frequency in real steps to upload all files in the run
 policy_vis_freq: -1 # frequency in real steps to visualize the run
@@ -98,8 +98,8 @@ profile: false # whether to output all the time statistics of the run
 parallel_actor: true # whether to use a parallel ray actor for training the actor
 float16: true # whether to use mixed precision
 # ray resources
-auto_res: true # whether to auto allocate gpu
-ray_mem: -1 # default initialized ray memory
+auto_res: True # whether to auto allocate gpu
+ray_mem: -1 # default initialized ray memory unit: GB
 ray_gpu: -1 # number of initial gpu (set to -1 for auto detect)
 ray_cpu: -1 # number of initial cpu (set to -1 for auto detect)
 self_play_n: 1 # number of self-play ray actors (will be set automatically if auto_res is enabled)

@@ -2,7 +2,7 @@ from collections import deque
 import numpy as np
 import cv2
 import torch
-import gym
+import gymnasium as gym
 from gym import spaces
 import thinker.util as util
 import time
@@ -213,20 +213,25 @@ def PreWrapper(env, name, flags):
 def create_env_fn(name, flags):
     if "Sokoban" in name:
         import gym_sokoban
-        fn = gym.make
-        args = {"id": name}
+    elif "gvgai" in name:
+        import sys
+        import os
+        # get the path of this file
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        gvgai_path = os.path.join(dir_path, "gvgai_master")
+        if gvgai_path not in sys.path:
+            sys.path.insert(0, gvgai_path)
+        import gym_gvgai
     else:
         fn = gym.make
         args = {"id": name}
-
+    
     env_fn = lambda: PreWrapper(
         fn(**args), 
         name=name, 
         flags=flags,
     )
     return env_fn
-    
-
 # Standard wrappers
 
 class TransposeWrap(gym.ObservationWrapper):

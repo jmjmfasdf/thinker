@@ -1,9 +1,22 @@
-import gymnasium as gym
-import gymnasium.wrappers as wrappers
-from gymnasium.vector.utils.spaces import batch_space
-from gymnasium import spaces
-from collections import deque
+import os
+import sys
+import warnings
+import inspect
+import cv2
 import numpy as np
+from collections import deque
+import gymnasium as gym
+from gymnasium import spaces, logger
+import gymnasium.wrappers as wrappers
+from gymnasium.core import ObsType
+from gymnasium.vector.utils import batch_space
+from gymnasium.utils.step_api_compatibility import (
+    convert_to_terminated_truncated_step_api,
+)
+from typing import Any, Dict, Optional, Protocol, Tuple, runtime_checkable
+import gym_gvgai
+from gym_gvgai.envs.gvgai_env import GVGAI_Env
+import traceback
 import torch
 
 def create_envpool(name, flags, env_n=1):
@@ -26,9 +39,13 @@ def create_env_fn(name, flags):
     def pre_wrap(env, name, flags):
         if "Sokoban" in name:
             return TransposeWrap(env)
-        else:
-            return atari_wrap(env, flags.grayscale, flags.frame_stack_n)   
-            
+        elif "gvgai" in name:
+            env = GVGAISaveLoad(env)
+            env = GVGAIPreprocessing(env)
+            env = TransposeWrap(env)
+            return env
+        elif "atari" in name:
+            return atari_wrap(env, flags.grayscale, flags.frame_stack_n) 
     env_fn = lambda: pre_wrap(
         fn(**args), 
         name=name, 
@@ -36,6 +53,50 @@ def create_env_fn(name, flags):
     )
     return env_fn
 
+class GVGAIPreprocessing(gym.ObservationWrapper):
+    def __init__(self, env, screen_size=84, grayscale=False):
+        super().__init__(env)
+        self.screen_size = screen_size
+        self.grayscale = grayscale
+        if grayscale:
+            self.observation_space = spaces.Box(
+                low=0, high=255, shape=(screen_size, screen_size, 1), dtype=np.uint8
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=0, high=255, shape=(screen_size, screen_size, 3), dtype=np.uint8
+            )
+    
+    def observation(self, obs):
+        import cv2
+        obs = cv2.resize(obs, (self.screen_size, self.screen_size), interpolation=cv2.INTER_AREA)
+        if self.grayscale:
+            obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+            obs = np.expand_dims(obs, axis=-1)  # (H, W, 1)
+        return obs
+    
+class GVGAISaveLoad(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.saved_state = None
+        self.frame_stack_n = 1  # 기본값으로 1 설정, 필요시 변경
+
+    def quick_save(self):
+        self.saved_state = {
+            'img': self.env.img.copy() if hasattr(self.env, 'img') else None,
+        }
+
+    def quick_load(self):
+        """
+        저장된 환경 상태를 복원합니다.
+        """
+        if self.saved_state is not None:
+
+            if hasattr(self.env, 'img') and self.saved_state['img'] is not None:
+                self.env.img = self.saved_state['img'].copy()
+        else:
+            raise RuntimeError("quick_load called before quick_save")
+       
 def atari_wrap(env, grayscale=True, frame_stack_n=4, expose_ram=False):    
     env = AtariSaveLoad(env, expose_ram=expose_ram)
     env = TimeLimitExtended(env, max_episode_steps=108000)
