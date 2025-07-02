@@ -33,7 +33,7 @@ class EggInfoWithJava(egg_info):
 setup(name='gym_gvgai',
 	version='0.0.3',
 	packages= find_packages(),
-	install_requires=['gym>=0.10.5', 'numpy>=1.13.3', 'pillow>=5.3.0', 'scipy>=1.8.0'],
+	install_requires=['scipy>=1.8.0'],
     include_package_data=True,  # ← 이거 꼭 필요함
     package_data={
         'gym_gvgai': ['envs/games/**/*'],  # games 폴더의 모든 하위 파일 포함

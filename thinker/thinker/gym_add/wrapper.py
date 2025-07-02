@@ -1,8 +1,3 @@
-import os
-import sys
-import warnings
-import inspect
-import cv2
 import numpy as np
 from collections import deque
 import gymnasium as gym
@@ -13,10 +8,7 @@ from gymnasium.vector.utils import batch_space
 from gymnasium.utils.step_api_compatibility import (
     convert_to_terminated_truncated_step_api,
 )
-from typing import Any, Dict, Optional, Protocol, Tuple, runtime_checkable
-import gym_gvgai
-from gym_gvgai.envs.gvgai_env import GVGAI_Env
-import traceback
+# import gym_gvgai
 import torch
 
 def create_envpool(name, flags, env_n=1):

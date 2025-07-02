@@ -23,7 +23,7 @@ import gym_gvgai
 print("Testing raw GVGAI environment...")
 
 # Create raw GVGAI environment (without thinker wrappers)
-env = gym.make("gvgai-bait-lvl0-v0")
+env = gym.make("gvgai-chase-lvl4-v0")
 
 print(f"Raw environment type: {type(env)}")
 print(f"Raw observation_space: {env.observation_space}")
