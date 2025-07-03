@@ -8,7 +8,7 @@ from gymnasium.vector.utils import batch_space
 from gymnasium.utils.step_api_compatibility import (
     convert_to_terminated_truncated_step_api,
 )
-# import gym_gvgai
+import gym_gvgai
 import torch
 
 def create_envpool(name, flags, env_n=1):
@@ -33,7 +33,7 @@ def create_env_fn(name, flags):
             return TransposeWrap(env)
         elif "gvgai" in name:
             env = GVGAISaveLoad(env)
-            env = GVGAIPreprocessing(env)
+            #env = GVGAIPreprocessing(env)
             env = TransposeWrap(env)
             return env
         elif "atari" in name:

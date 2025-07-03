@@ -16,7 +16,7 @@ class SerializableStateObservation:
     """
     def __init__(self):
         self.imageArray = bytearray([])
-        # Initialize with a default color image (84x84x3)
+        # Initialize with a default color image (84x84x3) - memory pool
         self.image = np.zeros((84, 84, 3), dtype=np.uint8)
         
         self.phase = Phase()
@@ -58,13 +58,30 @@ class SerializableStateObservation:
         self.fromAvatarSpritesPositions = []
 
     def convertBytesToPng(self, pixels, loc):
+        """
+        Optimized version: reduce memory allocation and ensure RGB format
+        """
+        # Convert bytes in-place for memory efficiency
         for i, e in enumerate(pixels):
             pixels[i] = e & 0xFF
-        image = Image.open(io.BytesIO(bytearray(pixels)))
-        # Force the image to be in RGB mode
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        image.save(path.join(loc, CompetitionParameters.SCREENSHOT_FILENAME))
+        
+        try:
+            image = Image.open(io.BytesIO(bytearray(pixels)))
+            # Force the image to be in RGB mode (more memory efficient than later conversion)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            # Save directly to reduce intermediate memory usage
+            image.save(path.join(loc, CompetitionParameters.SCREENSHOT_FILENAME))
+            
+            # Clean up image object to free memory immediately
+            del image
+            
+        except Exception as e:
+            # Create a default black image if conversion fails
+            default_image = Image.new('RGB', (84, 84), color='black')
+            default_image.save(path.join(loc, CompetitionParameters.SCREENSHOT_FILENAME))
+            del default_image
 
 
 class Phase:

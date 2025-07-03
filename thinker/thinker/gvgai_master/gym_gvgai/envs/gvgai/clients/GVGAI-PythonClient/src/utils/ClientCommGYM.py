@@ -38,6 +38,10 @@ class ClientCommGYM:
         self.global_ect = None
         self.lastSsoType = LEARNING_SSO_TYPE.JSON
         
+        # Memory pooling for image processing
+        self._image_buffer = np.zeros((84, 84, 3), dtype=np.uint8)
+        self._temp_buffer = np.zeros((84, 84, 4), dtype=np.uint8)  # For RGBA conversion
+        
         self.sso.Terminal=False
 
         baseDir = os.path.join(pathStr, 'gvgai')
@@ -63,6 +67,51 @@ class ClientCommGYM:
 
         self.startComm()
         self.reset(lvl)
+
+    def _process_image_efficient(self, img_path):
+        """
+        Efficiently process image using pre-allocated buffers to minimize memory allocation
+        """
+        try:
+            loaded_img = imageio.imread(img_path)
+            
+            # First handle resizing if needed
+            if loaded_img.shape[:2] != (84, 84):
+                from PIL import Image
+                pil_img = Image.fromarray(loaded_img)
+                pil_img = pil_img.resize((84, 84), Image.NEAREST)
+                loaded_img = np.array(pil_img)
+            
+            # Now handle different image formats efficiently
+            if len(loaded_img.shape) == 2:  # Grayscale
+                # Use broadcasting instead of stack for memory efficiency
+                self._image_buffer[:, :, 0] = loaded_img
+                self._image_buffer[:, :, 1] = loaded_img
+                self._image_buffer[:, :, 2] = loaded_img
+            elif len(loaded_img.shape) == 3:
+                if loaded_img.shape[2] == 4:  # RGBA
+                    # Remove alpha channel in-place
+                    self._image_buffer[:, :, :3] = loaded_img[:, :, :3]
+                elif loaded_img.shape[2] == 1:  # Single channel
+                    # Use broadcasting instead of repeat
+                    single_channel = loaded_img[:, :, 0]
+                    self._image_buffer[:, :, 0] = single_channel
+                    self._image_buffer[:, :, 1] = single_channel
+                    self._image_buffer[:, :, 2] = single_channel
+                else:  # RGB or more channels
+                    self._image_buffer[:, :, :3] = loaded_img[:, :, :3]
+            
+            # Ensure uint8 dtype (in-place if possible)
+            if self._image_buffer.dtype != np.uint8:
+                self._image_buffer = self._image_buffer.astype(np.uint8)
+            
+            return self._image_buffer.copy()
+            
+        except Exception as e:
+            print(f"[WARNING] Failed to load/process image: {e}")
+            # Return default color image
+            self._image_buffer.fill(0)
+            return self._image_buffer.copy()
 
     def startComm(self):
         self.io.initBuffers()
@@ -95,46 +144,14 @@ class ClientCommGYM:
             score=0
         
         if self.sso.isGameOver==True or self.sso.gameWinner=='PLAYER_WINS' or self.sso.phase == "FINISH" or self.sso.phase=="ABORT" or self.sso.phase=="End":
-            # Load and process image to ensure it's in color format
+            # Use efficient image processing
             img_path = os.path.join(self.tempDir.name, 'gameStateByBytes.png')
-            try:
-                loaded_img = imageio.imread(img_path)
-                
-                # Ensure the image is in RGB format
-                if len(loaded_img.shape) == 2:  # Grayscale
-                    loaded_img = np.stack([loaded_img] * 3, axis=-1)
-                elif len(loaded_img.shape) == 3:
-                    if loaded_img.shape[2] == 4:  # RGBA
-                        loaded_img = loaded_img[:, :, :3]
-                    elif loaded_img.shape[2] == 1:  # Single channel
-                        loaded_img = np.repeat(loaded_img, 3, axis=2)
-                
-                # Ensure uint8 dtype
-                if loaded_img.dtype != np.uint8:
-                    loaded_img = loaded_img.astype(np.uint8)
-                
-                # Resize to 84x84 if needed
-                if loaded_img.shape[:2] != (84, 84):
-                    from PIL import Image
-                    pil_img = Image.fromarray(loaded_img)
-                    pil_img = pil_img.resize((84, 84), Image.NEAREST)
-                    loaded_img = np.array(pil_img)
-                
-                self.sso.image = loaded_img
-            except Exception as e:
-                print(f"[WARNING] Failed to load/process image: {e}")
-                # Use default color image if loading fails
-                self.sso.image = np.zeros((84, 84, 3), dtype=np.uint8)
-            
+            self.sso.image = self._process_image_efficient(img_path)
             self.sso.Terminal=True
-            #self.lastScore=0
-            #Score = self.lastScore
-            #self.lastScore=self.sso.gameScore
         else:
             self.sso.Terminal=False
             actions=self.actions()
         
-      
         info = {'winner': self.sso.gameWinner, 'actions': self.actions()}  
         return self.sso.image, score, self.sso.Terminal, info
 
@@ -191,61 +208,16 @@ class ClientCommGYM:
             elif self.sso.phase == "ACT":
                 flag=False                
                 
-                
                 for i in range(1):
                     self.act(0)
                     self.line = self.io.readLine()
                     self.line = self.line.rstrip("\r\n")
                     self.processLine(self.line)
 
-                #print(self.sso.phase)
-                #print(self.sso.isGameOver)
-                #print(dir(self.sso))
-
                 if(self.sso.isGameOver==True or self.sso.gameWinner=='WINNER' or self.sso.phase == "FINISH" or self.sso.phase == "End"):
-                    
                     img_path = os.path.join(self.tempDir.name, 'gameStateByBytes.png')
-                    # Load image and ensure it's in color format
-                    loaded_img = imageio.imread(img_path)
-                    
-                    
-                    # Ensure the image is in RGB format
-                    if len(loaded_img.shape) == 2:  # Grayscale
-                        # Convert grayscale to RGB by repeating the same values across 3 channels
-                        loaded_img = np.stack([loaded_img] * 3, axis=-1)
-                        print("[DEBUG] Converted grayscale to RGB")
-                    elif len(loaded_img.shape) == 3:
-                        if loaded_img.shape[2] == 4:  # RGBA
-                            # Remove alpha channel
-                            loaded_img = loaded_img[:, :, :3]
-                            print("[DEBUG] Removed alpha channel from RGBA")
-                        elif loaded_img.shape[2] == 1:  # Single channel
-                            # Convert to RGB
-                            loaded_img = np.repeat(loaded_img, 3, axis=2)
-                            print("[DEBUG] Converted single channel to RGB")
-                    
-                    # Ensure uint8 dtype
-                    if loaded_img.dtype != np.uint8:
-                        loaded_img = loaded_img.astype(np.uint8)
-                    
-                    # Resize to 84x84 if needed (to match observation space)
-                    if loaded_img.shape[:2] != (84, 84):
-                        from PIL import Image
-                        pil_img = Image.fromarray(loaded_img)
-                        pil_img = pil_img.resize((84, 84), Image.NEAREST)
-                        loaded_img = np.array(pil_img)
-                        print(f"[DEBUG] Resized image to (84, 84)")
-                    
-                    self.sso.image = loaded_img
-                    
-                    # Final debug info
-                    print(f"[DEBUG] Final image shape: {self.sso.image.shape}, dtype: {self.sso.image.dtype}")
-                    print(f"[DEBUG] Image unique values: {len(np.unique(self.sso.image))}, min: {np.min(self.sso.image)}, max: {np.max(self.sso.image)}")
-                    if len(self.sso.image.shape) == 3 and self.sso.image.shape[2] >= 3:
-                        # Check if all RGB channels are identical (grayscale)
-                        is_grayscale = np.array_equal(self.sso.image[:,:,0], self.sso.image[:,:,1]) and np.array_equal(self.sso.image[:,:,0], self.sso.image[:,:,2])
-                        print(f"[DEBUG] Image appears to be grayscale: {is_grayscale}")
-                    
+                    # Use efficient image processing
+                    self.sso.image = self._process_image_efficient(img_path)
                     self.sso.Terminal=True
                     self.lastScore=0
                 else:
@@ -375,10 +347,8 @@ class ClientCommGYM:
                     if(self.sso.imageArray):
                         self.sso.convertBytesToPng(self.sso.imageArray, self.tempDir.name)
                         img_path = os.path.join(self.tempDir.name, 'gameStateByBytes.png')
-                        self.sso.image = imageio.imread(img_path)
-                        if len(self.sso.image.shape) == 3 and self.sso.image.shape[2] >= 3:
-                            # Check if all RGB channels are identical (grayscale)
-                            is_grayscale = np.array_equal(self.sso.image[:,:,0], self.sso.image[:,:,1]) and np.array_equal(self.sso.image[:,:,0], self.sso.image[:,:,2])
+                        # Use the optimized image processing function
+                        self.sso.image = self._process_image_efficient(img_path)
 
         except Exception as e:
             logging.exception(e)
@@ -396,21 +366,20 @@ class ClientCommGYM:
         ect = ElapsedCpuTimer()
         ect.setMaxTimeMillis(CompetitionParameters.START_TIME)
         #self.startAgent()
-
-        if ect.exceededMaxTime():
+        if self.global_ect.exceededMaxTime():
             self.io.writeToServer(self.lastMessageId, "START_FAILED", self.LOG)
         else:
-            self.io.writeToServer(self.lastMessageId, "START_DONE" + "#" + self.lastSsoType, self.LOG)
+            self.io.writeToServer(self.lastMessageId, "START_DONE", self.LOG)
 
+    """
+     * Manages the init of a game played.
+    """
 
     def init(self):
         ect = ElapsedCpuTimer()
         ect.setMaxTimeMillis(CompetitionParameters.INITIALIZATION_TIME)
         #self.player.init(self.sso, ect.copy())
-        #self.lastSsoType = self.player.lastSsoType
         self.lastSsoType = LEARNING_SSO_TYPE.IMAGE
-        actions=self.actions()
-
         if ect.exceededMaxTime():
             self.io.writeToServer(self.lastMessageId, "INIT_FAILED", self.LOG)
         else:
@@ -424,20 +393,16 @@ class ClientCommGYM:
     def act(self,action):
         ect = ElapsedCpuTimer()
         ect.setMaxTimeMillis(CompetitionParameters.ACTION_TIME)
-        #action = str(self.player.act(self.sso, ect.copy()))
+        #act = self.player.act(self.sso, ect.copy())
+        
         if (not action) or (action == ""):
             action = "ACTION_NIL"
-        #self.lastSsoType = self.player.lastSsoType
         self.lastSsoType = LEARNING_SSO_TYPE.IMAGE
 
-
-        if ect.exceededMaxTime():
-            if ect.elapsedNanos() > CompetitionParameters.ACTION_TIME_DISQ*1000000:
-                self.io.writeToServer(self.lastMessageId, "END_OVERSPENT", self.LOG)
-            else:
-                self.io.writeToServer(self.lastMessageId, "ACTION_NIL" + "#" + self.lastSsoType, self.LOG)
+        if ect.exceededMaxTime() or ect.elapsedMillis() > CompetitionParameters.ACTION_TIME_DISQ:
+            self.io.writeToServer(self.lastMessageId, "END_OVERSPENT", self.LOG)
         else:
-            self.io.writeToServer(self.lastMessageId, action + "#" + self.lastSsoType, self.LOG)
+            self.io.writeToServer(self.lastMessageId, str(action) + "#" + self.lastSsoType, self.LOG)
 
     def addLevel(self, path):
         lvlName = os.path.join(self.tempDir.name, 'game_lvl5.txt')
