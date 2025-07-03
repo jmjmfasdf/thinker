@@ -8,7 +8,7 @@ discounting: 0.97 # discount rate of the raw MDP
 reward_clip: -1.0 # reward clipping; if positve, the reward is clipped within the absolute value of this values
 # training setting
 train_actor: true # whether to train actor
-total_steps: 50000000 # total number of real steps to train
+total_steps: 10000000 # total number of real steps to train 1e7
 actor_learning_rate: 0.0003 # actor learning rate
 actor_batch_size: 16 # actor batch size
 actor_unroll_len: 201 # unroll length used to update actor
@@ -87,7 +87,7 @@ xpid: '' # name of the run, automatically set if not given
 ckp: false # whether to load checkpoint; if set to true, will load checkpoint from savedir/xpid
 preload_actor: '' # path for the folder that consists ckp_actor.tar, which is used to initialize  actor
 savedir: '../logs/__project__' # base log directory
-checkpoint_interval: 100000 # frequency in real steps to save checkpoints (set to 0 to disable)
+checkpoint_interval: 500000 # frequency in real steps to save checkpoints (set to 0 to disable)
 buffer_save_size: 1 # number of episodes to save when saving buffer data
 use_wandb: True # whether to use wandb; need to have global variable WANDB_USER set to wandb user
 wandb_ckp_freq: 500000 # frequency in real steps to upload all files in the run

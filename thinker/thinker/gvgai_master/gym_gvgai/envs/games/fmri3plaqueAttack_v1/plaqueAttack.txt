@@ -1,0 +1,48 @@
+BasicGame square_size=25
+  SpriteSet
+    floor > Immovable hidden=True img=oryx/black.png
+    
+    fullMolar > Immovable
+      fullMolarInf > Immovable img=oryx/yellow.png
+      fullMolarSup > Immovable img=oryx/red.png
+    deadMolar > Immovable
+      deadMolarInf > Immovable img=oryx/green.png
+      deadMolarSup > Immovable img=oryx/blue.png
+    
+    movable >
+      avatar > ShootAvatar stype=fluor color=DARKBLUE frameRate=8 img=oryx/darkblue.png
+      food > Chaser speed=0.1
+        hotdog > cooldown=8 stype=fullMolarInf img=oryx/orange.png
+        burger > cooldown=8 stype=fullMolarSup img=oryx/brown.png
+    
+    holes > SpawnPoing color=LIGHTGRAY portal=True
+      hotdoghole > stype=hotdog prob=0.15 cooldown=8 total=5 img=oryx/purple.png
+      burgerhole > stype=burger prob=0.15 cooldown=8 total=5 img=oryx/pink.png
+
+    fluor > Missile color=YELLOW shrinkfactor=0.5 img=oryx/yellow.png
+    wall > Immovable img=oryx/darkgray.png
+
+  LevelMapping
+    h > hotdog floor
+    d > hotdoghole floor
+    b > burger floor
+    v > burgerhole floor
+    n > fullMolarSup floor
+    m > fullMolarInf floor
+    A > avatar floor
+    . > floor
+
+  InteractionSet
+    movalble wall > stepback pixelPerfect=True
+    food fluor   > killBoth scoreChange=2
+    fluor wall   > killSprite
+
+    fullMolarInf food > transformTo stype=deadMolarInf scoreChange=-3 killSecond=True
+    deadMolarInf avatar > transformTo stype=fullMolarInf scoreChange=1
+
+    fullMolarSup food > transformTo stype=deadMolarSup scoreChange=-3 killSecond=True
+    deadMolarSup avatar > transformTo stype=fullMolarSup scoreChange=1
+
+   TerminationSet
+    SpriteCounter stype=fullMolar win=False
+    MultiSpriteCounter stype1=holes stype2=food limit=0 win=True

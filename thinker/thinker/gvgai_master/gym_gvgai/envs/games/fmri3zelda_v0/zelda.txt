@@ -26,7 +26,7 @@ BasicGame
   InteractionSet
     movable wall  > stepBack
     nokey goal    > stepBack
-    goal withkey  > killSprite scoreChange=1
+    goal withkey  > killSprite scoreChange=10
     enemy sword > killSprite scoreChange=2
     enemy enemy > stepBack
     avatar enemy > killSprite scoreChange=-1

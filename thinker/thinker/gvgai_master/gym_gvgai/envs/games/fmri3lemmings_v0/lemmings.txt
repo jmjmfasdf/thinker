@@ -24,7 +24,7 @@ BasicGame
 
     InteractionSet
         avatar hole  > killSprite scoreChange=-5
-        lemming hole  > killSprite scoreChange=-1
+        lemming hole  > killSprite scoreChange=-2
         moving wall EOS > stepBack
         wall shovel  > killSprite scoreChange=-1
-        lemming exit > killSprite scoreChange=1
+        lemming exit > killSprite scoreChange=2

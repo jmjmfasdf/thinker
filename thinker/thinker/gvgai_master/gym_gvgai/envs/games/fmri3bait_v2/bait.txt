@@ -1,0 +1,37 @@
+BasicGame key_handler=Pulse square_size=50
+    SpriteSet
+        floor > Immovable hidden=True img=oryx/white.png
+        hole > Immovable img=oryx/blue.png
+        avatar > MovingAvatar
+            nokey > img=oryx/darkblue.png frameRate=8
+            withkey > img=oryx/darkblue.png frameRate=8
+        mushroom > Immovable img=oryx/red.png shrinkfactor=0.6
+        key > Resource img=oryx/orange.png shrinkfactor=0.7 limit=1
+        goal > Immovable img=oryx/green.png
+        box > Passive img=oryx/brown.png shrinkfactor=0.8
+        wall > Immovable img=oryx/darkgray.png autotiling=True
+
+    LevelMapping
+        A > nokey floor
+        0 > hole floor
+        1 > box floor
+        k > key floor
+        g > goal floor
+        m > mushroom floor
+        . > floor
+
+    InteractionSet
+        avatar wall > stepBack
+        avatar hole > killSprite
+        box avatar  > bounceForward
+        box wall box mushroom > undoAll
+        box hole > killBoth
+        nokey key > transformTo stype=withkey
+        key avatar > killSprite
+        nokey goal    > stepBack
+        goal withkey > killSprite scoreChange=10
+        mushroom avatar > killSprite scoreChange=1
+
+    TerminationSet
+        SpriteCounter stype=goal limit=0 win=True 
+        SpriteCounter stype=avatar limit=0 win=False
