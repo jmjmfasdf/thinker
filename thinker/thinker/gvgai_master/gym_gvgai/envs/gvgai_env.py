@@ -85,7 +85,7 @@ class GVGAI_Env(gym.Env):
 
     def _setLevel(self, level):
         if isinstance(level, int):
-            if level < 5:
+            if level < 9:
                 self.lvl = level
             else:
                 print("Level doesn't exist, playing level 0")
@@ -94,12 +94,12 @@ class GVGAI_Env(gym.Env):
             newLvl = path.realpath(level)
             ogLvls = [path.realpath(path.join(
                 dir, 'games', f'{self.game}_v{self.version}', f'{self.game}_lvl{i}.txt'
-            )) for i in range(5)]
+            )) for i in range(9)]
             if newLvl in ogLvls:
                 self.lvl = ogLvls.index(newLvl)
             elif path.exists(newLvl):
                 self.GVGAI.addLevel(newLvl)
-                self.lvl = 5
+                self.lvl = 9
             else:
                 print("Level doesn't exist, playing level 0")
                 self.lvl = 0

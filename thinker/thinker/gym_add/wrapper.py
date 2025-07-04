@@ -569,3 +569,39 @@ class DummyWrapper(gym.Wrapper):
     
 def dict_map(x, f):
     return {k:f(v) if v is not None else None for (k, v) in x.items()}    
+
+
+class GVGAILevelProgression(gym.Wrapper):
+    """
+    GVGAI 환경에서 레벨 진행을 관리하는 래퍼
+    - 레벨 성공 시 다음 레벨로 진행
+    - 레벨 실패 시 같은 레벨 재시도
+    - 최고 레벨 클리어 시 게임 종료
+    """
+    def __init__(self, env, game_name, max_level=4):
+        super().__init__(env)
+        self.game_name = game_name
+        self.current_level = 0
+        self.max_level = max_level
+        self.game_completed = False
+        
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        if terminated and not self.game_completed:
+            # 게임 종료 시 승리/패배 확인
+            if self._check_win_condition(info):
+                # 레벨 성공 시
+                if self.current_level < self.max_level:
+                    self.current_level += 1
+                    self._change_level(self.current_level)
+                    terminated = False  # 다음 레벨로 계속 진행
+                else:
+                    # 최고 레벨 클리어 시 게임 종료
+                    self.game_completed = True
+            else:
+                # 레벨 실패 시 같은 레벨 재시도
+                self._reload_level()
+                terminated = False
+                
+        return obs, reward, terminated, truncated, info
