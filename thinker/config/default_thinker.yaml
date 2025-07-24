@@ -10,7 +10,7 @@ model_sgd_weight_decay: 0.0001
 model_grad_norm_clipping: 0.0 # gradient clipping norm; non-positive for no clipping
 min_replay_ratio: 4. # minimum replay ratio (i.e. the number of times that the same transition is used to train a model on average)
 max_replay_ratio: 5. # maximum replay ratio (i.e. the number of times that the same transition is used to train a model on average)
-total_steps: 10000000 # total number of raw steps to train
+total_steps: 100000000 # total number of raw steps to train 1e8
 # replay buffer setting
 priority_alpha: 0.6 # alpha in prioritized sampling from the buffer
 priority_beta: 0.4 # beta in prioritized sampling from the buffer
@@ -52,9 +52,9 @@ reward_clip: -1 # reward clipping; if positve, the reward is clipped within the 
 # core wrapper setting
 wrapper_type: 0 # 0: default Thinker; 1: raw env; 2: Thinker w/ perfect model; 3: Thinker-v2; 4: Thinker-v2 w/ perfect model
 require_prob: false # whether to use prob to train model instead of sampled action
-rec_t: 20 # stage length
+rec_t: 40 # stage length, modified
 test_rec_t: -1 # stage length for testing; non-positive for being the same as rec_t
-max_depth: 20 # maximum search depth before forceful reset
+max_depth: 40 # maximum search depth before forceful reset, modified
 tree_carry: true # whether to carry the tree across stages
 reset_mode: 0 # 0 for conventional thinker; 1 for no expansion if reset - return the root node as the current node
 return_h: true # whether to return model's hidden state

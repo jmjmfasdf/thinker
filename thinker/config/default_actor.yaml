@@ -8,7 +8,7 @@ discounting: 0.97 # discount rate of the raw MDP
 reward_clip: -1.0 # reward clipping; if positve, the reward is clipped within the absolute value of this values
 # training setting
 train_actor: true # whether to train actor
-total_steps: 10000000 # total number of real steps to train 1e7
+total_steps: 100000000 # total number of real steps to train 1e8
 actor_learning_rate: 0.0003 # actor learning rate
 actor_batch_size: 16 # actor batch size
 actor_unroll_len: 201 # unroll length used to update actor
@@ -18,14 +18,14 @@ actor_adam_eps: 0.00000001 # eps for Adam optimizer
 return_norm_type: -1 # return norm type; -1 for no normalization, 0 for value normalization, 1 for advantage normalization, 2 for standard adv normalization
 v_trace_lamb: 1. # lambda used in v-trace
 # cost setting
-im_cost: 1. # cost for imaginary rewards
+im_cost: 0.8 # cost for imaginary rewards, modified
 im_cost_anneal: true # whether to anneal the imaginary cost to 0
 cur_cost: 0. # cost for curiosity rewards - unused
 cur_cost_anneal: true # whether to anneal the curiosity cost to 0
 baseline_cost: 0.5 # cost for computing baseline
 entropy_r_cost: 0. # entropy cost added to reward
 entropy_cost: 0.001 # entropy cost for real actions
-im_entropy_cost: 0.0001 # entropy cost for imaginary actions
+im_entropy_cost: 0.0003 # entropy cost for imaginary actions, modified
 autotune: false # autotune the entropy_cost and im_entropy_cost
 tar_entropy_scale: 0.4 # target policy entropy; 1 for uniform policy so it should be less than 1
 tar_im_entropy_scale: 0.4 # target imaginary policy entropy; 1 for uniform policy so it should be less than 1

@@ -334,7 +334,7 @@ class SelfPlayWorker:
                     shutil.copyfile(path, os.path.join(self.ckpdir, "ckp_actor.tar"))
             if path is not None:
                 checkpoint = torch.load(
-                    path, map_location=torch.device("cpu")
+                    path, map_location=torch.device("cpu"), weights_only = False
                 )
                 self.actor_net.set_weights(
                     checkpoint["actor_net_state_dict"]

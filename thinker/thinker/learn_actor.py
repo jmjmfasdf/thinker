@@ -824,7 +824,7 @@ class SActorLearner:
             self._logger.error(f"Error saving actor checkpoint: {e}")
 
     def load_checkpoint(self, ckp_path: str):
-        train_checkpoint = torch.load(ckp_path, torch.device("cpu"))
+        train_checkpoint = torch.load(ckp_path, torch.device("cpu"), weights_only = False)
         self.step = train_checkpoint["step"]
         self.real_step = train_checkpoint["real_step"]
         self.tot_eps = train_checkpoint["tot_eps"]
