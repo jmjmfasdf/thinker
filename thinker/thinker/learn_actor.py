@@ -256,7 +256,17 @@ class SActorLearner:
         self.step += T * B
         last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
         self.real_step += torch.sum(last_step_real).item()
-        self.tot_eps += torch.sum(train_actor_out.real_done).item()
+        real_done_count = torch.sum(train_actor_out.real_done).item()
+        self.tot_eps += real_done_count
+        
+        # 디버깅: 에피소드 카운터 증가 추적
+        if real_done_count > 0:
+            self._logger.info(f"[DEBUG] Episode counter increased:")
+            self._logger.info(f"  - real_done_count: {real_done_count}")
+            self._logger.info(f"  - tot_eps: {self.tot_eps}")
+            self._logger.info(f"  - train_actor_out.real_done: {train_actor_out.real_done}")
+            self._logger.info(f"  - train_actor_out.done: {train_actor_out.done}")
+            self._logger.info(f"  - train_actor_out.truncated_done: {train_actor_out.truncated_done}")
         
         # ActorBuffer의 real_step도 함께 업데이트
         if self.flags.parallel_actor and hasattr(self, 'actor_buffer'):

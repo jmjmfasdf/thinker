@@ -306,6 +306,21 @@ class Env(gym.Wrapper):
         with torch.set_grad_enabled(False):
             state, reward, done, truncated_done, info = self.env.step(action, self.model_net)  
         last_step_real = (info["step_status"] == 0) | (info["step_status"] == 3)
+        
+        # real_done 정보가 없으면 설정
+        if "real_done" not in info:
+            info["real_done"] = done | truncated_done
+        
+        # 디버깅: 에피소드 종료 상태 추적
+        if torch.any(done) or torch.any(truncated_done):
+            real_done = info.get("real_done", done | truncated_done)
+            self._logger.info(f"[DEBUG] Episode termination detected:")
+            self._logger.info(f"  - done: {done}")
+            self._logger.info(f"  - truncated_done: {truncated_done}")
+            self._logger.info(f"  - real_done: {real_done}")
+            self._logger.info(f"  - step_status: {info.get('step_status', 'N/A')}")
+            self._logger.info(f"  - counter: {self.counter}")
+        
         if self.train_model and not ignore and torch.any(last_step_real): 
             self._write_send_model_buffer(state, reward, done, truncated_done, info, primary_action, action_prob)        
         if self.train_model:

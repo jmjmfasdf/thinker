@@ -55,7 +55,7 @@ class DummyWrapper(gym.Wrapper):
         if torch.is_tensor(action):
             action = action.detach().cpu().numpy()        
 
-        obs, reward, done, info = self.env.step(action) 
+        obs, reward, done, truncated_done, info = self.env.step(action) 
         if np.any(done):
             done_idx = np.arange(self.env_n)[done]
             obs_reset = self.env.reset(idx=done_idx)
@@ -63,6 +63,7 @@ class DummyWrapper(gym.Wrapper):
         obs_py = torch.tensor(obs, dtype=self.state_dtype, device=self.device)
         reward = torch.tensor(reward, dtype=torch.float32, device=self.device)
         done = torch.tensor(done, dtype=torch.bool, device=self.device)        
+        truncated_done = torch.tensor(truncated_done, dtype=torch.bool, device=self.device)        
         states = {
             "real_states": obs_py,
         }     
@@ -85,7 +86,7 @@ class DummyWrapper(gym.Wrapper):
                 self.per_state = model_net_out.state
                 self.baseline = model_net_out.vs[-1]
         
-        return states, reward, done, info
+        return states, reward, done, truncated_done, info
     
 class PostWrapper(gym.Wrapper):
     """Wrapper for recording episode return, clipping rewards"""
@@ -138,7 +139,7 @@ class PostWrapper(gym.Wrapper):
             else:
                 action = torch.clamp(action, self.action_space_low, self.action_space_high)
 
-        state, reward, done, info = self.env.step(action, model_net)
+        state, reward, done, truncated_done, info = self.env.step(action, model_net)
         real_done = info["real_done"]        
 
         for prefix in ["im", "cur"]:
@@ -149,7 +150,7 @@ class PostWrapper(gym.Wrapper):
                 self.episode_return[prefix][real_done] = 0.
                 if prefix == "im":
                     self.episode_return[prefix][info["step_status"] == 0] = 0.        
-        return state, reward, done, info
+        return state, reward, done, truncated_done, info
     
     def render(self, *args, **kwargs):  
         return self.env.render(*args, **kwargs)    
@@ -187,7 +188,7 @@ def PreWrapper(env, name, flags):
     if atari: 
         # atari
         env = StateWrapper(env)
-        env = TimeLimit_(env, max_episode_steps=108000)
+        env = TimeLimit_(env, max_episode_steps=10000)
         env = NoopResetEnv(env, noop_max=30)
         if "NoFrameskip" in name:
             env = MaxAndSkipEnv(env, skip=4)
@@ -205,7 +206,7 @@ def PreWrapper(env, name, flags):
     if isinstance(env.observation_space, gym.spaces.Box) and len(env.observation_space.shape) == 3:
         #old_env_obs_space = env.observation_space.shape        
         # 3d input, need transpose
-        env = TransposeWrap(env)      
+        env = TransposeWrap(env) 
         #new_env_obs_space = env.observation_space.shape  
         #print(f"Added transpose wrapper for {old_env_obs_space} => {new_env_obs_space}")
     return env
@@ -264,12 +265,12 @@ class NoopWrapper(gym.Wrapper):
 
     def step(self, action):
         if action == 0:
-            return self.last_obs, self.cost, False, {}
+            return self.last_obs, self.cost, False, False, {}
         else:
-            obs, reward, done, info = self.env.step(action - 1)
+            obs, reward, terminated, truncated, info = self.env.step(action - 1)
             # obs = obs[np.newaxis, :, :, :]
             self.last_obs = obs
-            return obs, reward, done, info
+            return obs, reward, terminated, truncated, info
 
     def get_action_meanings(self):
         return [
@@ -296,12 +297,12 @@ class TimeLimit_(gym.Wrapper):
         assert (
             self._elapsed_steps is not None
         ), "Cannot call env.step() before calling reset()"
-        observation, reward, done, info = self.env.step(action)
+        observation, reward, terminated, truncated, info = self.env.step(action)
         self._elapsed_steps += 1
         if self._elapsed_steps >= self._max_episode_steps:
-            info["truncated_done"] = not done
-            done = True
-        return observation, reward, done, info
+            truncated = True
+            terminated = True
+        return observation, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
         self._elapsed_steps = 0
@@ -435,20 +436,20 @@ class EpisodicLifeEnv(gym.Wrapper):
         self.init = False
 
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self.was_real_done = done
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self.was_real_done = terminated
         # check current lives, make loss of life terminal,
         # then update lives to handle bonus lives
-        info["real_done"] = done
+        info["real_done"] = terminated
         lives = self.env.unwrapped.ale.lives()
         if lives < self.lives and lives > 0:
             # for Qbert sometimes we stay in lives == 0 condition for a few frames
             # so it's important to keep lives > 0, so that we only reset once
             # the environment advertises done.
-            done = True
+            terminated = True
         self.lives = lives
-        self.was_done = done
-        return obs, reward, done, info
+        self.was_done = terminated
+        return obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
         """Reset only when lives are exhausted.
@@ -483,8 +484,8 @@ class DoneEnv(gym.Wrapper):
         gym.Wrapper.__init__(self, env)
 
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        return obs, reward, True, info
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return obs, reward, True, truncated, info
 
 class MaxAndSkipEnv(gym.Wrapper):
     def __init__(self, env, skip=4):
@@ -715,19 +716,22 @@ class RepeatActionWrapper(gym.Wrapper):
 
     def step(self, action):
         total_reward = 0.0
-        done = False
+        terminated = False
+        truncated = False
         info = {}
 
         for i in range(self.repeat_action_n):
-            obs, reward, done, info = self.env.step(action)
+            obs, reward, term, trunc, info = self.env.step(action)
             total_reward += reward
+            terminated = terminated or term
+            truncated = truncated or trunc
 
             # Update the stacked observation
             start_index = i * self.obs_shape[-1]
             end_index = start_index + self.obs_shape[-1]
             self.stacked_obs[..., start_index:end_index] = obs
 
-            if done:
+            if terminated or truncated:
                 # Fill the remaining slots with the last observation if done
                 for j in range(i + 1, self.repeat_action_n):
                     start_index = j * self.obs_shape[-1]
@@ -735,7 +739,7 @@ class RepeatActionWrapper(gym.Wrapper):
                     self.stacked_obs[..., start_index:end_index] = obs
                 break
 
-        return self.stacked_obs, total_reward, done, info
+        return self.stacked_obs, total_reward, terminated, truncated, info
 
 class DiscretizeActionWrapper(gym.ActionWrapper):
     def __init__(self, env, K=11):
@@ -905,16 +909,16 @@ class InfoConcat(gym.Wrapper):
         self.num_envs = getattr(env, "num_envs", 1)        
 
     def step(self, action, **kwargs):
-        obs, reward, done, info = self.env.step(action, **kwargs) 
-        real_done = np.array([m["real_done"] if "real_done" in m else done[n] for n, m in enumerate(info)], dtype=np.bool_)
-        truncated_done = np.array([m["truncated_done"] if "truncated_done" in m else False for n, m in enumerate(info)], dtype=np.bool_)
+        obs, reward, terminated, truncated, info = self.env.step(action, **kwargs) 
+        real_done = np.array([m["real_done"] if "real_done" in m else terminated[n] for n, m in enumerate(info)], dtype=np.bool_)
+        truncated_done = np.array([m["truncated_done"] if "truncated_done" in m else truncated[n] for n, m in enumerate(info)], dtype=np.bool_)
         cost = np.array([m["cost"] if "cost" in m else False for n, m in enumerate(info)], dtype=np.bool_)
         info = {
             "real_done": real_done,
             "truncated_done": truncated_done,
             "cost": cost,
         }
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
     
     def default_info(self):
         info = {
@@ -959,7 +963,7 @@ class RecordEpisodeStatistics(gym.Wrapper):
 
     def step(self, action, **kwargs):        
         idx = kwargs.get("idx", None)     
-        obs, reward, done, info = self.env.step(action, **kwargs)
+        obs, reward, terminated, truncated, info = self.env.step(action, **kwargs)
         real_done = info["real_done"]
         if idx is None:
             self.episode_return = self.episode_return + reward
@@ -984,8 +988,8 @@ class RecordEpisodeStatistics(gym.Wrapper):
                 self.episode_step[idx_b] = 0
                 
         info["episode_return"] = episode_return[idx] if idx is not None else episode_return
-        info["episode_step"] = episode_step[idx] if idx is not None else episode_return
-        return obs, reward, done, info
+        info["episode_step"] = episode_step[idx] if idx is not None else episode_step
+        return obs, reward, terminated, truncated, info
     
     def default_info(self):
         info = self.env.default_info()

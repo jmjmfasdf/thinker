@@ -346,6 +346,7 @@ def visualize(
     savevideo=True,
     seed=-1,
     max_frames=-1,
+    use_gpu=True,  # GPU 사용 여부 추가
 ):        
     savedir = savedir.replace("__project__", __project__)
     ckpdir = os.path.join(savedir, xpid)      
@@ -358,11 +359,20 @@ def visualize(
     flags = util.create_flags(config_path, save_flags=False)
     if seed < 0:
         seed = np.random.randint(10000)
+    
+    # GPU 사용 설정
+    if use_gpu and torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("Using GPU for visualization")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU for visualization")
+    
     env = Env(
         name=flags.name,
         env_n=1,
         base_seed=seed,        
-        gpu=False,
+        gpu=use_gpu,  # GPU 사용 설정
         train_model=False,
         parallel=False,
         savedir=savedir,        
@@ -394,10 +404,14 @@ def visualize(
 
     actor_net = ActorNet(**actor_param)
     checkpoint = torch.load(
-        os.path.join(ckpdir, "ckp_actor.tar"), torch.device("cpu"), weights_only = False
+        os.path.join(ckpdir, "ckp_actor.tar"), device, weights_only = False
     )
     actor_net.set_weights(checkpoint["actor_net_state_dict"])
+    actor_net.to(device)  # GPU로 이동
     actor_state = actor_net.initial_state(batch_size=1)
+    if use_gpu:
+        actor_state = tuple(s.to(device) if s is not None else None for s in actor_state)
+    
     print("Actor Net Real Steps: %d Steps: %d" % (checkpoint["real_step"],
                                                   checkpoint["step"])
                                                   )
@@ -417,6 +431,18 @@ def visualize(
     state, info = env.reset()
     env_out = init_env_out(state, info, flags, actor_net.dim_actions, actor_net.tuple_action)
     
+    # GPU로 데이터 이동
+    if use_gpu:
+        env_out = env_out._replace(
+            xs=env_out.xs.to(device),
+            real_states=env_out.real_states.to(device),
+            tree_reps=env_out.tree_reps.to(device),
+            episode_return=env_out.episode_return.to(device),
+            done=env_out.done.to(device),
+            real_done=env_out.real_done.to(device),
+            step_status=env_out.step_status.to(device)
+        )
+    
     # some initial setting
     plt.rcParams.update({"font.size": 15})
 
@@ -435,6 +461,9 @@ def visualize(
     im_done = False
 
     video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": []}
+    
+    # 메모리 효율성을 위한 최대 저장 프레임 수 제한 (전체 프레임 저장을 위해 충분히 큰 값 설정)
+    max_video_frames = 10000000000000  # 최대 100,000프레임까지 저장 가능
 
     if flags.grayscale and "Sokoban" not in flags.name:
         copy_n = 1
@@ -442,9 +471,9 @@ def visualize(
         copy_n = 3
 
     if not render:
-        root_real_states = env_out.real_states[0, 0, -copy_n:].numpy() 
+        root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy() 
         last_root_real_states = root_real_states
-        root_xs = env_out.xs[0, 0, -copy_n:].numpy()
+        root_xs = env_out.xs[0, 0, -copy_n:].cpu().numpy()
     else:
         root_real_states = env.render(mode='rgb_array', camera_id=0)[0] 
     
@@ -453,8 +482,23 @@ def visualize(
     video_stats["status"].append(0)  # 0 for real step, 1 for reset, 2 for normal
     video_stats["tree_reps"].append({k: v.cpu().numpy() for k, v in tree_reps.items()})
 
+    # 메모리 관리를 위한 배치 크기 설정
+    batch_size = 5  # 한 번에 처리할 프레임 수 제한 (더 작게 설정)
+    
     while len(returns) < max_eps_n:
         step += 1
+        
+        # 메모리 정리
+        if step % batch_size == 0:
+            if use_gpu:
+                torch.cuda.empty_cache()
+                # GPU 메모리 사용량 출력
+                if step % (batch_size * 5) == 0:
+                    allocated = torch.cuda.memory_allocated() / 1024**3
+                    reserved = torch.cuda.memory_reserved() / 1024**3
+                    print(f"Step {step}: GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+                    print(f"Video frames stored: {len(video_stats['real_imgs'])}")
+        
         actor_out, actor_state = actor_net(env_out, actor_state)        
         action = actor_out.action
 
@@ -463,14 +507,14 @@ def visualize(
         if last_real_step:
             agent_v = actor_out.baseline[0, 0, 0]
 
-        # additional stat record
-        im_dict["pri_logits"].append(actor_out.pri_param[:,0])
-        im_dict["reset_logits"].append(actor_out.reset_logits[:,0])
-        im_dict["pri"].append(actor_out.pri[:,0])
-        im_dict["cur_reset"].append(actor_out.reset[:,0])
+        # additional stat record - GPU에서 CPU로 이동하여 저장
+        im_dict["pri_logits"].append(actor_out.pri_param[:,0].cpu())
+        im_dict["reset_logits"].append(actor_out.reset_logits[:,0].cpu())
+        im_dict["pri"].append(actor_out.pri[:,0].cpu())
+        im_dict["cur_reset"].append(actor_out.reset[:,0].cpu())
         
         tree_reps_ = env.decode_tree_reps(env_out.tree_reps)
-        model_policy.append(tree_reps_["cur_policy"])       
+        model_policy.append(tree_reps_["cur_policy"].cpu())       
 
         state, reward, done, truncated_done, info = env.step(action[0], action[1])
         last_real_step = (info["step_status"] == 0) | (info["step_status"] == 3)
@@ -483,9 +527,21 @@ def visualize(
                     cur_raw_action = cur_raw_action.long().unsqueeze(0)
                 else:
                     cur_raw_action = action[0]
-                if not im_done: _, _, im_done, _ = env.unwrapped_step(cur_raw_action.numpy())
+                if not im_done: _, _, im_done, _ = env.unwrapped_step(cur_raw_action.cpu().numpy())
 
         env_out = create_env_out(action, state, reward, done, truncated_done, info, flags)
+        
+        # GPU로 데이터 이동
+        if use_gpu:
+            env_out = env_out._replace(
+                xs=env_out.xs.to(device),
+                real_states=env_out.real_states.to(device),
+                tree_reps=env_out.tree_reps.to(device),
+                episode_return=env_out.episode_return.to(device),
+                done=env_out.done.to(device),
+                real_done=env_out.real_done.to(device),
+                step_status=env_out.step_status.to(device)
+            )
 
         tree_reps = env.decode_tree_reps(env_out.tree_reps)
         if (
@@ -499,7 +555,7 @@ def visualize(
         if not render:
             #img = env.unnormalize(torch.clamp(env_out.xs, 0, 1)).to(torch.uint8)
             xs = torch.clamp(env_out.xs, 0, 1)
-            xs = xs[0, 0, -copy_n:].numpy()
+            xs = xs[0, 0, -copy_n:].cpu().numpy()
         else:
             xs = env.render(mode='rgb_array', camera_id=0)[0]   
 
@@ -515,29 +571,30 @@ def visualize(
         if len(end_gym_env_outs) < 10: end_gym_env_outs.append(xs)
         end_titles.append(title)
 
-        # record data for generating video
-        if last_real_step:
-            root_real_states = env_out.real_states[0, 0, -copy_n:].numpy() 
-            root_xs = xs
-            # real action            
-            video_stats["status"].append(0)
-        else:
-            # imagainary action
-            video_stats["status"].append(2)
-        video_stats["real_imgs"].append(root_real_states)
-        video_stats["im_imgs"].append(xs)
-        video_stats["tree_reps"].append(
-            {k: v.cpu().numpy() for k, v in tree_reps.items()}
-        )
-
-        if im_dict["cur_reset"][-1] in [1, 3]:
-            # reset / force reset
+        # record data for generating video (전체 프레임 저장)
+        if len(video_stats["real_imgs"]) < max_video_frames:
+            if last_real_step:
+                root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy() 
+                root_xs = xs
+                # real action            
+                video_stats["status"].append(0)
+            else:
+                # imagainary action
+                video_stats["status"].append(2)
             video_stats["real_imgs"].append(root_real_states)
-            video_stats["im_imgs"].append(root_xs)
-            video_stats["status"].append(im_dict["cur_reset"][-1].item())
+            video_stats["im_imgs"].append(xs)
             video_stats["tree_reps"].append(
                 {k: v.cpu().numpy() for k, v in tree_reps.items()}
             )
+
+            if im_dict["cur_reset"][-1] in [1, 3]:
+                # reset / force reset
+                video_stats["real_imgs"].append(root_real_states)
+                video_stats["im_imgs"].append(root_xs)
+                video_stats["status"].append(im_dict["cur_reset"][-1].item())
+                video_stats["tree_reps"].append(
+                    {k: v.cpu().numpy() for k, v in tree_reps.items()}
+                )
 
         # visualize when a real step is made
         if (saveimg or plot) and last_real_step:
@@ -635,7 +692,7 @@ def visualize(
 
         if torch.any(env_out.real_done):
             step = 0
-            new_rets = env_out.episode_return[env_out.real_done][:, 0].numpy()
+            new_rets = env_out.episode_return[env_out.real_done][:, 0].cpu().numpy()
             returns.extend(new_rets)
             print(
                 "Finish %d episode: avg. return: %.2f (+-%.2f) "
@@ -654,9 +711,13 @@ def visualize(
             k: np.concatenate([v[k] for v in video_stats["tree_reps"]], axis=0)
             for k in video_stats["tree_reps"][0].keys()
         }
-        gen_video(video_stats, outdir)
+        # gen_video(video_stats, outdir)
         np.save(os.path.join(outdir, "video_stat.npy"), video_stats)
 
+    # 메모리 정리
+    if use_gpu:
+        torch.cuda.empty_cache()
+    
     return video_stats
 
 
@@ -673,7 +734,13 @@ if __name__ == "__main__":
         default="-1",
         type=int,
         help="Max number of real frames to record",
-    )    
+    )
+    parser.add_argument(
+        "--use_gpu",
+        default=True,
+        type=bool,
+        help="Whether to use GPU for visualization",
+    )
     flags = parser.parse_args()    
     if flags.project: flags.savedir=flags.savedir.replace("__project__", flags.project)
 
@@ -686,4 +753,5 @@ if __name__ == "__main__":
         savevideo=True,
         seed=flags.seed,
         max_frames=flags.max_frames,
+        use_gpu=flags.use_gpu,
     )

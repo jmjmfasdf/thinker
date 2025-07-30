@@ -35,6 +35,7 @@ def create_env_fn(name, flags):
             env = GVGAISaveLoad(env)
             #env = GVGAIPreprocessing(env)
             env = TransposeWrap(env)
+            # GVGAI 환경은 이미 내부적으로 TimeLimit이 있으므로 추가 TimeLimit 제거
             return env
         elif "atari" in name:
             return atari_wrap(env, flags.grayscale, flags.frame_stack_n) 
@@ -312,9 +313,27 @@ class VectorWrap(WrapperExtended):
         env_id = kwargs.get("env_id", None)     
         observation, reward, terminated, truncated, info = self.env.step(action, *args, **kwargs)
 
+        # 디버깅: 에피소드 종료 상태 추적
+        if np.any(terminated) or np.any(truncated):
+            print(f"[DEBUG] VectorWrap - Episode termination detected:")
+            print(f"  - terminated: {terminated}")
+            print(f"  - truncated: {truncated}")
+            print(f"  - info keys: {list(info.keys())}")
+            if 'real_done' in info:
+                print(f"  - info['real_done']: {info['real_done']}")
+
+        # real_done 설정 개선
         if "real_done" not in info: 
             info["real_done"] = terminated | truncated
         real_done = info["real_done"]
+        
+        # 디버깅: real_done 설정 후 확인
+        if np.any(terminated) or np.any(truncated):
+            print(f"[DEBUG] VectorWrap - After setting real_done:")
+            print(f"  - info['real_done']: {info['real_done']}")
+            print(f"  - terminated | truncated: {terminated | truncated}")
+        
+        # 에피소드 통계 업데이트
         if env_id is None:
             self.episode_return = self.episode_return + reward.astype(np.float32)
             self.episode_step = self.episode_step + 1
@@ -324,6 +343,7 @@ class VectorWrap(WrapperExtended):
         episode_return = self.episode_return
         episode_step = self.episode_step
 
+        # 에피소드 종료 시 통계 리셋
         if np.any(real_done):
             episode_return = np.copy(episode_return)
             episode_step = np.copy(episode_step)
@@ -337,11 +357,13 @@ class VectorWrap(WrapperExtended):
                 self.episode_return[idx_b] = 0.
                 self.episode_step[idx_b] = 0
 
+        # Observation과 reward clipping
         if self.obs_clip > 0.:
-            observation = np.clip(reward, -self.obs_clip, +self.obs_clip)
+            observation = np.clip(observation, -self.obs_clip, +self.obs_clip)
         if self.reward_clip > 0.:
             reward = np.clip(reward, -self.reward_clip, +self.reward_clip)
 
+        # Info 정리
         info = {key: info[key] for key in self.keys_to_keep if key in info}
         info["episode_return"] = episode_return[env_id] if env_id is not None else episode_return
         info["episode_step"] = episode_step[env_id] if env_id is not None else episode_step
@@ -527,6 +549,8 @@ class DummyWrapper(gym.Wrapper):
         info = dict_map(info, lambda x: torch.tensor(x, device=self.device))
         info["step_status"] = torch.full((self.env_n,), fill_value=0, dtype=torch.long, device=self.device)
         info["real_states_np"] = obs
+        # real_done 초기화
+        info["real_done"] = torch.zeros(self.env_n, dtype=torch.bool, device=self.device)
         if self.train_model:             
             info["initial_per_state"] = self.per_state
             info["baseline"] = self.baseline
@@ -539,6 +563,22 @@ class DummyWrapper(gym.Wrapper):
             action = action.detach().cpu().numpy()        
 
         obs, reward, done, truncated_done, info = self.env.step(action) 
+        
+        # 디버깅: 에피소드 종료 상태 추적
+        if np.any(done) or np.any(truncated_done):
+            print(f"[DEBUG] DummyWrapper - Episode termination detected:")
+            print(f"  - done: {done}")
+            print(f"  - truncated_done: {truncated_done}")
+            print(f"  - info keys: {list(info.keys())}")
+            if 'real_done' in info:
+                print(f"  - info['real_done']: {info['real_done']}")
+        
+        # 에피소드가 종료되면 자동으로 리셋
+        if np.any(done):
+            done_idx = np.arange(self.env_n)[done]
+            obs_reset, _ = self.env.reset(seed=None)
+            obs[done] = obs_reset
+        
         obs_py = torch.tensor(obs, dtype=self.state_dtype, device=self.device)
         reward = torch.tensor(reward, dtype=torch.float32, device=self.device)
         done = torch.tensor(done, dtype=torch.bool, device=self.device)        
@@ -550,6 +590,15 @@ class DummyWrapper(gym.Wrapper):
         info = dict_map(info, lambda x: torch.tensor(x, device=self.device))
         info["step_status"] = torch.full((self.env_n,), fill_value=3, dtype=torch.long, device=self.device)
         info["real_states_np"] = obs
+        
+        # real_done 정보 설정 - 에피소드 종료 조건
+        info["real_done"] = done | truncated_done
+        
+        # 디버깅: real_done 설정 후 확인
+        if torch.any(done) or torch.any(truncated_done):
+            print(f"[DEBUG] DummyWrapper - After setting real_done:")
+            print(f"  - info['real_done']: {info['real_done']}")
+            print(f"  - done | truncated_done: {done | truncated_done}")
         
         if self.train_model:             
             info["initial_per_state"] = self.per_state

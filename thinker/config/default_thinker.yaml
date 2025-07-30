@@ -94,7 +94,7 @@ ckp: false # whether to load checkpoint; if set to true, will load checkpoint fr
 preload: '' # path for the folder that consists ckp_model.tar, which is used to initialize  actor
 # savedir: '../logs/__project__' # base log directory
 savedir: 'logs' # base log directory
-checkpoint_interval: 500000 # frequency in real steps to save checkpoints (set to 0 to disable)
+checkpoint_interval: 10000 # frequency in real steps to save checkpoints (set to 0 to disable)
 # misc
 profile: false # whether to output all the time statistics of the run
 parallel: false # whether to use a parallel ray actor for training the model
