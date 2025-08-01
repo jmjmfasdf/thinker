@@ -131,8 +131,8 @@ public class JavaServer {
 
         //Game and level to play
         String game_file = gamesDir + "/" + game + ".txt";
-        String[] level_files = new String[9];
-        for (int i = 0; i <= 8; i++){
+        String[] level_files = new String[10];
+        for (int i = 0; i <= 9; i++){
             level_files[i] = gamesDir + "/" + game + "_lvl" + i +".txt";
         }
         // This plays a training round for a specified game.

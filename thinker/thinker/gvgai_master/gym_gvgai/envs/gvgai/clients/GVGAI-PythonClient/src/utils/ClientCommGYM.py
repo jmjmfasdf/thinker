@@ -6,6 +6,7 @@ import random
 import tempfile
 import shutil
 import numpy as np
+from PIL import Image
 
 # from scipy import misc
 import imageio
@@ -68,19 +69,43 @@ class ClientCommGYM:
         self.startComm()
         self.reset(lvl)
 
-    def _process_image_efficient(self, img_path):
+    def _process_image_efficient(self, img_path, fill_value=(89, 89, 89)):
         """
-        Efficiently process image using pre-allocated buffers to minimize memory allocation
+        Efficiently process image: pad to square, resize, and handle channels.
         """
         try:
             loaded_img = imageio.imread(img_path)
-            
-            # First handle resizing if needed
-            if loaded_img.shape[:2] != (84, 84):
-                from PIL import Image
-                pil_img = Image.fromarray(loaded_img)
+            h, w = loaded_img.shape[:2]
+
+            # Pad to square
+            if h != w:
+                size = max(h, w)
+                
+                # Determine padding for width and height
+                pad_h = (size - h) // 2
+                pad_w = (size - w) // 2
+                
+                # Handle RGB and RGBA cases
+                if len(loaded_img.shape) == 3 and loaded_img.shape[2] in [3, 4]:
+                    # Create a new square canvas with the fill color
+                    square_img = np.full((size, size, loaded_img.shape[2]), fill_value if loaded_img.shape[2] == 3 else fill_value + (255,), dtype=np.uint8)
+                    # Paste the original image into the center
+                    square_img[pad_h:pad_h+h, pad_w:pad_w+w] = loaded_img
+                    loaded_img = square_img
+                # Handle grayscale case
+                elif len(loaded_img.shape) == 2:
+                    # Assume the fill_value's first channel for grayscale padding
+                    square_img = np.full((size, size), fill_value[0], dtype=np.uint8)
+                    square_img[pad_h:pad_h+h, pad_w:pad_w+w] = loaded_img
+                    loaded_img = square_img
+                
+            pil_img = Image.fromarray(loaded_img)
+
+            # Resize if needed
+            if pil_img.size != (84, 84):
                 pil_img = pil_img.resize((84, 84), Image.NEAREST)
-                loaded_img = np.array(pil_img)
+
+            loaded_img = np.array(pil_img)
             
             # Now handle different image formats efficiently
             if len(loaded_img.shape) == 2:  # Grayscale
@@ -90,20 +115,10 @@ class ClientCommGYM:
                 self._image_buffer[:, :, 2] = loaded_img
             elif len(loaded_img.shape) == 3:
                 if loaded_img.shape[2] == 4:  # RGBA
-                    # Remove alpha channel in-place
+                    # Remove alpha channel
                     self._image_buffer[:, :, :3] = loaded_img[:, :, :3]
-                elif loaded_img.shape[2] == 1:  # Single channel
-                    # Use broadcasting instead of repeat
-                    single_channel = loaded_img[:, :, 0]
-                    self._image_buffer[:, :, 0] = single_channel
-                    self._image_buffer[:, :, 1] = single_channel
-                    self._image_buffer[:, :, 2] = single_channel
-                else:  # RGB or more channels
+                else:  # RGB or other formats
                     self._image_buffer[:, :, :3] = loaded_img[:, :, :3]
-            
-            # Ensure uint8 dtype (in-place if possible)
-            if self._image_buffer.dtype != np.uint8:
-                self._image_buffer = self._image_buffer.astype(np.uint8)
             
             return self._image_buffer.copy()
             
@@ -112,6 +127,7 @@ class ClientCommGYM:
             # Return default color image
             self._image_buffer.fill(0)
             return self._image_buffer.copy()
+
 
     def startComm(self):
         self.io.initBuffers()
@@ -160,6 +176,10 @@ class ClientCommGYM:
         #self.line = ''
         self.lastScore=0
         
+        level_to_send = lvl
+        if not isinstance(lvl, int):
+            level_to_send = 9
+
         if hasattr(self,'line'):
             flag=True
             restart=True
@@ -171,7 +191,7 @@ class ClientCommGYM:
             #self.processLine(self.line)
             
             if self.sso.Terminal:
-                self.io.writeToServer(self.lastMessageId, str(lvl) + "#" + self.lastSsoType, self.LOG)
+                self.io.writeToServer(self.lastMessageId, str(level_to_send) + "#" + self.lastSsoType, self.LOG)
             else:
             
                 self.io.writeToServer(self.lastMessageId, "END_OVERSPENT", self.LOG)
@@ -180,7 +200,7 @@ class ClientCommGYM:
                 self.line = self.line.rstrip("\r\n")
                 self.processLine(self.line)
             
-                self.io.writeToServer(self.lastMessageId, str(lvl) + "#" + self.lastSsoType, self.LOG)
+                self.io.writeToServer(self.lastMessageId, str(level_to_send) + "#" + self.lastSsoType, self.LOG)
 
         else:
             restart=True
@@ -405,8 +425,8 @@ class ClientCommGYM:
             self.io.writeToServer(self.lastMessageId, str(action) + "#" + self.lastSsoType, self.LOG)
 
     def addLevel(self, path):
-        lvlName = os.path.join(self.tempDir.name, 'game_lvl5.txt')
-        if(path is ''):
+        lvlName = os.path.join(self.tempDir.name, 'game_lvl9.txt')
+        if(path == ''):
             open(lvlName, 'w+').close()
         else:
             shutil.copyfile(path, lvlName)
