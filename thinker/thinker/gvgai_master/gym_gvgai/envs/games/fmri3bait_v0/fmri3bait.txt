@@ -12,7 +12,7 @@ BasicGame key_handler=Pulse square_size=50
         wall > Immovable img=oryx/darkgray.png autotiling=True
 
     LevelMapping
-        A > nokey floor
+        A > nokey 
         0 > hole floor
         1 > box floor
         k > key floor

@@ -29,11 +29,6 @@ class GVGAI_Env(gym.Env):
         self.original_lvl = level
         self.lvl = level
         self.version = version
-        self.pid = os.getpid()
-
-        game_folder = path.join(dir, 'games', f'{self.game}_v{self.version}')
-        temp_level_filename = f'{self.game}_lvl_temp_pid{self.pid}.txt'
-        self.temp_level_path = path.join(game_folder, temp_level_filename)
         
         self.GVGAI = gvgai.ClientCommGYM(game, version, level, dir)
         self.actions = self.GVGAI.actions()
@@ -100,31 +95,31 @@ class GVGAI_Env(gym.Env):
         """
         super().reset(seed=seed)
 
-        # Shuffle the level
-        original_lvl_path = path.join(dir, 'games', f'{self.game}_v{self.version}', f'{self.game}_lvl{self.original_lvl}.txt')
-
+        # --- Start of Shuffling Logic ---
+        game_folder = path.join(dir, 'games', f'{self.game}_v{self.version}')
+        original_lvl_path = path.join(game_folder, f'{self.game}_lvl{self.original_lvl}.txt')
+        
         level_to_load = self.lvl
 
         if path.exists(original_lvl_path):
             with open(original_lvl_path, 'r') as f:
-                lines = f.readlines()
+                lines = [line.strip() for line in f if line.strip()]
             
             print("\nOriginal Level Design:")
             for line in lines:
-                print(line.strip())
+                print(line)
 
-            map_grid = [list(line.strip()) for line in lines if line.strip()]
+            map_grid = [list(line) for line in lines]
             
-            if len(map_grid) > 2 and len(map_grid[0]) > 2:
+            if len(map_grid) > 2 and all(len(row) > 2 for row in map_grid):
                 inner_content = []
-                # Extract characters from the inner part of the map (excluding borders)
                 for r in range(1, len(map_grid) - 1):
                     for c in range(1, len(map_grid[r]) - 1):
                         inner_content.append(map_grid[r][c])
 
+                random.seed() # Use system time for true randomness
                 random.shuffle(inner_content)
 
-                # Place shuffled characters back into the map
                 content_idx = 0
                 for r in range(1, len(map_grid) - 1):
                     for c in range(1, len(map_grid[r]) - 1):
@@ -132,26 +127,22 @@ class GVGAI_Env(gym.Env):
                         content_idx += 1
                 
                 print("\nShuffled Level Design:")
-                shuffled_map_str = []
                 for row in map_grid:
-                    shuffled_map_str.append("".join(row))
-                print("\n".join(shuffled_map_str))
-
-                # Write the shuffled map to a temporary file
-                with open(self.temp_level_path, 'w') as f:
+                    print("".join(row))
+                    
+                # Write the shuffled map directly to level 9
+                shuffled_level_path = path.join(game_folder, f'{self.game}_lvl9.txt')
+                with open(shuffled_level_path, 'w') as f:
                     for row in map_grid:
                         f.write("".join(row) + "\n")
                 
-                self.GVGAI.addLevel(self.temp_level_path)
                 level_to_load = 9
+        # --- End of Shuffling Logic ---
         
         self.img = self.GVGAI.reset(level_to_load)
         
-        # 스텝 카운터 리셋
         self._elapsed_steps = 0
-        
-        info = {}
-        info["real_done"] = False  # 에피소드 시작 시 real_done 초기화
+        info = {"real_done": False}
         return self.img, info
 
     def set_max_episode_steps(self, max_steps):
@@ -193,13 +184,16 @@ class GVGAI_Env(gym.Env):
         if self.viewer is not None:
             self.viewer.close()
             self.viewer = None
-        # Clean up the temporary level file
-        if hasattr(self, 'temp_level_path') and path.exists(self.temp_level_path):
-            os.remove(self.temp_level_path)
+        # Clean up the shuffled level file
+        shuffled_level_path = path.join(dir, 'games', f'{self.game}_v{self.version}', f'{self.game}_lvl9.txt')
+        if path.exists(shuffled_level_path):
+            # os.remove(shuffled_level_path) # Optional: remove if you don't want to keep the last shuffled map
+            pass
+
 
     def _setLevel(self, level):
         if isinstance(level, int):
-            if level < 10: # Allow level 9
+            if level < 10:
                 self.lvl = level
             else:
                 print("Level doesn't exist, playing level 0")
@@ -208,15 +202,16 @@ class GVGAI_Env(gym.Env):
             newLvl = path.realpath(level)
             ogLvls = [path.realpath(path.join(
                 dir, 'games', f'{self.game}_v{self.version}', f'{self.game}_lvl{i}.txt'
-            )) for i in range(10)] # Allow up to level 9
+            )) for i in range(10)]
             if newLvl in ogLvls:
-                self.lvl = ogLvls.index(newLvl)
+                self.lvl = ogLvels.index(newLvl)
             elif path.exists(newLvl):
-                self.GVGAI.addLevel(newLvl)
-                self.lvl = 9
+                # This logic is now handled in reset()
+                self.lvl = 9 
             else:
                 print("Level doesn't exist, playing level 0")
                 self.lvl = 0
 
     def get_action_meanings(self):
         return self.actions
+
