@@ -22,29 +22,102 @@ def create_envpool(name, flags, env_n=1):
     return env
 
 def create_env_fn(name, flags):
-    fn = gym.make
-    args = {"id": name}
-    if "Sokoban" in name:        
+    if "Sokoban" in name:
         import gym_sokoban
-        args["dan_num"] = flags.detect_dan_num
+        fn = gym.make
+        args = {"id": name, "dan_num": flags.detect_dan_num}
+    elif "gvgai" in name:
+        fn = gym.make
+        args = {"id": name}
+    elif "vgdl" in name or "fmri" in name:
+        from vgdl.interfaces.gym import VGDLEnv
+        import os
+
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        vgdl_games_path = os.path.join(dir_path, '..', 'py-vgdl-master', 'vgdl', 'games')
+
+        parts = name.split('/')
+        if len(parts) == 2:
+            game_dir, level_name_part = parts
+            domain_name = game_dir.split('_v')[0]
+            level_num = level_name_part.split('_')[-1]
+            
+            domain_file = os.path.join(vgdl_games_path, game_dir, f"{domain_name}.txt")
+            level_file = os.path.join(vgdl_games_path, game_dir, f"{domain_name}_{level_num}.txt")
+        else:
+            # Fallback for single file case
+            level_file_name = name
+            game_name_part = '_'.join(level_file_name.split('_')[:-1])
+            domain_file = os.path.join(vgdl_games_path, f"{game_name_part}.txt")
+            level_file = os.path.join(vgdl_games_path, level_file_name)
+
+        fn = VGDLEnv
+        args = {
+            'game_file': domain_file,
+            'level_file': level_file,
+            'obs_type': 'image',
+        }
+    else:
+        fn = gym.make
+        args = {"id": name}
 
     def pre_wrap(env, name, flags):
         if "Sokoban" in name:
             return TransposeWrap(env)
         elif "gvgai" in name:
             env = GVGAISaveLoad(env)
-            #env = GVGAIPreprocessing(env)
             env = TransposeWrap(env)
-            # GVGAI 환경은 이미 내부적으로 TimeLimit이 있으므로 추가 TimeLimit 제거
             return env
         elif "atari" in name:
-            return atari_wrap(env, flags.grayscale, flags.frame_stack_n) 
+            return atari_wrap(env, flags.grayscale, flags.frame_stack_n)
+        elif "vgdl" in name or "fmri" in name:
+            env = ResizeAndPadWrapper(env)
+            return TransposeWrap(env)
+        return env
+
     env_fn = lambda: pre_wrap(
         fn(**args), 
         name=name, 
         flags=flags,
     )
     return env_fn
+
+
+class ResizeAndPadWrapper(gym.ObservationWrapper):
+    def __init__(self, env, size=84, pad_color=(89, 89, 89)):
+        super().__init__(env)
+        self.size = size
+        self.pad_color = pad_color
+        self.observation_space = spaces.Box(
+            low=0, high=255, shape=(size, size, 3), dtype=np.uint8
+        )
+
+    def observation(self, obs):
+        import cv2
+        h, w, _ = obs.shape
+
+        if h == w:
+            # Already square, just resize
+            resized_obs = cv2.resize(obs, (self.size, self.size), interpolation=cv2.INTER_AREA)
+        else:
+            # Pad to square
+            top, bottom, left, right = 0, 0, 0, 0
+            if h > w:
+                diff = h - w
+                left = diff // 2
+                right = diff - left
+            else: # w > h
+                diff = w - h
+                top = diff // 2
+                bottom = diff - top
+            
+            padded_obs = cv2.copyMakeBorder(
+                obs, top, bottom, left, right, cv2.BORDER_CONSTANT, value=self.pad_color
+            )
+            resized_obs = cv2.resize(padded_obs, (self.size, self.size), interpolation=cv2.INTER_AREA)
+
+        return resized_obs
+
 
 class GVGAIPreprocessing(gym.ObservationWrapper):
     def __init__(self, env, screen_size=84, grayscale=False):

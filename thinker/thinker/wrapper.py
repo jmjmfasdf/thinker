@@ -214,15 +214,53 @@ def PreWrapper(env, name, flags):
 def create_env_fn(name, flags):
     if "Sokoban" in name:
         import gym_sokoban
+        fn = gym.make
+        args = {"id": name}
     elif "gvgai" in name:
         import sys
         import os
-        # get the path of this file
         dir_path = os.path.dirname(os.path.realpath(__file__))
         gvgai_path = os.path.join(dir_path, "gvgai_master")
         if gvgai_path not in sys.path:
             sys.path.insert(0, gvgai_path)
         import gym_gvgai
+        fn = gym.make
+        args = {"id": name}
+    elif "vgdl" in name or "fmri" in name:
+        from gym.envs.registration import register
+        import os
+
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        vgdl_games_path = os.path.join(dir_path, 'py-vgdl-master', 'vgdl', 'games')
+
+        # name is expected to be like 'fmri4zelda_v0/zelda_lvl0'
+        parts = name.split('/')
+        game_dir = parts[0]
+        level_name = parts[1]
+        
+        game_name = '_'.join(level_name.split('_')[:-1])
+
+        domain_file = os.path.join(vgdl_games_path, game_dir, f"{game_name}.txt")
+        level_file = os.path.join(vgdl_games_path, game_dir, f"{level_name}.txt")
+        
+        env_name = f'vgdl_{game_dir}_{level_name}-v0'
+
+        # Unregister if already registered
+        if env_name in gym.envs.registry.keys():
+            del gym.envs.registry[env_name]
+
+        register(
+            id=env_name,
+            entry_point='vgdl.interfaces.gym:VGDLEnv',
+            kwargs={
+                'game_file': domain_file,
+                'level_file': level_file,
+                'obs_type': 'features',
+            },
+            nondeterministic=True
+        )
+        fn = gym.make
+        args = {"id": env_name}
     else:
         fn = gym.make
         args = {"id": name}
