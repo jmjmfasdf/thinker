@@ -5,6 +5,8 @@ import sys
 from os import path
 import os
 import random
+import fcntl
+import time
 import numpy as np
 
 dir = path.dirname(__file__)
@@ -22,7 +24,7 @@ class GVGAI_Env(gym.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"]}
 
-    def __init__(self, game, level, version, max_episode_steps=200):
+    def __init__(self, game, level, version, max_episode_steps=500):
         self.__version__ = "0.0.2"
 
         self.game = game
@@ -43,6 +45,11 @@ class GVGAI_Env(gym.Env):
         # TimeLimit 설정
         self._elapsed_steps = 0
         self._max_episode_steps = max_episode_steps
+
+        # 파일 잠금을 위한 경로 설정
+        self.lock_path = path.join(path.dirname(__file__), 'games', f'{self.game}_v{self.version}', 'level.lock')
+        # 잠금 파일 디렉토리가 없으면 생성
+        os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
 
     def step(self, action):
         """
@@ -95,52 +102,69 @@ class GVGAI_Env(gym.Env):
         """
         super().reset(seed=seed)
 
-        # --- Start of Shuffling Logic ---
-        game_folder = path.join(dir, 'games', f'{self.game}_v{self.version}')
-        original_lvl_path = path.join(game_folder, f'{self.game}_lvl{self.original_lvl}.txt')
-        
-        level_to_load = self.lvl
+        # 파일 잠금 시작
+        while True:
+            try:
+                with open(self.lock_path, 'w') as lock_file:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-        if path.exists(original_lvl_path):
-            with open(original_lvl_path, 'r') as f:
-                lines = [line.strip() for line in f if line.strip()]
-            
-            print("\nOriginal Level Design:")
-            for line in lines:
-                print(line)
-
-            map_grid = [list(line) for line in lines]
-            
-            if len(map_grid) > 2 and all(len(row) > 2 for row in map_grid):
-                inner_content = []
-                for r in range(1, len(map_grid) - 1):
-                    for c in range(1, len(map_grid[r]) - 1):
-                        inner_content.append(map_grid[r][c])
-
-                random.seed() # Use system time for true randomness
-                random.shuffle(inner_content)
-
-                content_idx = 0
-                for r in range(1, len(map_grid) - 1):
-                    for c in range(1, len(map_grid[r]) - 1):
-                        map_grid[r][c] = inner_content[content_idx]
-                        content_idx += 1
-                
-                print("\nShuffled Level Design:")
-                for row in map_grid:
-                    print("".join(row))
+                    # --- Start of Shuffling Logic ---
+                    game_folder = path.join(dir, 'games', f'{self.game}_v{self.version}')
+                    original_lvl_path = path.join(game_folder, f'{self.game}_lvl{self.original_lvl}.txt')
                     
-                # Write the shuffled map directly to level 9
-                shuffled_level_path = path.join(game_folder, f'{self.game}_lvl9.txt')
-                with open(shuffled_level_path, 'w') as f:
-                    for row in map_grid:
-                        f.write("".join(row) + "\n")
-                
-                level_to_load = 9
-        # --- End of Shuffling Logic ---
-        
-        self.img = self.GVGAI.reset(level_to_load)
-        
+                    level_to_load = self.lvl
+
+                    if path.exists(original_lvl_path):
+                        with open(original_lvl_path, 'r') as f:
+                            lines = [line.strip() for line in f if line.strip()]
+                        
+                        map_grid = [list(line) for line in lines]
+                        
+                        print("\nOriginal Level Design:")
+                        for line in lines:
+                            print(line)
+
+                        if len(map_grid) > 2 and all(len(row) > 2 for row in map_grid):
+                            inner_content = []
+                            for r in range(1, len(map_grid) - 1):
+                                for c in range(1, len(map_grid[r]) - 1):
+                                    inner_content.append(map_grid[r][c])
+
+                            random.seed() # Use system time for true randomness
+                            random.shuffle(inner_content)
+
+                            content_idx = 0
+                            for r in range(1, len(map_grid) - 1):
+                                for c in range(1, len(map_grid[r]) - 1):
+                                    map_grid[r][c] = inner_content[content_idx]
+                                    content_idx += 1
+                            
+                            # 임시 파일에 셔플된 맵을 작성
+                            temp_level_path = path.join(game_folder, f'{self.game}_lvl9.txt.tmp')
+                            with open(temp_level_path, 'w') as f:
+                                for row in map_grid:
+                                    f.write("".join(row) + "\n")
+
+                            print("\nShuffled Level Design:")
+                            for row in map_grid:
+                                print("".join(row))
+
+                            # 원자적으로 파일 이름 변경
+                            shuffled_level_path = path.join(game_folder, f'{self.game}_lvl9.txt')
+                            os.rename(temp_level_path, shuffled_level_path)
+                            
+                            level_to_load = 9
+                    # --- End of Shuffling Logic ---
+                    
+                    self.img = self.GVGAI.reset(level_to_load)
+                    
+                    # 잠금 해제
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    break  # 잠금 후 작업 완료, 루프 탈출
+            except IOError:
+                # 잠금을 얻지 못하면 잠시 대기
+                time.sleep(0.1)
+
         self._elapsed_steps = 0
         info = {"real_done": False}
         return self.img, info
