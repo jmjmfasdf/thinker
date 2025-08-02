@@ -115,20 +115,31 @@ class VGDLEnv(gym.Env):
             return observation
 
     def step(self, a):
-        # if not self.mode_initialised:
-        #     raise Exception('Please call `render` at least once for initialisation')
         self.game.tick(self._action_keys[a])
+        
+        # Get the new state of the game
         state = self._get_obs()
+        
         reward = self.game.score - self.score_last
         self.score_last = self.game.score
         terminated = self.game.ended
         truncated = False  # VGDL doesn't have a concept of truncation
+        
+        # Ensure the renderer is updated for the new state
+        if self._obs_type == 'image':
+            self.render(mode='rgb_array')
+
         return state, reward, terminated, truncated, {}
 
     def reset(self, seed=None, options=None):
-        # TODO improve the reset with the new domain split
-        self.game.reset()
-        # self.game = self.game.domain.build_level(self.level_desc)
+        # Reset the game state, not the entire game object
+        if self.game is not None:
+            self.game.reset()
+        else:
+            # First time reset, build the level
+            domain = vgdl.VGDLParser().parse_game(self.game_desc, **self.game_args)
+            self.game = domain.build_level(self.level_desc)
+
         self.score_last = self.game.score
         state = self._get_obs()
         return state, {}
