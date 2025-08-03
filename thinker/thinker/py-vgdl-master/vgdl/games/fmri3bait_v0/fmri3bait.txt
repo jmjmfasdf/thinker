@@ -5,10 +5,10 @@ BasicGame key_handler=Pulse square_size=50
         avatar > MovingAvatar
             nokey > img=oryx/darkblue.png frameRate=8
             withkey > img=oryx/darkblue.png frameRate=8
-        mushroom > Immovable img=oryx/red.png shrinkfactor=0.6
-        key > Resource img=oryx/orange.png shrinkfactor=0.7 limit=1
+        mushroom > Immovable img=oryx/red.png 
+        key > Resource img=oryx/orange.png limit=1
         goal > Immovable img=oryx/green.png
-        box > Passive img=oryx/brown.png shrinkfactor=0.8
+        box > Passive img=oryx/brown.png 
         wall > Immovable img=oryx/darkgray.png autotiling=True
 
     LevelMapping

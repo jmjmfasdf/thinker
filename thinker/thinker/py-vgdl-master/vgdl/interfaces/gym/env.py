@@ -6,7 +6,7 @@ import vgdl
 from vgdl.state import StateObserver
 import numpy as np
 from .list_space import list_space
-
+import random
 
 class VGDLEnv(gym.Env):
     metadata = {
@@ -18,9 +18,12 @@ class VGDLEnv(gym.Env):
                  game_file = None,
                  level_file = None,
                  obs_type='image',
+                 max_episode_steps=1000,
                  **kwargs):
         # For rendering purposes only
         self.render_block_size = kwargs.pop('block_size', 24)
+        self.max_episode_steps = max_episode_steps
+        self._elapsed_steps = 0
 
         # Variables
         self._obs_type = obs_type
@@ -31,11 +34,11 @@ class VGDLEnv(gym.Env):
         # Load game description and level description
         if game_file is not None:
             with open (game_file, "r") as myfile:
-                game_desc = myfile.read()
+                self.game_desc = myfile.read()
             with open (level_file, "r") as myfile:
-                level_desc = myfile.read()
+                self.level_desc = myfile.read()
             self.level_name = os.path.basename(level_file).split('.')[0]
-            self.loadGame(game_desc, level_desc)
+            self.loadGame(self.game_desc, self.level_desc)
 
 
     def loadGame(self, game_desc, level_desc, **kwargs):
@@ -45,8 +48,8 @@ class VGDLEnv(gym.Env):
         self.game_args.update(kwargs)
 
         # Need to build a sample level to get the available actions and screensize....
-        domain = vgdl.VGDLParser().parse_game(self.game_desc, **self.game_args)
-        self.game = domain.build_level(self.level_desc)
+        self.domain = vgdl.VGDLParser().parse_game(self.game_desc, **self.game_args)
+        self.game = self.domain.build_level(self.level_desc)
 
         self.score_last = self.game.score
 
@@ -123,7 +126,9 @@ class VGDLEnv(gym.Env):
         reward = self.game.score - self.score_last
         self.score_last = self.game.score
         terminated = self.game.ended
-        truncated = False  # VGDL doesn't have a concept of truncation
+        
+        self._elapsed_steps += 1
+        truncated = self._elapsed_steps >= self.max_episode_steps
         
         # Ensure the renderer is updated for the new state
         if self._obs_type == 'image':
@@ -131,15 +136,56 @@ class VGDLEnv(gym.Env):
 
         return state, reward, terminated, truncated, {}
 
+    def _randomize_level(self, level_desc):
+        print("=== 셔플 전 레벨 ===")
+        print(level_desc)
+        print("==================")
+        
+        lines = level_desc.strip().split('\n')
+        inner_cells = []
+        # 테두리를 제외한 내부 셀 추출
+        for r, row in enumerate(lines[1:-1]):
+            for c, char in enumerate(row[1:-1]):
+                inner_cells.append(char)
+        
+        # 내부 셀 섞기
+        random.shuffle(inner_cells)
+        
+        # 새 레벨 생성
+        new_level_lines = [list(lines[0])]
+        cell_idx = 0
+        for r, row in enumerate(lines[1:-1]):
+            new_row = ['w']
+            for c, char in enumerate(row[1:-1]):
+                new_row.append(inner_cells[cell_idx])
+                cell_idx += 1
+            new_row.append('w')
+            new_level_lines.append(new_row)
+        new_level_lines.append(list(lines[-1]))
+        
+        randomized_level = '\n'.join(''.join(row) for row in new_level_lines)
+        
+        print("=== 셔플 후 레벨 ===")
+        print(randomized_level)
+        print("==================")
+        
+        return randomized_level
+
     def reset(self, seed=None, options=None):
         # Reset the game state, not the entire game object
         if self.game is not None:
-            self.game.reset()
+            # Randomize the level description before resetting the game
+            randomized_level_desc = self._randomize_level(self.level_desc)
+            self.game = self.domain.build_level(randomized_level_desc)
+            # Reset renderer to reflect the new level
+            self.renderer = None
+            # self.game.reset()
         else:
             # First time reset, build the level
             domain = vgdl.VGDLParser().parse_game(self.game_desc, **self.game_args)
             self.game = domain.build_level(self.level_desc)
 
+        self._elapsed_steps = 0
         self.score_last = self.game.score
         state = self._get_obs()
         return state, {}
@@ -192,5 +238,3 @@ class Padlist(gym.ObservationWrapper):
           return padded
         else:
           return np.array(input_list, dtype=np.float32)[:max_len]
-
-
