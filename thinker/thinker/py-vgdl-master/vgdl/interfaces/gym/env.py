@@ -30,6 +30,9 @@ class VGDLEnv(gym.Env):
         self.viewer = None
         self.game_args = kwargs
         self.notable_sprites = kwargs.get('notable_sprites', None)
+        
+        # GVGAI처럼 명시적으로 state 저장
+        self.img = None
 
         # Load game description and level description
         if game_file is not None:
@@ -118,10 +121,21 @@ class VGDLEnv(gym.Env):
             return observation
 
     def step(self, a):
+        # 게임 상태만 업데이트
         self.game.tick(self._action_keys[a])
         
-        # Get the new state of the game
-        state = self._get_obs()
+        # 렌더링하여 이미지 저장 (GVGAI 방식)
+        if self._obs_type == 'image':
+            if self.renderer is None:
+                from vgdl.render import PygameRenderer
+                self.renderer = PygameRenderer(self.game, self.render_block_size)
+                self.renderer.init_screen(headless=True)
+            # 렌더링하여 이미지 저장
+            self.renderer.draw_all()
+            self.img = self.renderer.get_image()
+            state = self.img
+        else:
+            state = self._get_obs()
         
         reward = self.game.score - self.score_last
         self.score_last = self.game.score
@@ -129,10 +143,6 @@ class VGDLEnv(gym.Env):
         
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.max_episode_steps
-        
-        # Ensure the renderer is updated for the new state
-        if self._obs_type == 'image':
-            self.render(mode='rgb_array')
 
         return state, reward, terminated, truncated, {}
 
@@ -187,7 +197,19 @@ class VGDLEnv(gym.Env):
 
         self._elapsed_steps = 0
         self.score_last = self.game.score
-        state = self._get_obs()
+        
+        # 초기 이미지 렌더링 및 저장
+        if self._obs_type == 'image':
+            if self.renderer is None:
+                from vgdl.render import PygameRenderer
+                self.renderer = PygameRenderer(self.game, self.render_block_size)
+                self.renderer.init_screen(headless=True)
+            self.renderer.draw_all()
+            self.img = self.renderer.get_image()
+            state = self.img
+        else:
+            state = self._get_obs()
+            
         return state, {}
 
     def render(self, mode='human', close=False):
@@ -198,6 +220,11 @@ class VGDLEnv(gym.Env):
             self.renderer = PygameRenderer(self.game, self.render_block_size)
             self.renderer.init_screen(headless)
 
+        # 저장된 이미지가 있으면 반환 (GVGAI 방식)
+        if mode == 'rgb_array' and self.img is not None:
+            return self.img
+
+        # 필요할 때만 렌더링 수행
         self.renderer.draw_all()
         self.renderer.update_display()
 
