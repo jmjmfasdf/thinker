@@ -18,7 +18,7 @@ class VGDLEnv(gym.Env):
                  game_file = None,
                  level_file = None,
                  obs_type='image',
-                 max_episode_steps=1000,
+                 max_episode_steps=500,
                  **kwargs):
         # For rendering purposes only
         self.render_block_size = kwargs.pop('block_size', 24)
@@ -187,6 +187,7 @@ class VGDLEnv(gym.Env):
             # Randomize the level description before resetting the game
             randomized_level_desc = self._randomize_level(self.level_desc)
             self.game = self.domain.build_level(randomized_level_desc)
+            # self.game = self.domain.build_level(self.level_desc) 
             # Reset renderer to reflect the new level
             self.renderer = None
             # self.game.reset()
