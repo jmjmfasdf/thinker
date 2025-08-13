@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 import torch
 import gymnasium as gym
-from gym import spaces
+from gymnasium import spaces
 import thinker.util as util
 import time
 
@@ -203,7 +203,7 @@ def PreWrapper(env, name, flags):
         )
     if env.observation_space.dtype == np.float64:
         env = ScaledFloatFrame(env)
-    if isinstance(env.observation_space, gym.spaces.Box) and len(env.observation_space.shape) == 3:
+    if isinstance(env.observation_space, gymnasium.spaces.Box) and len(env.observation_space.shape) == 3:
         #old_env_obs_space = env.observation_space.shape        
         # 3d input, need transpose
         env = TransposeWrap(env) 
@@ -227,7 +227,7 @@ def create_env_fn(name, flags):
         fn = gym.make
         args = {"id": name}
     elif "vgdl" in name or "fmri" in name:
-        from gym.envs.registration import register
+        from gymnasium.envs.registration import register
         import os
 
         dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -246,8 +246,8 @@ def create_env_fn(name, flags):
         env_name = f'vgdl_{game_dir}_{level_name}-v0'
 
         # Unregister if already registered
-        if env_name in gym.envs.registry.keys():
-            del gym.envs.registry[env_name]
+        if env_name in gymnasium.envs.registry.keys():
+            del gymnasium.envs.registry[env_name]
 
         register(
             id=env_name,
@@ -279,7 +279,7 @@ class TransposeWrap(gym.ObservationWrapper):
     def __init__(self, env):
         super(TransposeWrap, self).__init__(env)
         old_shape = self.observation_space.shape
-        self.observation_space = gym.spaces.Box(
+        self.observation_space = gymnasium.spaces.Box(
             low=self.observation_space.low.transpose(2, 0, 1),
             high=self.observation_space.high.transpose(2, 0, 1),
             shape=(old_shape[-1], old_shape[0], old_shape[1]),
@@ -374,7 +374,7 @@ class WarpFrame(gym.ObservationWrapper):
         else:
             num_colors = 3
 
-        new_space = gym.spaces.Box(
+        new_space = gymnasium.spaces.Box(
             low=0,
             high=255,
             shape=(self._height, self._width, num_colors),
@@ -577,7 +577,7 @@ class FrameStack(gym.Wrapper):
         self.k = k
         self.frames = deque([], maxlen=k)
         shp = env.observation_space.shape
-        self.observation_space = gym.spaces.Box(
+        self.observation_space = gymnasium.spaces.Box(
             low=0,
             high=255,
             shape=(shp[:-1] + (shp[-1] * k,)),
@@ -673,7 +673,7 @@ class ScaledFloatFrame(gym.ObservationWrapper):
         # Determine if the original observation space is uint8
         self.is_uint8 = self.env.observation_space.dtype == np.uint8
         # Adjust the observation space to reflect the change in dtype
-        self.observation_space = gym.spaces.Box(
+        self.observation_space = gymnasium.spaces.Box(
             low=self.env.observation_space.low if not self.is_uint8 else 0,
             high=self.env.observation_space.high if not self.is_uint8 else 1,
             shape=self.env.observation_space.shape,
@@ -695,9 +695,9 @@ class RandomZeroActionWrapper(gym.ActionWrapper):
     def action(self, action):
         # Check if we should randomize the action
         if np.random.rand() < self.eps:
-            if isinstance(self.action_space, gym.spaces.Discrete):
+            if isinstance(self.action_space, gymnasium.spaces.Discrete):
                 return 0  # For discrete action space, action 0
-            elif isinstance(self.action_space, gym.spaces.Box):
+            elif isinstance(self.action_space, gymnasium.spaces.Box):
                 return np.zeros(self.action_space.shape)  # For continuous action space, vector of zeros
             else:
                 raise NotImplementedError("Unsupported action space for randomization")
@@ -738,7 +738,7 @@ class RepeatActionWrapper(gym.Wrapper):
         orig_obs_space = env.observation_space
         self.obs_shape = orig_obs_space.shape
         new_shape = (*self.obs_shape[:-1], self.obs_shape[-1] * repeat_action_n)
-        self.observation_space = gym.spaces.Box(
+        self.observation_space = gymnasium.spaces.Box(
             low=np.tile(orig_obs_space.low, repeat_action_n),
             high=np.tile(orig_obs_space.high, repeat_action_n),
             shape=new_shape,
@@ -789,7 +789,7 @@ class DiscretizeActionWrapper(gym.ActionWrapper):
         self.max_action = self.env.action_space.high
 
         # Ensure the original action space is a Box
-        assert isinstance(env.action_space, gym.spaces.Box), "The action space must be of type gym.spaces.Box"
+        assert isinstance(env.action_space, gymnasium.spaces.Box), "The action space must be of type gymnasium.spaces.Box"
 
         # Define the new action space as a tuple of Discrete(K) spaces
         self.action_space = spaces.Tuple([spaces.Discrete(K) for _ in range(env.action_space.shape[0])])
