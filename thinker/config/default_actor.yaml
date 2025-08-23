@@ -18,14 +18,14 @@ actor_adam_eps: 0.00000001 # eps for Adam optimizer
 return_norm_type: -1 # return norm type; -1 for no normalization, 0 for value normalization, 1 for advantage normalization, 2 for standard adv normalization
 v_trace_lamb: 1. # lambda used in v-trace
 # cost setting
-im_cost: 0.8 # cost for imaginary rewards, modified
+im_cost: 1 # cost for imaginary rewards, modified
 im_cost_anneal: true # whether to anneal the imaginary cost to 0
 cur_cost: 0. # cost for curiosity rewards - unused
 cur_cost_anneal: true # whether to anneal the curiosity cost to 0
 baseline_cost: 0.5 # cost for computing baseline
 entropy_r_cost: 0. # entropy cost added to reward
 entropy_cost: 0.001 # entropy cost for real actions
-im_entropy_cost: 0.0003 # entropy cost for imaginary actions, modified
+im_entropy_cost: 0.0005 # entropy cost for imaginary actions, modified
 autotune: false # autotune the entropy_cost and im_entropy_cost
 tar_entropy_scale: 0.4 # target policy entropy; 1 for uniform policy so it should be less than 1
 tar_im_entropy_scale: 0.4 # target imaginary policy entropy; 1 for uniform policy so it should be less than 1
@@ -87,10 +87,10 @@ xpid: '' # name of the run, automatically set if not given
 ckp: false # whether to load checkpoint; if set to true, will load checkpoint from savedir/xpid
 preload_actor: '' # path for the folder that consists ckp_actor.tar, which is used to initialize  actor
 savedir: '../logs/__project__' # base log directory
-checkpoint_interval: 10000 # frequency in real steps to save checkpoints (set to 0 to disable)
+checkpoint_interval: 250000 # frequency in real steps to save checkpoints (set to 0 to disable)
 buffer_save_size: 1 # number of episodes to save when saving buffer data
 use_wandb: True # whether to use wandb; need to have global variable WANDB_USER set to wandb user
-wandb_ckp_freq: 10000 # frequency in real steps to upload all files in the run
+wandb_ckp_freq: 0 # frequency in real steps to upload all files in the run
 policy_vis_freq: -1 # frequency in real steps to visualize the run
 policy_vis_length: 20 # length of the video visualization
 # misc
