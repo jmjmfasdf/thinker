@@ -183,7 +183,6 @@ class AFrameEncoder(nn.Module):
             x: input tensor of shape (B, C, H, W); can be state or model's encoding
         return:
             output: output tensor of shape (B, self.out_size)"""
-        print(f"[DEBUG] AFrameEncoder.forward_single INPUT: {x.shape} dtype={x.dtype}")
         assert x.dtype in [torch.float, torch.float16]
         if not self.oned_input:
             if self.firstpool:
@@ -204,7 +203,6 @@ class AFrameEncoder(nn.Module):
             x = self.res(x)
         x = self.fc(F.relu(x))
         if record_state: self.hidden_state = tile_and_concat_tensors(self.hidden_state)
-        print(f"[DEBUG] AFrameEncoder.forward_single OUTPUT: {x.shape}")
         return x
 
 class RNNEncoder(nn.Module):
@@ -621,13 +619,6 @@ class ActorNetSingle(ActorBaseNet):
             len(done.shape) == 2
         ), f"done shape should be (T, B) instead of {done.shape}"
         T, B = done.shape
-        print(f"[DEBUG] ActorNetSingle.forward INPUT - T={T}, B={B}, done.shape={done.shape}")
-        if hasattr(env_out, 'tree_reps') and env_out.tree_reps is not None:
-            print(f"[DEBUG] ActorNetSingle.forward INPUT - tree_reps.shape={env_out.tree_reps.shape}")
-        if hasattr(env_out, 'xs') and env_out.xs is not None:
-            print(f"[DEBUG] ActorNetSingle.forward INPUT - xs.shape={env_out.xs.shape}")
-        if hasattr(env_out, 'real_states') and env_out.real_states is not None:
-            print(f"[DEBUG] ActorNetSingle.forward INPUT - real_states.shape={env_out.real_states.shape}")
 
         assert len(core_state) == self.state_len, "core_state should have length %d" % self.state_len
         new_core_state = [None] * self.state_len
@@ -644,19 +635,16 @@ class ActorNetSingle(ActorBaseNet):
         last_pri = torch.flatten(env_out.last_pri, 0, 1)
         if not self.tuple_action: last_pri = last_pri.unsqueeze(-1)
         last_pri = util.encode_action(last_pri, self.pri_action_space)   
-        print(f"[DEBUG] ActorNet Data Source 1 - last_pri: {last_pri.shape}")
         final_out.append(last_pri)
 
         if not self.disable_thinker:
             last_reset = torch.flatten(env_out.last_reset, 0, 1)
             last_reset = F.one_hot(last_reset, 2)
-            print(f"[DEBUG] ActorNet Data Source 2 - last_reset: {last_reset.shape}")
             final_out.append(last_reset)
 
         reward = env_out.reward
         reward[torch.isnan(reward)] = 0.
         last_reward = torch.clamp(torch.flatten(reward, 0, 1), -1, +1).float()
-        print(f"[DEBUG] ActorNet Data Source 3 - last_reward: {last_reward.shape}")
         final_out.append(last_reward)
 
         if self.see_tree_rep:                
@@ -664,21 +652,15 @@ class ActorNetSingle(ActorBaseNet):
             tree_rep = torch.flatten(tree_rep, 0, 1)     
 
             if self.se_lstm_table:
-                print(f"[DEBUG] ActorNet Tree Rep Processing - tree_rep (before table): {tree_rep.shape}")
                 root_table = tree_rep[:, self.root_table_mask]
                 root_table = torch.flip(root_table.view(T*B, self.flags.se_query_size, -1), dims=[1])
                 root_table_rep, _ = self.tree_rep_table_lstm(root_table)
                 root_table_rep = root_table_rep[:, -1]
-                print(f"[DEBUG] ActorNet Tree Rep Processing - root_table_rep: {root_table_rep.shape}")
                 cur_table = tree_rep[:, self.cur_table_mask]
                 cur_table = torch.flip(cur_table.view(T*B, self.flags.se_query_size, -1), dims=[1])
                 cur_table_rep, _ = self.tree_rep_table_lstm(cur_table)
                 cur_table_rep = cur_table_rep[:, -1]
-                print(f"[DEBUG] ActorNet Tree Rep Processing - cur_table_rep: {cur_table_rep.shape}")
-                non_table_part = tree_rep[:, self.non_table_mask]
-                print(f"[DEBUG] ActorNet Tree Rep Processing - non_table_part: {non_table_part.shape}")
-                tree_rep = torch.concat([non_table_part, root_table_rep, cur_table_rep], dim=-1)
-                print(f"[DEBUG] ActorNet Tree Rep Processing - tree_rep (after table concat): {tree_rep.shape}")
+                tree_rep = torch.concat([tree_rep[:, self.non_table_mask], root_table_rep, cur_table_rep], dim=-1)
 
             if self.tree_rep_rnn:
                 core_state_ = core_state[self.state_idx['tree_rep']]
@@ -687,7 +669,6 @@ class ActorNetSingle(ActorBaseNet):
                 new_core_state[self.state_idx['tree_rep']] = core_state_
             else:
                 encoded_tree_rep = self.tree_rep_encoder(tree_rep)
-            print(f"[DEBUG] ActorNet Data Source 4 - tree_rep (raw): {tree_rep.shape}, encoded_tree_rep: {encoded_tree_rep.shape}")
             final_out.append(encoded_tree_rep)
         
         if self.see_h:
@@ -700,7 +681,6 @@ class ActorNetSingle(ActorBaseNet):
                     encoded_h, rnn_done, core_state_)
                 new_core_state[self.state_idx['h']] = core_state_
 
-            print(f"[DEBUG] ActorNet Data Source 5 - hs (raw): {hs.shape}, encoded_h: {encoded_h.shape}")
             final_out.append(encoded_h)                
 
         if self.see_x:
@@ -710,15 +690,12 @@ class ActorNetSingle(ActorBaseNet):
             if self.float16: encoded_x = encoded_x.float()
                 
             if self.x_rnn:
-                print(f"[DEBUG] ActorNet Data Source 6a - xs (raw): {xs.shape}, encoded_x (pre-concat): {encoded_x.shape}")
                 encoded_x = torch.concat([encoded_x, last_pri, last_reset], dim=-1)
-                print(f"[DEBUG] ActorNet Data Source 6b - encoded_x (post-concat with actions): {encoded_x.shape}")
                 core_state_ = core_state[self.state_idx['x']]                
                 encoded_x, core_state_ = self.x_encoder_rnn(
                     encoded_x, rnn_done, core_state_)
                 new_core_state[self.state_idx['x']] = core_state_
             
-            print(f"[DEBUG] ActorNet Data Source 6c - xs (raw): {xs.shape}, encoded_x (final): {encoded_x.shape}")
             final_out.append(encoded_x)
 
         if self.see_real_state:
@@ -727,31 +704,18 @@ class ActorNetSingle(ActorBaseNet):
                 new_core_state[self.state_idx['r']] = core_state_
             new_core_state[self.state_idx['pre_encoded_real_state']] = (pre_encoded_real_state[-B:],)
             new_core_state[self.state_idx['encoded_real_state']] = (encoded_real_state[-B:],)
-            print(f"[DEBUG] ActorNet Data Source 7 - encoded_real_state: {encoded_real_state.shape}")
             final_out.append(encoded_real_state)        
 
-        print(f"[DEBUG] ActorNet BEFORE CONCAT - Number of data sources: {len(final_out)}")
-        for i, data in enumerate(final_out):
-            print(f"[DEBUG] ActorNet BEFORE CONCAT - Source {i+1}: {data.shape}")
-        final_out = torch.concat(final_out, dim=-1)
-        print(f"[DEBUG] ActorNet AFTER CONCAT - final_out: {final_out.shape}")   
+        final_out = torch.concat(final_out, dim=-1)   
 
         if self.last_layer_n > 0:
-            final_out = self.final_mlp(final_out)
-            print(f"[DEBUG] ActorNet AFTER FINAL_MLP - final_out: {final_out.shape}")     
+            final_out = self.final_mlp(final_out)     
 
         misc = {}
         if self.actor:
             # compute logits
-            print(f"[DEBUG] Policy Forward - T={T}, B={B}")
-            print(f"[DEBUG] Policy Forward - self.dim_actions={self.dim_actions}, self.num_actions={self.num_actions}")
-            print(f"[DEBUG] Policy Forward - final_out.shape={final_out.shape}")
             pri_logits = self.policy(final_out)    
-            print(f"[DEBUG] Policy Forward - pri_logits (after policy): {pri_logits.shape}")
-            print(f"[DEBUG] Policy Forward - Expected view shape: ({T*B}, {self.dim_actions}, {self.num_actions}) = {T*B * self.dim_actions * self.num_actions} elements")
-            print(f"[DEBUG] Policy Forward - Actual pri_logits elements: {pri_logits.numel()}")
             pri_logits = pri_logits.view(T*B, self.dim_actions, self.num_actions)
-            print(f"[DEBUG] Policy Forward - pri_logits (after view): {pri_logits.shape}")
             if self.ordinal: pri_logits = self.ordinal_encode(pri_logits)
             if not self.discrete_action:
                 pri_mean = pri_logits[:, :, 0]
@@ -761,13 +725,8 @@ class ActorNetSingle(ActorBaseNet):
                 pri_log_var = torch.clamp(pri_log_var, self.min_log_var, self.max_log_var)
 
             if not self.disable_thinker:
-                print(f"[DEBUG] Im_Policy Forward - final_out.shape={final_out.shape}")
                 im_logits = self.im_policy(final_out)                
-                print(f"[DEBUG] Im_Policy Forward - im_logits (after im_policy): {im_logits.shape}")
-                print(f"[DEBUG] Im_Policy Forward - Expected view shape: ({T*B}, {self.dim_actions}, {self.num_actions}) = {T*B * self.dim_actions * self.num_actions} elements")
-                print(f"[DEBUG] Im_Policy Forward - Actual im_logits elements: {im_logits.numel()}")
                 im_logits = im_logits.view(T*B, self.dim_actions, self.num_actions)
-                print(f"[DEBUG] Im_Policy Forward - im_logits (after view): {im_logits.shape}")
                 if self.ordinal: im_logits = self.ordinal_encode(im_logits)
                 if not self.discrete_action:                        
                     im_mean = im_logits[:, :, 0]
@@ -775,27 +734,15 @@ class ActorNetSingle(ActorBaseNet):
                 if not self.discrete_action:                   
                     im_log_var = torch.clamp(im_log_var, self.min_log_var, self.max_log_var)
 
-                print(f"[DEBUG] step_status original shape: {env_out.step_status.shape}")
                 im_mask = env_out.step_status <= 1 # imagainary action will be taken next
-                print(f"[DEBUG] im_mask after <= 1: {im_mask.shape}")
                 if self.discrete_action:
                     im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1).unsqueeze(-1)
-                    print(f"[DEBUG] torch.where - im_mask.shape: {im_mask.shape}")
-                    print(f"[DEBUG] torch.where - im_logits.shape: {im_logits.shape}")
-                    print(f"[DEBUG] torch.where - pri_logits.shape before where: {pri_logits.shape}")
-                    # Fix broadcasting issue by ensuring im_mask has correct shape
-                    if im_mask.shape[0] != pri_logits.shape[0]:
-                        print(f"[DEBUG] Broadcasting issue detected! Fixing im_mask shape")
-                        im_mask = im_mask[:pri_logits.shape[0]]  # Take only the needed elements
                     pri_logits = torch.where(im_mask, im_logits, pri_logits)
-                    print(f"[DEBUG] torch.where - pri_logits.shape after where: {pri_logits.shape}")
                 else:                    
                     im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1)
                     pri_mean = torch.where(im_mask, im_mean, pri_mean)
                     pri_log_var = torch.where(im_mask, im_log_var, pri_log_var)
-                print(f"[DEBUG] Reset Logits - final_out.shape={final_out.shape}")
                 reset_logits = self.reset(final_out)
-                print(f"[DEBUG] Reset Logits - reset_logits after self.reset: {reset_logits.shape}")
             else:   
                 reset_logits = None
 
@@ -821,16 +768,9 @@ class ActorNetSingle(ActorBaseNet):
 
             # sample action
             if self.discrete_action:
-                print(f"[DEBUG] Sample Action - pri_logits before sampling: {pri_logits.shape}")
                 pri = sample(pri_logits, greedy=greedy, dim=-1)
-                print(f"[DEBUG] Sample Action - pri after sampling: {pri.shape}")
-                print(f"[DEBUG] Sample Action - About to view pri_logits as ({T}, {B}, {self.dim_actions}, {self.num_actions})")
-                print(f"[DEBUG] Sample Action - Current pri_logits shape: {pri_logits.shape}, elements: {pri_logits.numel()}")
-                print(f"[DEBUG] Sample Action - Target view elements: {T * B * self.dim_actions * self.num_actions}")
                 pri_logits = pri_logits.view(T, B, self.dim_actions, self.num_actions)
-                print(f"[DEBUG] Sample Action - pri_logits after view: {pri_logits.shape}")
                 pri = pri.view(T, B, self.dim_actions)        
-                print(f"[DEBUG] Sample Action - pri after view: {pri.shape}")
                 pri_param = pri_logits
             else:
                 pri_mean = pri_mean.view(T, B, self.dim_actions)
@@ -849,15 +789,9 @@ class ActorNetSingle(ActorBaseNet):
                 pri_param = torch.stack((pri_mean, pri_log_var), dim=-1)
 
             if not self.disable_thinker:
-                print(f"[DEBUG] Reset Sample - reset_logits before sampling: {reset_logits.shape}")
                 reset = sample(reset_logits, greedy=greedy, dim=-1)
-                print(f"[DEBUG] Reset Sample - reset after sampling: {reset.shape}")
-                print(f"[DEBUG] Reset Sample - About to view reset_logits as ({T}, {B}, 2)")
-                print(f"[DEBUG] Reset Sample - Current reset_logits elements: {reset_logits.numel()}, target: {T * B * 2}")
                 reset_logits = reset_logits.view(T, B, 2)
-                print(f"[DEBUG] Reset Sample - reset_logits after view: {reset_logits.shape}")
-                reset = reset.view(T, B)
-                print(f"[DEBUG] Reset Sample - reset after view: {reset.shape}")    
+                reset = reset.view(T, B)    
             else:
                 reset = None
 
@@ -958,8 +892,6 @@ class ActorNetSingle(ActorBaseNet):
             misc=misc,
         )
         core_state = tuple(new_core_state)
-        print(f"[DEBUG] ActorNetSingle.forward OUTPUT - pri.shape={pri.shape if pri is not None else 'None'}, "
-              f"baseline.shape={baseline.shape if baseline is not None else 'None'}")
         return actor_out, core_state    
     
     def compute_encoded_real_state(self, env_out, core_state, rnn_done):
