@@ -39,6 +39,7 @@ class FrameStackedBehavioralDataLoader:
         self.data_files = self._load_data_files()
         self.current_file_idx = 0
         self.current_pos = 0
+        self.current_data = None  # Initialize current_data attribute
         
         print(f"Loaded {len(self.data_files)} data files")
         
@@ -229,6 +230,91 @@ class FrameStackedBehavioralDataLoader:
         self.current_data = None
         self._load_current_file()
     
+    def get_paired_batch(self, batch_size: int = 32) -> Optional[Dict[str, np.ndarray]]:
+        """
+        Get a batch of paired consecutive observations for BC training
+        
+        Returns:
+            Dict containing:
+            - 'obs': Current observations [B, C*stack_n, H, W]
+            - 'next_obs': Next observations [B, C*stack_n, H, W] 
+            - 'actions': Actions taken [B, action_dim]
+            - 'rewards': Rewards [B]
+        """
+        batch_obs = []
+        batch_next_obs = []
+        batch_actions = []
+        batch_rewards = []
+        
+        collected = 0
+        max_attempts = len(self.data_files) * 10  # Prevent infinite loop
+        attempts = 0
+        
+        while collected < batch_size and attempts < max_attempts:
+            attempts += 1
+            
+            if self.current_data is None:
+                self._load_current_file()
+                if self.current_data is None:
+                    self.next_file()
+                    continue
+            
+            images = self.current_data['image']  # Note: singular 'image' not 'images'
+            actions = self.current_data['action']  # Note: singular 'action' not 'actions'
+            rewards = self.current_data['reward']  # Note: singular 'reward' not 'rewards'
+            is_first = self.current_data['is_first']
+            is_terminal = self.current_data['is_terminal']
+            
+            # Need at least frame_stack_n + 1 frames for paired observation
+            min_length = self.frame_stack_n + 1
+            if len(images) < min_length + self.current_pos:
+                self.next_file()
+                continue
+            
+            # Get current and next timesteps
+            curr_idx = self.current_pos + self.frame_stack_n - 1  # Account for frame stacking
+            next_idx = curr_idx + 1
+            
+            # Skip if next frame is first frame (episode boundary)
+            if next_idx < len(is_first) and is_first[next_idx]:
+                self.current_pos += 1
+                continue
+                
+            # Skip if current frame is terminal
+            if curr_idx < len(is_terminal) and is_terminal[curr_idx]:
+                self.current_pos += 1
+                continue
+            
+            # Create frame stacks
+            curr_obs = self._create_frame_stack(images, curr_idx)
+            next_obs = self._create_frame_stack(images, next_idx)
+            
+            # Get action and reward
+            action = actions[curr_idx]
+            reward = rewards[curr_idx]
+            
+            batch_obs.append(curr_obs)
+            batch_next_obs.append(next_obs)
+            batch_actions.append(action)
+            batch_rewards.append(reward)
+            
+            collected += 1
+            self.current_pos += 1
+            
+            # Check if we've exhausted current file
+            if self.current_pos + self.frame_stack_n >= len(images):
+                self.next_file()
+        
+        if collected == 0:
+            return None
+            
+        return {
+            'obs': np.stack(batch_obs, axis=0),           # [B, C*stack_n, H, W]
+            'next_obs': np.stack(batch_next_obs, axis=0), # [B, C*stack_n, H, W]
+            'actions': np.stack(batch_actions, axis=0),   # [B, action_dim]
+            'rewards': np.stack(batch_rewards, axis=0)    # [B]
+        }
+
     def reset(self):
         """Reset to beginning of dataset"""
         self.current_file_idx = 0

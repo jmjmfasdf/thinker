@@ -227,6 +227,20 @@ def add_parse(filename, parser=None, prefix=''):
         except:
             # if there is dulplicate key, just ignore
             pass
+    # Add BC (Behavioral Cloning) specific arguments
+    try:
+        parser.add_argument('--bc_clone', action='store_true', help='Enable behavioral cloning training')
+        parser.add_argument('--bc_epochs', type=int, default=100, help='Number of BC training epochs')
+        parser.add_argument('--bc_lr', type=float, default=0.0001, help='BC learning rate')
+        parser.add_argument('--bc_batch_size', type=int, default=32, help='BC batch size')
+        parser.add_argument('--bc_subjects', type=str, default='1,2,3', help='Comma-separated subject IDs for BC')
+        parser.add_argument('--bc_game_id', type=int, default=1, help='Game ID for BC (0: Enduro, 1: Pong, 2: Space Invaders)')
+        parser.add_argument('--bc_data_path', type=str, default='../behavioral_data_4kframe_legacy', help='Path to BC data')
+        parser.add_argument('--bc_save_interval', type=int, default=10, help='Save BC model every N epochs')
+    except:
+        # If arguments already exist, ignore
+        pass
+    
     return parser
 
 def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
@@ -258,7 +272,12 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
     # Check for command line argument overrides and apply them
     for key in config.keys():
         if key in kwargs and kwargs[key] is not None:
-            config[key] = kwargs[key]            
+            config[key] = kwargs[key]
+    
+    # Add any additional kwargs that are not in the default config (e.g., BC arguments)
+    for key, value in kwargs.items():
+        if key not in config and value is not None:
+            config[key] = value            
 
     # Convert dictionary to named tuple
     flags = argparse.Namespace(**config)    

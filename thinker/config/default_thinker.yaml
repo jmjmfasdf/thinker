@@ -84,7 +84,7 @@ noise_mlp: false # use 2-layer mlp to compress noise
 # general wrapper setting
 envpool: false # whether to use env pool (only available for atari)
 # atari-specific setting
-grayscale: false # whether to apply grayscale for atari
+grayscale: True # whether to apply grayscale for atari
 frame_stack_n: 4 # number of frame stacking for atari
 # sokoban-specific setting
 detect_dan_num: 0 # number of dangerous location in Sokoban

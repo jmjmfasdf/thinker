@@ -1211,7 +1211,9 @@ class ModelNet(BaseNet):
         if self.reward_clip > 0.:
             if rs is not None:
                 rs[:, :, 0] = torch.clamp(rs[:, :, 0], -self.reward_clip, +self.reward_clip)         
-            assert not vs.requires_grad, "grad needs to be disabled at inference mode"
+            # Only check gradient in eval mode, allow gradients during training
+            if not self.training:
+                assert not vs.requires_grad, "grad needs to be disabled at inference mode"
             vs[:, :, 0] = torch.clamp(vs[:, :, 0], -self.value_clip, +self.value_clip)
         return DualNetOut(
             rs=rs,
