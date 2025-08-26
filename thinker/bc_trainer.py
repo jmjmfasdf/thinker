@@ -7,6 +7,9 @@ This module provides BC training functionality to be integrated with the main tr
 
 import os
 import time
+import json
+import yaml
+import traceback
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -237,128 +240,222 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
     print(f"Model parameters: {sum(p.numel() for p in model_net.parameters()):,}")
     print(f"Actor parameters: {sum(p.numel() for p in actor_net.parameters()):,}")
     
-    # Training loop
-    print(f"\nStarting training for {flags.bc_epochs} epochs...")
+    # Training loop - Each epoch is now 1 batch (32 transitions)
+    print(f"\nStarting BC training for {flags.bc_epochs} steps...")
+    print(f"Each step processes {flags.bc_batch_size} transitions")
+    print(f"Logging every step, saving every 100 steps")
+    
+    # Get the log directory from flags and ensure it's at the project root level
+    log_dir = getattr(flags, 'savedir', './logs/thinker')
+    # Get absolute path and go up from /thinker/thinker to /thinker
+    current_dir = os.path.abspath('.')  # /home/jmme425/thinker/thinker
+    project_root = os.path.dirname(current_dir)  # /home/jmme425/thinker
+    bc_log_dir = os.path.join(project_root, 'logs', 'thinker', 'bc_checkpoints')
+    os.makedirs(bc_log_dir, exist_ok=True)
+    print(f"BC checkpoints will be saved to: {bc_log_dir}")
+    
+    # Save config file to bc_checkpoints directory
+    config_path = os.path.join(bc_log_dir, 'config_c.yaml')
+    with open(config_path, 'w') as outfile:
+        yaml.dump(vars(flags), outfile)
+    print(f"Wrote BC config file to {config_path}")
+    
+    # Save meta.json for BC training
+    meta_info = {
+        'training_type': 'behavioral_cloning',
+        'model_net_params': sum(p.numel() for p in model_net.parameters()),
+        'actor_net_params': sum(p.numel() for p in actor_net.parameters()),
+        'bc_epochs': flags.bc_epochs,
+        'bc_batch_size': flags.bc_batch_size,
+        'bc_lr': flags.bc_lr,
+        'bc_subjects': flags.bc_subjects,
+        'bc_game_id': flags.bc_game_id,
+        'preload_path': flags.preload,
+        'start_time': time.strftime('%Y-%m-%d %H:%M:%S')
+    }
+    meta_path = os.path.join(bc_log_dir, 'meta.json')
+    with open(meta_path, 'w') as f:
+        json.dump(meta_info, f, indent=2)
+    print(f"Wrote BC meta file to {meta_path}")
+    
+    # Save meta_model.json for model-specific info
+    meta_model_info = {
+        'model_type': 'ModelNet + ActorNet',
+        'model_parameters': sum(p.numel() for p in model_net.parameters()),
+        'actor_parameters': sum(p.numel() for p in actor_net.parameters()),
+        'frame_stack_n': flags.frame_stack_n,
+        'grayscale': flags.grayscale,
+        'env_n': flags.env_n,
+        'rec_t': flags.rec_t,
+        'has_action_seq': getattr(flags, 'has_action_seq', False),
+        'max_depth': flags.max_depth,
+        'reset_mode': getattr(flags, 'reset_mode', 0),
+        'tree_rep_size': 11 + 6 * 10 + flags.rec_t + (flags.max_depth * 6 + 6 if getattr(flags, 'has_action_seq', False) and getattr(flags, 'reset_mode', 0) == 0 else 0)
+    }
+    meta_model_path = os.path.join(bc_log_dir, 'meta_model.json')
+    with open(meta_model_path, 'w') as f:
+        json.dump(meta_model_info, f, indent=2)
+    print(f"Wrote BC model meta file to {meta_model_path}")
     
     best_loss = float('inf')
     epoch_losses = []
     
-    for epoch in range(flags.bc_epochs):
-        epoch_start = time.time()
+    for step in range(flags.bc_epochs):
+        step_start = time.time()
         
-        # Reset data loader
-        bc_loader.reset()
-        
-        epoch_vpn_losses = []
-        epoch_actor_losses = []
-        epoch_total_losses = []
-        
-        batch_count = 0
-        
-        # Training batches for this epoch
-        while True:
+        # Get one batch (= one step in new definition)
+        batch_data = bc_loader.get_paired_batch(batch_size=flags.bc_batch_size)
+        if batch_data is None:
+            # Reset data loader if we've exhausted all data
+            bc_loader.reset()
             batch_data = bc_loader.get_paired_batch(batch_size=flags.bc_batch_size)
             if batch_data is None:
+                print("ERROR: Could not load any batch data")
                 break
-            
-            batch_count += 1
-            
-            # Zero gradients
-            model_optimizer.zero_grad()
-            actor_optimizer.zero_grad()
-            
-            try:
-                # Forward pass
-                outputs = run_bc_training_step(model_net, actor_net, batch_data, flags, device)
-                
-                # Compute losses
-                losses = compute_bc_losses(
-                    outputs['model_out'],
-                    outputs['actor_out'],
-                    outputs['target_actions'],
-                    device
-                )
-                
-                vpn_loss = losses['vpn_loss']
-                actor_loss = losses['actor_loss']
-                total_loss = vpn_loss + actor_loss
-                
-                # Backward pass
-                total_loss.backward()
-                
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(model_net.parameters(), max_norm=1.0)
-                torch.nn.utils.clip_grad_norm_(actor_net.parameters(), max_norm=1.0)
-                
-                # Optimizer steps
-                model_optimizer.step()
-                actor_optimizer.step()
-                
-                # Record losses
-                epoch_vpn_losses.append(vpn_loss.item())
-                epoch_actor_losses.append(actor_loss.item())
-                epoch_total_losses.append(total_loss.item())
-                
-                # Print progress every batch (as requested)
-                print(f"  Epoch {epoch+1:3d}, Batch {batch_count:3d}: "
-                      f"VPN: {vpn_loss.item():.4f}, "
-                      f"Actor: {actor_loss.item():.4f}, "
-                      f"Total: {total_loss.item():.4f}")
-                
-            except Exception as e:
-                print(f"  Error in batch {batch_count}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
         
-        # Epoch summary
-        epoch_time = time.time() - epoch_start
-        
-        if epoch_vpn_losses:
-            avg_vpn_loss = np.mean(epoch_vpn_losses)
-            avg_actor_loss = np.mean(epoch_actor_losses)
-            avg_total_loss = np.mean(epoch_total_losses)
+        # Zero gradients
+        model_optimizer.zero_grad()
+        actor_optimizer.zero_grad()
             
-            epoch_losses.append({
-                'epoch': epoch + 1,
-                'vpn_loss': avg_vpn_loss,
-                'actor_loss': avg_actor_loss,
-                'total_loss': avg_total_loss,
-                'batches': batch_count,
-                'time': epoch_time
-            })
+        try:
+            # Forward pass
+            outputs = run_bc_training_step(model_net, actor_net, batch_data, flags, device)
             
-            print(f"Epoch {epoch+1:3d}/{flags.bc_epochs} ({epoch_time:.1f}s, {batch_count} batches): "
-                  f"VPN: {avg_vpn_loss:.4f}, Actor: {avg_actor_loss:.4f}, Total: {avg_total_loss:.4f}")
+            # Compute losses
+            losses = compute_bc_losses(
+                outputs['model_out'],
+                outputs['actor_out'],
+                outputs['target_actions'],
+                device
+            )
             
-            # Log to logger if available
-            if logger:
-                logger.info(f"BC Epoch {epoch+1}: VPN={avg_vpn_loss:.4f}, Actor={avg_actor_loss:.4f}, Total={avg_total_loss:.4f}")
+            vpn_loss = losses['vpn_loss']
+            actor_loss = losses['actor_loss']
+            total_loss = vpn_loss + actor_loss
             
-            # Save best model
-            if avg_total_loss < best_loss:
-                best_loss = avg_total_loss
-                best_save_path = os.path.join(flags.savedir, 'bc_checkpoints', 'best_bc_model.pt')
-                save_bc_checkpoint(model_net, actor_net, optimizers, epoch + 1, epoch_losses, best_save_path, flags)
-                print(f"  → New best model saved (loss: {best_loss:.4f})")
-        else:
-            print(f"Epoch {epoch+1:3d}/{flags.bc_epochs}: No valid batches")
-        
-        # Save periodic checkpoint
-        if (epoch + 1) % flags.bc_save_interval == 0:
-            save_path = os.path.join(flags.savedir, 'bc_checkpoints', f'epoch_{epoch+1:03d}.pt')
-            save_bc_checkpoint(model_net, actor_net, optimizers, epoch + 1, epoch_losses, save_path, flags)
+            # Backward pass
+            total_loss.backward()
+            
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model_net.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(actor_net.parameters(), max_norm=1.0)
+            
+            # Optimizer steps
+            model_optimizer.step()
+            actor_optimizer.step()
+            
+            # Record losses
+            vpn_loss_val = vpn_loss.item()
+            actor_loss_val = actor_loss.item()
+            total_loss_val = total_loss.item()
+            epoch_losses.append(total_loss_val)
+            
+            if total_loss_val < best_loss:
+                best_loss = total_loss_val
+            
+            # Log every step
+            step_time = time.time() - step_start
+            print(f"Step {step+1:4d}/{flags.bc_epochs}: "
+                  f"VPN: {vpn_loss_val:.4f}, "
+                  f"Actor: {actor_loss_val:.4f}, "
+                  f"Total: {total_loss_val:.4f}, "
+                  f"Best: {best_loss:.4f} "
+                  f"({step_time:.3f}s)")
+            
+            # Save every 100 steps
+            if (step + 1) % 100 == 0:
+                # Save model checkpoint (compatible with visual.py)
+                model_save_path = os.path.join(bc_log_dir, 'ckp_model.tar')
+                model_checkpoint_data = {
+                    'step': step + 1,
+                    'real_step': step + 1,
+                    'model_net_state_dict': model_net.state_dict(),
+                    'model_net_optimizer_p_state_dict': model_optimizer.state_dict(),
+                    'flags': vars(flags)
+                }
+                
+                # Save with temporary file then rename (atomic operation)
+                torch.save(model_checkpoint_data, model_save_path + ".tmp")
+                os.replace(model_save_path + ".tmp", model_save_path)
+                
+                # Also save step-specific checkpoint
+                step_model_save_path = os.path.join(bc_log_dir, f'ckp_model.tar_step_{step+1}')
+                torch.save(model_checkpoint_data, step_model_save_path + ".tmp")
+                os.replace(step_model_save_path + ".tmp", step_model_save_path)
+                
+                # Save actor checkpoint (following original learn_actor.py structure)
+                actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
+                actor_checkpoint_data = {
+                    'step': step + 1,
+                    'real_step': step + 1,
+                    'actor_net_state_dict': actor_net.state_dict(),
+                    'actor_net_optimizer_state_dict': actor_optimizer.state_dict(),
+                    'flags': vars(flags)
+                }
+                
+                # Save with temporary file then rename (atomic operation)
+                torch.save(actor_checkpoint_data, actor_save_path + ".tmp")
+                os.replace(actor_save_path + ".tmp", actor_save_path)
+                
+                # Also save step-specific checkpoint
+                step_actor_save_path = os.path.join(bc_log_dir, f'ckp_actor.tar_step_{step+1}')
+                torch.save(actor_checkpoint_data, step_actor_save_path + ".tmp")
+                os.replace(step_actor_save_path + ".tmp", step_actor_save_path)
+                
+                print(f"  → Saved checkpoints: ckp_model.tar, ckp_actor.tar (step {step+1})")
+                
+        except Exception as e:
+            print(f"  Error in step {step+1}: {e}")
+            traceback.print_exc()
+            continue
+
+
     
-    # Final save
-    final_save_path = os.path.join(flags.savedir, 'bc_checkpoints', 'final_bc_model.pt')
-    save_bc_checkpoint(model_net, actor_net, optimizers, flags.bc_epochs, epoch_losses, final_save_path, flags)
+    # Save final checkpoint
+    print(f"\nSaving final checkpoints...")
     
-    print(f"\n=== BC Training Complete ===")
+    # Save final model checkpoint
+    model_save_path = os.path.join(bc_log_dir, 'ckp_model.tar')
+    model_checkpoint_data = {
+        'step': flags.bc_epochs,
+        'real_step': flags.bc_epochs,
+        'model_net_state_dict': model_net.state_dict(),
+        'model_net_optimizer_p_state_dict': model_optimizer.state_dict(),
+        'flags': vars(flags)
+    }
+    torch.save(model_checkpoint_data, model_save_path + ".tmp")
+    os.replace(model_save_path + ".tmp", model_save_path)
+    
+    # Save final step-specific model checkpoint
+    final_model_save_path = os.path.join(bc_log_dir, f'ckp_model.tar_step_{flags.bc_epochs}_final')
+    torch.save(model_checkpoint_data, final_model_save_path + ".tmp")
+    os.replace(final_model_save_path + ".tmp", final_model_save_path)
+    
+    # Save final actor checkpoint
+    actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
+    actor_checkpoint_data = {
+        'step': flags.bc_epochs,
+        'real_step': flags.bc_epochs,
+        'actor_net_state_dict': actor_net.state_dict(),
+        'actor_net_optimizer_state_dict': actor_optimizer.state_dict(),
+        'flags': vars(flags)
+    }
+    torch.save(actor_checkpoint_data, actor_save_path + ".tmp")
+    os.replace(actor_save_path + ".tmp", actor_save_path)
+    
+    # Save final step-specific actor checkpoint
+    final_actor_save_path = os.path.join(bc_log_dir, f'ckp_actor.tar_step_{flags.bc_epochs}_final')
+    torch.save(actor_checkpoint_data, final_actor_save_path + ".tmp")
+    os.replace(final_actor_save_path + ".tmp", final_actor_save_path)
+    
+    # Final summary
+    print(f"\nBC Training completed!")
+    print(f"Total steps: {len(epoch_losses)}")
+    if epoch_losses:
+        print(f"Final loss: {epoch_losses[-1]:.4f}")
     print(f"Best loss: {best_loss:.4f}")
-    print(f"Final model: {final_save_path}")
-    
-    if logger:
-        logger.info(f"BC Training completed. Best loss: {best_loss:.4f}")
+    print(f"Final checkpoints saved: ckp_model.tar, ckp_actor.tar")
+    print(f"All checkpoints saved in: {bc_log_dir}")
     
     return best_loss, epoch_losses
 

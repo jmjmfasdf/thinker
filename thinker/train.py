@@ -214,7 +214,13 @@ if __name__ == "__main__":
                         flags=flags
                     ).to(device)
                 
-                model_net.load_state_dict(model_checkpoint['model_net_state_dict'])
+                                   # Try different possible keys for model state dict
+                    if 'model_net_state_dict' in model_checkpoint:
+                        model_net.load_state_dict(model_checkpoint['model_net_state_dict'])
+                    elif 'model_state_dict' in model_checkpoint:
+                        model_net.load_state_dict(model_checkpoint['model_state_dict'])
+                    else:
+                        logger.warning(f"No suitable model state dict found. Available keys: {list(model_checkpoint.keys())}")
                 logger.info("Model weights loaded successfully")
             else:
                 logger.warning(f"Model checkpoint not found at {model_path}")
