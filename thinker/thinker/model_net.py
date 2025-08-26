@@ -277,6 +277,8 @@ class FrameEncoder(nn.Module):
         return x
 
     def forward(self, x, done, actions, state={}, flatten=False, depth=0):        
+        print(f"[DEBUG] FrameEncoder.forward INPUT: x.shape={x.shape}, done.shape={done.shape if done is not None else 'None'}, "
+              f"actions.shape={actions.shape if actions is not None else 'None'}")
         new_state = {}
         x = self.forward_pre_mem(x=x, actions=actions, flatten=flatten, depth=depth)        
         if self.has_memory:
@@ -291,6 +293,7 @@ class FrameEncoder(nn.Module):
                 x, enc_state = self.rnn(x, done, enc_state)                
                 if not flatten: x = x.squeeze(0)
                 for i in range(self.per_state_len): new_state[f"per_{self.prefix}_{i}"] = enc_state[i]
+        print(f"[DEBUG] FrameEncoder.forward OUTPUT: x.shape={x.shape}")
         return x, new_state
 
     def decode(self, z, flatten=False):
@@ -672,6 +675,8 @@ class SRNet(nn.Module):
             (Recall we use the transition notation: s_t, a_t, r_{t+1}, s_{t+1}, ...)
         """
         k, b, *_ = actions.shape
+        print(f"[DEBUG] SRNet.forward INPUT: env_state_norm.shape={env_state_norm.shape}, done.shape={done.shape if done is not None else 'None'}, "
+              f"actions.shape={actions.shape}, k={k}, b={b}")
         k = k - 1
         actions = util.encode_action(actions, self.action_space, one_hot)       
         new_state = {}
@@ -726,7 +731,7 @@ class SRNet(nn.Module):
             out = self.out(hs[t], predict_reward=True)
             outs.append(out)
 
-        return SRNetOut(
+        sr_out = SRNetOut(
             rs=util.safe_concat(outs, "rs", 0),
             r_enc_logits=util.safe_concat(outs, "r_enc_logits", 0),
             dones=util.safe_concat(outs, "dones", 0),
@@ -736,6 +741,10 @@ class SRNet(nn.Module):
             state=new_state,
             noise_loss=noise_loss,
         )
+        print(f"[DEBUG] SRNet.forward OUTPUT: rs.shape={sr_out.rs.shape if sr_out.rs is not None else 'None'}, "
+              f"xs.shape={sr_out.xs.shape if sr_out.xs is not None else 'None'}, "
+              f"dones.shape={sr_out.dones.shape if sr_out.dones is not None else 'None'}")
+        return sr_out
 
     def forward_single(self, action, state, one_hot=False, future_x=None):
         """
@@ -930,6 +939,9 @@ class VPNet(nn.Module):
                 in the form of y_{t}, y_{t+1}, y_{t+2}, ..., y_{t+k} and states with element in the shape of (B, ...)
         """
         k, b, *_ = actions.shape
+        print(f"[DEBUG] VPNet.forward INPUT: env_state_norm.shape={env_state_norm.shape if env_state_norm is not None else 'None'}, "
+              f"x0.shape={x0.shape if x0 is not None else 'None'}, xs.shape={xs.shape if xs is not None else 'None'}, "
+              f"done.shape={done.shape if done is not None else 'None'}, actions.shape={actions.shape}, k={k}, b={b}")
         k = k - 1
         device = actions.device
         assert env_state_norm is not None or x0 is not None
@@ -984,7 +996,7 @@ class VPNet(nn.Module):
             pred_zs = zs
 
         new_state["vp_h"] = h
-        return VPNetOut(
+        vp_out = VPNetOut(
             rs=util.safe_concat(outs[1:], "rs", 0),
             r_enc_logits=util.safe_concat(outs[1:], "r_enc_logits", 0),
             dones=util.safe_concat(outs[1:], "dones", 0),
@@ -997,6 +1009,10 @@ class VPNet(nn.Module):
             pred_zs=pred_zs,
             state=new_state,
         )
+        print(f"[DEBUG] VPNet.forward OUTPUT: vs.shape={vp_out.vs.shape if vp_out.vs is not None else 'None'}, "
+              f"policy.shape={vp_out.policy.shape if vp_out.policy is not None else 'None'}, "
+              f"rs.shape={vp_out.rs.shape if vp_out.rs is not None else 'None'}")
+        return vp_out
 
     def forward_single(self, action, state, x=None, one_hot=False):
         """
@@ -1125,6 +1141,8 @@ class ModelNet(BaseNet):
         """
         k, b, *_ = actions.shape
         k = k - 1
+        print(f"[DEBUG] ModelNet.forward INPUT: env_state.shape={env_state.shape}, done.shape={done.shape if done is not None else 'None'}, "
+              f"actions.shape={actions.shape}, k={k}, b={b}")
         new_state = {}
 
         env_state_norm = self.normalize(env_state)        
@@ -1213,7 +1231,7 @@ class ModelNet(BaseNet):
                 rs[:, :, 0] = torch.clamp(rs[:, :, 0], -self.reward_clip, +self.reward_clip)         
             assert not vs.requires_grad, "grad needs to be disabled at inference mode"
             vs[:, :, 0] = torch.clamp(vs[:, :, 0], -self.value_clip, +self.value_clip)
-        return DualNetOut(
+        dual_out = DualNetOut(
             rs=rs,
             dones=rd_out.dones,
             vs=vs,
@@ -1224,6 +1242,11 @@ class ModelNet(BaseNet):
             zs=vp_net_out.pred_zs,
             state=state,
         )
+        print(f"[DEBUG] ModelNet.forward OUTPUT: rs.shape={dual_out.rs.shape if dual_out.rs is not None else 'None'}, "
+              f"vs.shape={dual_out.vs.shape if dual_out.vs is not None else 'None'}, "
+              f"policy.shape={dual_out.policy.shape if dual_out.policy is not None else 'None'}, "
+              f"xs.shape={dual_out.xs.shape if dual_out.xs is not None else 'None'}")
+        return dual_out
     
     def compute_vs_loss(self, vs, v_enc_logits, target_vs):
         k, b, n = target_vs.shape
