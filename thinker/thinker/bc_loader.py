@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import random
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 import cv2
@@ -233,6 +234,7 @@ class FrameStackedBehavioralDataLoader:
     def get_paired_batch(self, batch_size: int = 32) -> Optional[Dict[str, np.ndarray]]:
         """
         Get a batch of paired consecutive observations for BC training
+        Uses improved sampling strategy for better file diversity
         
         Returns:
             Dict containing:
@@ -241,49 +243,122 @@ class FrameStackedBehavioralDataLoader:
             - 'actions': Actions taken [B, action_dim]
             - 'rewards': Rewards [B]
         """
+        return self._get_diverse_batch(batch_size)
+    
+    def _get_diverse_batch(self, batch_size: int) -> Optional[Dict[str, np.ndarray]]:
+        """
+        Improved batch sampling strategy for maximum diversity:
+        - If batch_size <= num_files: sample randomly from different files
+        - If batch_size > num_files: distribute evenly across all files
+        """
+        if len(self.data_files) == 0:
+            return None
+            
         batch_obs = []
         batch_next_obs = []
         batch_actions = []
         batch_rewards = []
         
-        collected = 0
-        max_attempts = len(self.data_files) * 10  # Prevent infinite loop
-        attempts = 0
+        num_files = len(self.data_files)
         
-        while collected < batch_size and attempts < max_attempts:
-            attempts += 1
+        if batch_size <= num_files:
+            # Case 1: More files than batch size - randomly select files
+            selected_files = random.sample(range(num_files), batch_size)
+            samples_per_file = [1] * batch_size
+            file_indices = selected_files
+        else:
+            # Case 2: More batch size than files - distribute evenly
+            base_samples = batch_size // num_files
+            extra_samples = batch_size % num_files
             
-            if self.current_data is None:
-                self._load_current_file()
-                if self.current_data is None:
-                    self.next_file()
-                    continue
+            samples_per_file = [base_samples] * num_files
+            # Distribute extra samples randomly
+            extra_file_indices = random.sample(range(num_files), extra_samples)
+            for idx in extra_file_indices:
+                samples_per_file[idx] += 1
+                
+            file_indices = list(range(num_files))
+        
+        print(f"[DEBUG] Diverse sampling: {batch_size} samples from {num_files} files")
+        print(f"[DEBUG] Samples per file: {dict(zip(file_indices, samples_per_file))}")
+        
+        # Sample from each selected file
+        for file_idx, num_samples in zip(file_indices, samples_per_file):
+            file_samples = self._sample_from_file(file_idx, num_samples)
+            if file_samples:
+                batch_obs.extend(file_samples['obs'])
+                batch_next_obs.extend(file_samples['next_obs'])
+                batch_actions.extend(file_samples['actions'])
+                batch_rewards.extend(file_samples['rewards'])
+        
+        if len(batch_obs) == 0:
+            return None
             
-            images = self.current_data['image']  # Note: singular 'image' not 'images'
-            actions = self.current_data['action']  # Note: singular 'action' not 'actions'
-            rewards = self.current_data['reward']  # Note: singular 'reward' not 'rewards'
-            is_first = self.current_data['is_first']
-            is_terminal = self.current_data['is_terminal']
+        return {
+            'obs': np.stack(batch_obs, axis=0),           # [B, C*stack_n, H, W]
+            'next_obs': np.stack(batch_next_obs, axis=0), # [B, C*stack_n, H, W]
+            'actions': np.stack(batch_actions, axis=0),   # [B, action_dim]
+            'rewards': np.stack(batch_rewards, axis=0)    # [B]
+        }
+    
+    def _sample_from_file(self, file_idx: int, num_samples: int) -> Optional[Dict[str, list]]:
+        """
+        Sample specified number of data points from a specific file
+        """
+        if file_idx >= len(self.data_files):
+            return None
             
-            # Need at least frame_stack_n + 1 frames for paired observation
-            min_length = self.frame_stack_n + 1
-            if len(images) < min_length + self.current_pos:
-                self.next_file()
-                continue
-            
-            # Get current and next timesteps
-            curr_idx = self.current_pos + self.frame_stack_n - 1  # Account for frame stacking
-            next_idx = curr_idx + 1
+        # Load the specified file
+        try:
+            data = np.load(self.data_files[file_idx])
+            images = data['image']
+            actions = data['action']
+            rewards = data['reward']
+            is_first = data['is_first']
+            is_terminal = data['is_terminal']
+        except Exception as e:
+            print(f"[WARNING] Failed to load file {self.data_files[file_idx]}: {e}")
+            return None
+        
+        min_length = self.frame_stack_n + 1
+        if len(images) < min_length:
+            return None
+        
+        # Find valid indices (not episode boundaries, not terminal)
+        valid_indices = []
+        for i in range(self.frame_stack_n - 1, len(images) - 1):
+            curr_idx = i
+            next_idx = i + 1
             
             # Skip if next frame is first frame (episode boundary)
             if next_idx < len(is_first) and is_first[next_idx]:
-                self.current_pos += 1
                 continue
                 
             # Skip if current frame is terminal
             if curr_idx < len(is_terminal) and is_terminal[curr_idx]:
-                self.current_pos += 1
                 continue
+                
+            valid_indices.append(curr_idx)
+        
+        if len(valid_indices) == 0:
+            return None
+        
+        # Randomly sample from valid indices
+        actual_samples = min(num_samples, len(valid_indices))
+        if actual_samples < len(valid_indices):
+            sampled_indices = random.sample(valid_indices, actual_samples)
+        else:
+            sampled_indices = valid_indices[:actual_samples]
+        
+        file_obs = []
+        file_next_obs = []
+        file_actions = []
+        file_rewards = []
+        
+        filename = os.path.basename(self.data_files[file_idx])
+        
+        for curr_idx in sampled_indices:
+            next_idx = curr_idx + 1
             
             # Create frame stacks
             curr_obs = self._create_frame_stack(images, curr_idx)
@@ -293,26 +368,18 @@ class FrameStackedBehavioralDataLoader:
             action = actions[curr_idx]
             reward = rewards[curr_idx]
             
-            batch_obs.append(curr_obs)
-            batch_next_obs.append(next_obs)
-            batch_actions.append(action)
-            batch_rewards.append(reward)
+            print(f"[DEBUG] File {filename}: idx={curr_idx}, action={action}")
             
-            collected += 1
-            self.current_pos += 1
-            
-            # Check if we've exhausted current file
-            if self.current_pos + self.frame_stack_n >= len(images):
-                self.next_file()
+            file_obs.append(curr_obs)
+            file_next_obs.append(next_obs)
+            file_actions.append(action)
+            file_rewards.append(reward)
         
-        if collected == 0:
-            return None
-            
         return {
-            'obs': np.stack(batch_obs, axis=0),           # [B, C*stack_n, H, W]
-            'next_obs': np.stack(batch_next_obs, axis=0), # [B, C*stack_n, H, W]
-            'actions': np.stack(batch_actions, axis=0),   # [B, action_dim]
-            'rewards': np.stack(batch_rewards, axis=0)    # [B]
+            'obs': file_obs,
+            'next_obs': file_next_obs,
+            'actions': file_actions,
+            'rewards': file_rewards
         }
 
     def reset(self):
