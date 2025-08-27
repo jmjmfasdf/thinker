@@ -58,6 +58,7 @@ def compute_bc_losses(model_out, actor_out, target_actions, device):
     
     # ActorNet loss: Cross entropy between Actor policy and target actions
     # IMPORTANT: Use pri_param (logits) instead of action_prob (softmax probabilities)
+    # NOTE: Only primary action is used for BC loss - reset actions are NOT considered in real step
     if hasattr(actor_out, 'pri_param') and actor_out.pri_param is not None:
         # pri_param contains the raw logits [T, B, num_actions] or [T, B, num_actions, 1]
         actor_logits = actor_out.pri_param  # Shape: [T, B, num_actions] or [T, B, num_actions, 1]
@@ -216,6 +217,7 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
             state=model_net.initial_state(batch_size=batch_size, device=device)  # Fresh state
         )
         model_state = initial_model_out.state
+        initial_model_state = {k: v.clone() if hasattr(v, 'clone') else v for k, v in model_state.items()} if isinstance(model_state, dict) else model_state
         
         # Get initial xs and hs from real observation
         initial_xs = initial_model_out.xs[0] if initial_model_out.xs is not None else None
@@ -364,6 +366,42 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
         # Sample action for next step (using argmax for consistency)
         action_probs = actor_out.action_prob[0]  # [B, num_actions] - this is softmax probabilities
         next_action = torch.argmax(action_probs, dim=-1)  # [B]
+        
+        # Check for reset action from ActorNet (ONLY in imaginary steps)
+        # NOTE: Reset actions are only valid during imagination, NOT in real steps
+        reset_action = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        if hasattr(actor_out, 'reset') and actor_out.reset is not None:
+            reset_action = actor_out.reset[0] > 0.5  # [B] boolean mask
+        
+        # Check for force reset conditions (following cenv.pyx logic)
+        max_depth = getattr(flags, 'max_depth', 40)
+        force_reset = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        
+        if max_depth > 0:
+            force_reset = rollout_depth >= max_depth
+        
+        # Apply reset logic: reset OR force_reset
+        should_reset = reset_action | force_reset
+        
+        # Handle reset: return to root state (following cenv.pyx status == 5 logic)
+        if should_reset.any():
+            print(f"[DEBUG] Reset triggered for batches: {should_reset.nonzero().flatten().tolist()}")
+            # Reset rollout_depth to 0 for reset batches (but keep cur_t progressing)
+            rollout_depth[should_reset] = 0
+            # Return to root states
+            if initial_xs is not None:
+                current_xs[should_reset] = initial_xs[should_reset]
+            if initial_hs is not None:
+                current_hs[should_reset] = initial_hs[should_reset]
+            # Reset model state to initial state for reset batches
+            if isinstance(model_state, dict) and isinstance(initial_model_state, dict):
+                for key in model_state:
+                    if key in initial_model_state and hasattr(model_state[key], 'clone'):
+                        # Reset specific batches to initial model state
+                        reset_indices = should_reset.nonzero().flatten()
+                        if len(reset_indices) > 0:
+                            model_state[key][reset_indices] = initial_model_state[key][reset_indices].clone()
+        
         last_action = next_action
         
         # Debug: Check if all batches predict same action
@@ -416,6 +454,8 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     env_out.reward = torch.zeros(1, batch_size, 2, device=device)
     
     # Final actor forward pass for BC loss
+    # NOTE: This is the REAL step - no reset actions are processed here
+    # Only primary actions are considered for BC loss computation
     final_actor_out, _ = actor_net.forward(
         env_out=env_out,
         core_state=actor_core_state
