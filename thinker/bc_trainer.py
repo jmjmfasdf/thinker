@@ -293,7 +293,7 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
         rollout_depth.fill_(step + 1)  # Same as cur_t for imaginary steps
         
         # 1. ModelNet forward pass FIRST (get SRN + VPN outputs)
-        # This follows cenv.pyx order: ModelNet → tree_reps update → ActorNet
+        # This follows cenv.pyx order: ModelNet → tree_reps update → ActorNet → next_action
         with torch.no_grad():
             model_out = model_net.forward_single(
                 state=model_state,
@@ -353,7 +353,8 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
         env_out.last_reset = torch.zeros(1, batch_size, dtype=torch.long, device=device)
         env_out.reward = torch.zeros(1, batch_size, 2, device=device)
         
-        # 4. Actor forward pass to get next action (no gradients for imaginary steps)
+        # 4. ActorNet forward pass to get next action (no gradients for imaginary steps)
+        # This action will be used for the NEXT imaginary step's ModelNet input
         with torch.no_grad():
             actor_out, actor_core_state = actor_net.forward(
                 env_out=env_out,
