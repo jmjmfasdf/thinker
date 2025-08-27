@@ -197,7 +197,8 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
             obs = torch.tensor(obs_data, dtype=torch.uint8, device=device).float() / 255.0
             print(f"[DEBUG] Converted uint8 to float32 for ModelNet")
     
-    target_actions = torch.tensor(batch_data['actions'][:, 0], dtype=torch.long, device=device)  # [B]
+    # Note: target_actions already properly converted above from one-hot/indices
+    # No need to re-assign here - this was causing the double assignment bug
     
     batch_size = obs.shape[0]
     rec_t = flags.rec_t
@@ -230,6 +231,12 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     
     # Initialize tree_reps with proper structure FIRST
     tree_reps = initialize_tree_reps(batch_size, num_actions, flags, device)
+    
+    # Set initial root action to match actual target actions for each batch
+    tree_reps[:, :num_actions] = 0.0  # Clear default
+    for i in range(batch_size):
+        if target_actions[i] < num_actions:
+            tree_reps[i, target_actions[i]] = 1.0
     
     # Update root statistics with initial ModelNet outputs
     if initial_model_out.policy is not None and initial_model_out.vs is not None:
@@ -277,6 +284,9 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     xs_history = [initial_xs]
     hs_history = [initial_hs]
     
+    # Initialize last_reset tracking for ActorNet input  
+    last_reset = torch.zeros(batch_size, dtype=torch.long, device=device)
+    
     # Use actual BC target action for first imaginary step (not dummy zeros!)
     last_action = target_actions.clone()  # Use real BC action as starting point
     
@@ -288,11 +298,12 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     for step in range(rec_t - 1):
         print(f"[DEBUG] Imaginary step {step+1}/{rec_t-1}")
         
-        # IMPORTANT: Update cur_t and rollout_depth CORRECTLY
-        # cenv.pyx logic: cur_t[i] += 1 in each imaginary step, so cur_t = step + 1
-        # rollout_depth also increases: rollout_depth[i] += 1 
-        cur_t.fill_(step + 1)  # step=0 -> cur_t=1, step=1 -> cur_t=2, etc.
-        rollout_depth.fill_(step + 1)  # Same as cur_t for imaginary steps
+        # IMPORTANT: Update cur_t and rollout_depth per batch CORRECTLY
+        # cenv.pyx logic: cur_t[i] += 1 for ALL batches in each imaginary step
+        # rollout_depth[i] += 1 for each batch, but resets to 0 on reset
+        cur_t += 1  # All batches increment cur_t independently
+        # rollout_depth increments for all batches, but may be reset individually later
+        rollout_depth += 1
         
         # 1. ModelNet forward pass FIRST (get SRN + VPN outputs)
         # This follows cenv.pyx order: ModelNet → tree_reps update → ActorNet → next_action
@@ -307,17 +318,25 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
         xs = model_out.xs[0] if model_out.xs is not None else None  # [B, C, H, W]
         hs = model_out.hs[0] if model_out.hs is not None else None  # [B, ...]
         
-        # Update current xs/hs
+        # Update current xs/hs (will be selectively reset later if needed)
         if xs is not None:
-            current_xs = xs
+            current_xs = xs.clone()  # Use clone to avoid reference issues
         if hs is not None:
-            current_hs = hs
+            current_hs = hs.clone()  # Use clone to avoid reference issues
             
         xs_history.append(current_xs)
         hs_history.append(current_hs)
         
-        # Update model state
-        model_state = model_out.state
+        # Update model state (will be selectively reset later if needed)
+        if isinstance(model_out.state, dict):
+            # Deep copy to avoid reference issues
+            for key in model_out.state:
+                if hasattr(model_out.state[key], 'clone'):
+                    model_state[key] = model_out.state[key].clone()
+                else:
+                    model_state[key] = model_out.state[key]
+        else:
+            model_state = model_out.state
         
         # 2. Update tree_reps with complete ModelNet outputs (SRN + VPN)
         # This creates the complete tree_reps that ActorNet will use
@@ -352,7 +371,7 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
         env_out.done = torch.zeros(1, batch_size, dtype=torch.bool, device=device)
         env_out.real_done = torch.zeros(1, batch_size, dtype=torch.bool, device=device)
         env_out.last_pri = last_action.unsqueeze(0)
-        env_out.last_reset = torch.zeros(1, batch_size, dtype=torch.long, device=device)
+        env_out.last_reset = last_reset.unsqueeze(0)  # [T=1, B] pass actual reset history
         env_out.reward = torch.zeros(1, batch_size, 2, device=device)
         
         # 4. ActorNet forward pass to get next action (no gradients for imaginary steps)
@@ -371,7 +390,11 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
         # NOTE: Reset actions are only valid during imagination, NOT in real steps
         reset_action = torch.zeros(batch_size, dtype=torch.bool, device=device)
         if hasattr(actor_out, 'reset') and actor_out.reset is not None:
-            reset_action = actor_out.reset[0] > 0.5  # [B] boolean mask
+            reset_probs = actor_out.reset[0]
+            reset_action = reset_probs > 0.5  # [B] boolean mask
+            if reset_action.any():
+                print(f"[DEBUG] Step {step+1}: Reset action detected - probs: {reset_probs.cpu().numpy()}")
+                print(f"[DEBUG] Step {step+1}: Reset triggered for batches: {reset_action.nonzero().flatten().tolist()}")
         
         # Check for force reset conditions (following cenv.pyx logic)
         max_depth = getattr(flags, 'max_depth', 40)
@@ -388,6 +411,14 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
             print(f"[DEBUG] Reset triggered for batches: {should_reset.nonzero().flatten().tolist()}")
             # Reset rollout_depth to 0 for reset batches (but keep cur_t progressing)
             rollout_depth[should_reset] = 0
+            # Record reset action for next ActorNet call
+            last_reset[should_reset] = 1
+            
+            # Update tree_reps reset flag for batches that reset
+            # Following cenv.pyx: result[i, idx4] = reset[i]  
+            idx4 = num_actions * 5 + 6 + num_actions * 5 + 3  # Reset flag position
+            tree_reps[should_reset, idx4] = 1.0
+            
             # Return to root states
             if initial_xs is not None:
                 current_xs[should_reset] = initial_xs[should_reset]
@@ -401,6 +432,9 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
                         reset_indices = should_reset.nonzero().flatten()
                         if len(reset_indices) > 0:
                             model_state[key][reset_indices] = initial_model_state[key][reset_indices].clone()
+        else:
+            # No reset occurred
+            last_reset.fill_(0)
         
         last_action = next_action
         
@@ -412,8 +446,20 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
             for i in range(min(3, batch_size)):
                 probs = action_probs[i].cpu().numpy()
                 print(f"  Batch[{i}] action_probs: {probs}")
+                
+                # Also show reset action probability if available
+                if hasattr(actor_out, 'reset') and actor_out.reset is not None:
+                    reset_prob = actor_out.reset[0][i].cpu().numpy()
+                    print(f"  Batch[{i}] reset_prob: {reset_prob:.6f}")
+                    
+
         else:
             print(f"[DEBUG] Step {step+1}: Diverse actions predicted: {unique_actions.cpu().numpy()}")
+            
+            # Still show reset info for diverse actions case
+            if hasattr(actor_out, 'reset') and actor_out.reset is not None:
+                reset_probs = actor_out.reset[0].cpu().numpy()
+                print(f"  Reset probabilities: {reset_probs}")
         
         print(f"[DEBUG] Step {step+1}: Generated action distribution, next_action shape: {next_action.shape}")
     
@@ -424,8 +470,9 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     
     # Final tree_reps update for real step
     # In cenv.pyx, real step resets: cur_t[i] = 0, rollout_depth[i] = 0
-    cur_t.fill_(0)  # Real step (reset)
-    rollout_depth.fill_(0)  # Real step (reset)
+    # All batches reset to 0 for real step (this is correct behavior)
+    cur_t.zero_()  # Real step: all batches reset
+    rollout_depth.zero_()  # Real step: all batches reset
     tree_reps = update_tree_reps_step(
         tree_reps, cur_t, rollout_depth, last_action, num_actions, flags, device,
         model_out=None, actor_out=None  # No new outputs for final step
@@ -681,9 +728,10 @@ def update_tree_reps_step(tree_reps, cur_t, rollout_depth, last_action, num_acti
         tree_reps[:, idx2+4*num_actions+3:idx3] = 1.0  # visit counts
     
     # Reset flag (0 for normal steps)
+    # NOTE: Reset flag is updated later in main loop if reset occurs
     tree_reps[:, idx4] = 0.0
     
-    # Clear previous time encoding
+    # Clear previous time encoding per batch
     tree_reps[:, idx4+1:idx4+1+rec_t] = 0.0
     
     # Set current time encoding (one-hot)
