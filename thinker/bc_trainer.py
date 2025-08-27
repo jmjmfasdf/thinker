@@ -43,37 +43,18 @@ def create_bc_data_loader(flags):
 
 def compute_bc_losses(model_out, actor_out, target_actions, device):
     """
-    Compute BC losses for VPN and ActorNet
+    Compute BC losses for ActorNet only (Model/VPN training disabled)
     
     Args:
-        model_out: ModelNet output
+        model_out: ModelNet output (not used for loss)
         actor_out: ActorNet output  
         target_actions: Target actions from BC data [B]
         device: torch device
         
     Returns:
-        Dict with 'vpn_loss' and 'actor_loss'
+        Dict with 'actor_loss' only
     """
     losses = {}
-    
-    # VPN loss: Cross entropy between VPN policy and target actions
-    if hasattr(model_out, 'policy') and model_out.policy is not None:
-        vpn_policy = model_out.policy  # Shape: [k+1, B, 1, num_actions] or similar
-        
-        # Take the last timestep policy
-        if len(vpn_policy.shape) == 4:
-            vpn_logits = vpn_policy[-1, :, 0, :]  # [B, num_actions]
-        elif len(vpn_policy.shape) == 3:
-            vpn_logits = vpn_policy[-1, :, :]  # [B, num_actions]
-        else:
-            vpn_logits = vpn_policy  # [B, num_actions]
-        
-        # Cross entropy loss
-        target_actions_long = target_actions.long()
-        vpn_loss = F.cross_entropy(vpn_logits, target_actions_long)
-        losses['vpn_loss'] = vpn_loss
-    else:
-        losses['vpn_loss'] = torch.tensor(0.0, device=device)
     
     # ActorNet loss: Cross entropy between Actor policy and target actions
     if hasattr(actor_out, 'action_prob') and actor_out.action_prob is not None:
@@ -225,17 +206,19 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
         print(f"  {key}: {value.shape}")
     
     # Set networks to training mode
-    model_net.train()
-    actor_net.train()
+    model_net.eval()  # Keep model in eval mode (no training)
+    actor_net.train()  # Only train actor
     
-    # Setup optimizers
-    model_optimizer = optim.Adam(model_net.parameters(), lr=flags.bc_lr)
+    # Freeze all model parameters (no model training in BC)
+    print("Freezing all Model parameters (SRN + VPN)...")
+    for param in model_net.parameters():
+        param.requires_grad = False
+    
+    total_model_params = sum(p.numel() for p in model_net.parameters())
+    print(f"Frozen {total_model_params:,} Model parameters")
+    
+    # Setup optimizer for Actor only
     actor_optimizer = optim.Adam(actor_net.parameters(), lr=flags.bc_lr)
-    
-    optimizers = {
-        'model': model_optimizer,
-        'actor': actor_optimizer
-    }
     
     print(f"Model parameters: {sum(p.numel() for p in model_net.parameters()):,}")
     print(f"Actor parameters: {sum(p.numel() for p in actor_net.parameters()):,}")
@@ -313,15 +296,14 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
                 print("ERROR: Could not load any batch data")
                 break
         
-        # Zero gradients
-        model_optimizer.zero_grad()
+        # Zero gradients (Actor only)
         actor_optimizer.zero_grad()
             
         try:
             # Forward pass
             outputs = run_bc_training_step(model_net, actor_net, batch_data, flags, device)
             
-            # Compute losses
+            # Compute losses (Actor only)
             losses = compute_bc_losses(
                 outputs['model_out'],
                 outputs['actor_out'],
@@ -329,25 +311,20 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
                 device
             )
             
-            vpn_loss = losses['vpn_loss']
             actor_loss = losses['actor_loss']
-            total_loss = vpn_loss + actor_loss
             
-            # Backward pass
-            total_loss.backward()
+            # Backward pass (Actor only)
+            actor_loss.backward()
             
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model_net.parameters(), max_norm=1.0)
+            # Gradient clipping (Actor only)
             torch.nn.utils.clip_grad_norm_(actor_net.parameters(), max_norm=1.0)
             
-            # Optimizer steps
-            model_optimizer.step()
+            # Optimizer step (Actor only)
             actor_optimizer.step()
             
             # Record losses
-            vpn_loss_val = vpn_loss.item()
             actor_loss_val = actor_loss.item()
-            total_loss_val = total_loss.item()
+            total_loss_val = actor_loss_val  # Only actor loss now
             epoch_losses.append(total_loss_val)
             
             if total_loss_val < best_loss:
@@ -356,32 +333,13 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
             # Log every step
             step_time = time.time() - step_start
             print(f"Step {step+1:4d}/{flags.bc_epochs}: "
-                  f"VPN: {vpn_loss_val:.4f}, "
                   f"Actor: {actor_loss_val:.4f}, "
-                  f"Total: {total_loss_val:.4f}, "
                   f"Best: {best_loss:.4f} "
                   f"({step_time:.3f}s)")
             
             # Save every 100 steps
             if (step + 1) % 100 == 0:
-                # Save model checkpoint (compatible with visual.py)
-                model_save_path = os.path.join(bc_log_dir, 'ckp_model.tar')
-                model_checkpoint_data = {
-                    'step': step + 1,
-                    'real_step': step + 1,
-                    'model_net_state_dict': model_net.state_dict(),
-                    'model_net_optimizer_p_state_dict': model_optimizer.state_dict(),
-                    'flags': vars(flags)
-                }
-                
-                # Save with temporary file then rename (atomic operation)
-                torch.save(model_checkpoint_data, model_save_path + ".tmp")
-                os.replace(model_save_path + ".tmp", model_save_path)
-                
-                # Also save step-specific checkpoint
-                step_model_save_path = os.path.join(bc_log_dir, f'ckp_model.tar_step_{step+1}')
-                torch.save(model_checkpoint_data, step_model_save_path + ".tmp")
-                os.replace(step_model_save_path + ".tmp", step_model_save_path)
+                # Model is frozen, no need to save model checkpoint
                 
                 # Save actor checkpoint (following original learn_actor.py structure)
                 actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
@@ -402,34 +360,21 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
                 torch.save(actor_checkpoint_data, step_actor_save_path + ".tmp")
                 os.replace(step_actor_save_path + ".tmp", step_actor_save_path)
                 
-                print(f"  → Saved checkpoints: ckp_model.tar, ckp_actor.tar (step {step+1})")
+                print(f"  → Saved BC Actor checkpoint: ckp_actor.tar (step {step+1}) [Model frozen]")
                 
         except Exception as e:
             print(f"  Error in step {step+1}: {e}")
             traceback.print_exc()
             continue
 
-
+    # Unfreeze model parameters after BC training (for potential future use)
+    print("\nUnfreezing Model parameters...")
+    for param in model_net.parameters():
+        param.requires_grad = True
+    print(f"Unfrozen {sum(p.numel() for p in model_net.parameters()):,} Model parameters")
     
-    # Save final checkpoint
-    print(f"\nSaving final checkpoints...")
-    
-    # Save final model checkpoint
-    model_save_path = os.path.join(bc_log_dir, 'ckp_model.tar')
-    model_checkpoint_data = {
-        'step': flags.bc_epochs,
-        'real_step': flags.bc_epochs,
-        'model_net_state_dict': model_net.state_dict(),
-        'model_net_optimizer_p_state_dict': model_optimizer.state_dict(),
-        'flags': vars(flags)
-    }
-    torch.save(model_checkpoint_data, model_save_path + ".tmp")
-    os.replace(model_save_path + ".tmp", model_save_path)
-    
-    # Save final step-specific model checkpoint
-    final_model_save_path = os.path.join(bc_log_dir, f'ckp_model.tar_step_{flags.bc_epochs}_final')
-    torch.save(model_checkpoint_data, final_model_save_path + ".tmp")
-    os.replace(final_model_save_path + ".tmp", final_model_save_path)
+    # Save final checkpoint (Actor only, Model unchanged)
+    print(f"\nSaving final BC checkpoint...")
     
     # Save final actor checkpoint
     actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
@@ -454,7 +399,7 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
     if epoch_losses:
         print(f"Final loss: {epoch_losses[-1]:.4f}")
     print(f"Best loss: {best_loss:.4f}")
-    print(f"Final checkpoints saved: ckp_model.tar, ckp_actor.tar")
+    print(f"Final checkpoints saved: ckp_actor.tar (Model unchanged - frozen during BC)")
     print(f"All checkpoints saved in: {bc_log_dir}")
     
     return best_loss, epoch_losses
