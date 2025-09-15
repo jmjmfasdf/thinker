@@ -126,6 +126,153 @@ def compute_bc_losses(model_out, actor_out, target_actions, device):
     return losses
 
 
+def compute_enhanced_bc_losses(outputs, batch_data, model_net, flags, device):
+    """
+    Enhanced BC losses using first imagine step outputs from actual Thinker rollout
+    
+    사용자가 제시한 올바른 손실 구조:
+    
+    Model Loss (첫 번째 imagine step 사용):
+    1. VPN Policy Loss: imagine_step_1의 VPN policy vs current_obs의 action (cross-entropy)
+    2. SRN Reward Loss: imagine_step_1의 SRN reward vs current_obs의 reward (MSE) 
+    3. SRN Next State Loss: imagine_step_1의 hidden_state vs next_obs 인코딩 (MSE)
+    
+    Actor Loss (최종 출력 사용):
+    4. Actor Policy Loss: final Actor policy vs current_obs의 action (cross-entropy)
+    """
+    import torch.nn.functional as F
+    
+    losses = {}
+    device = torch.device(device) if isinstance(device, str) else device
+    
+    # Extract first imagine step outputs from actual rollout
+    first_step = outputs.get('first_imagine_step', {})
+    vpn_policy = first_step.get('vpn_policy')      # [T, B, num_actions] or [T, B, 1, num_actions]
+    srn_reward = first_step.get('srn_reward')      # [T, B, 1]
+    hidden_state = first_step.get('hidden_state')  # [T, B, ...]
+    
+    # Extract BC data - current action and reward
+    target_actions = outputs.get('target_actions')
+    
+    model_total_loss = torch.tensor(0.0, device=device)
+    
+    print(f"[DEBUG] Enhanced BC Loss Computation using first imagine step:")
+    print(f"  - VPN policy available: {vpn_policy is not None}")
+    print(f"  - SRN reward available: {srn_reward is not None}")
+    print(f"  - Hidden state available: {hidden_state is not None}")
+    print(f"  - Target actions shape: {target_actions.shape if target_actions is not None else None}")
+    
+    # ========== Model Loss 1: VPN Policy Loss ==========
+    # imagine_step_1의 VPN policy vs current_obs의 action
+    if vpn_policy is not None and target_actions is not None:
+        # Use first timestep policy (imagine step 1)
+        if len(vpn_policy.shape) == 4:  # [T, B, 1, num_actions]
+            vpn_logits = vpn_policy[0, :, 0, :]  # [B, num_actions] - first imagine step
+        elif len(vpn_policy.shape) == 3:  # [T, B, num_actions]
+            vpn_logits = vpn_policy[0, :, :]     # [B, num_actions] - first imagine step
+        else:
+            vpn_logits = vpn_policy              # [B, num_actions]
+        
+        target_actions_long = target_actions.long()
+        vpn_policy_loss = F.cross_entropy(vpn_logits, target_actions_long)
+        losses['vpn_policy_loss'] = vpn_policy_loss
+        
+        vpn_policy_weight = 0.5  # Hardcoded weight
+        model_total_loss += vpn_policy_weight * vpn_policy_loss
+        print(f"[DEBUG] VPN Policy Loss (imagine_step_1): {vpn_policy_loss.item():.4f} (weight: {vpn_policy_weight})")
+        print(f"[DEBUG] Comparing imagine_step_1 VPN policy vs current_obs action")
+    else:
+        losses['vpn_policy_loss'] = torch.tensor(0.0, device=device)
+        print("[DEBUG] No VPN policy output for first imagine step")
+    
+    # ========== Model Loss 2: SRN Reward Loss ==========
+    # imagine_step_1의 SRN reward vs current_obs의 reward
+    if srn_reward is not None and 'rewards' in batch_data:
+        # Use first timestep reward prediction (imagine step 1)
+        predicted_rewards = srn_reward  # [T, B, 1]
+        target_rewards = torch.tensor(batch_data['rewards'], dtype=torch.float32, device=device)  # [B]
+        pred_reward = predicted_rewards[0, :, 0]  # [B] - 첫 번째 imagine step의 예측
+        
+        reward_loss = F.mse_loss(pred_reward, target_rewards)
+        losses['srn_reward_loss'] = reward_loss
+        
+        srn_reward_weight = 1.0  # Hardcoded weight
+        model_total_loss += srn_reward_weight * reward_loss
+        print(f"[DEBUG] SRN Reward Loss (imagine_step_1): {reward_loss.item():.4f} (weight: {srn_reward_weight})")
+        print(f"[DEBUG] Comparing imagine_step_1 SRN reward vs current_obs reward")
+        print(f"[DEBUG] Predicted rewards: {pred_reward[:5].detach().cpu().numpy()}")
+        print(f"[DEBUG] Actual rewards: {target_rewards[:5].cpu().numpy()}")
+    else:
+        losses['srn_reward_loss'] = torch.tensor(0.0, device=device)
+        if srn_reward is None:
+            print("[DEBUG] No SRN reward output for first imagine step")
+        if 'rewards' not in batch_data:
+            print("[DEBUG] No reward data in batch_data")
+    
+    # ========== Model Loss 3: SRN Next State Loss ==========
+    # imagine_step_1의 hidden_state vs next_obs 인코딩
+    if hidden_state is not None and 'next_obs' in batch_data:
+        # Use first timestep hidden state (imagine step 1)
+        predicted_next_hs = hidden_state  # [T, B, ...]
+        next_obs_data = batch_data['next_obs']
+        
+        # Encode next_obs to get target hidden state
+        # ModelNet expects uint8 data (will be normalized internally)
+        if next_obs_data.dtype == np.float32:
+            # Convert back to uint8 if it's already normalized
+            next_obs = torch.tensor((next_obs_data * 255.0).astype(np.uint8), dtype=torch.uint8, device=device)
+        else:
+            # Already uint8
+            next_obs = torch.tensor(next_obs_data, dtype=torch.uint8, device=device)
+        
+        with torch.no_grad():
+            target_model_out = model_net.forward(
+                env_state=next_obs,
+                actions=torch.zeros(1, next_obs.shape[0], 1, dtype=torch.long, device=device),  # dummy action
+                done=torch.zeros(next_obs.shape[0], dtype=torch.bool, device=device),
+                state=model_net.initial_state(batch_size=next_obs.shape[0], device=device)
+            )
+            target_next_hs = target_model_out.hs  # [T, B, ...]
+        
+        pred_hs = predicted_next_hs[0]  # 첫 번째 imagine step [B, ...]
+        target_hs = target_next_hs[0]   # 첫 번째 타임스텝 [B, ...]
+        
+        if pred_hs.shape == target_hs.shape:
+            next_state_loss = F.mse_loss(pred_hs, target_hs)
+            losses['srn_next_state_loss'] = next_state_loss
+            
+            srn_next_state_weight = 1.0  # Hardcoded weight
+            model_total_loss += srn_next_state_weight * next_state_loss
+            print(f"[DEBUG] SRN Next State Loss (imagine_step_1): {next_state_loss.item():.6f} (weight: {srn_next_state_weight})")
+            print(f"[DEBUG] Comparing imagine_step_1 hidden_state vs next_obs encoded")
+            print(f"[DEBUG] Predicted HS shape: {pred_hs.shape}, Target HS shape: {target_hs.shape}")
+        else:
+            print(f"[WARNING] Hidden state shape mismatch: pred={pred_hs.shape}, target={target_hs.shape}")
+            losses['srn_next_state_loss'] = torch.tensor(0.0, device=device)
+    else:
+        losses['srn_next_state_loss'] = torch.tensor(0.0, device=device)
+        if hidden_state is None:
+            print("[DEBUG] No hidden state output for first imagine step")
+        if 'next_obs' not in batch_data:
+            print("[DEBUG] No next_obs data in batch_data")
+    
+    losses['model_total_loss'] = model_total_loss
+    
+    # ========== Actor Loss ==========
+    # final Actor policy vs current_obs의 action
+    actor_out = outputs.get('actor_out')
+    if actor_out is not None and target_actions is not None:
+        actor_losses = compute_bc_losses(None, actor_out, target_actions, device)
+        losses.update(actor_losses)
+        print(f"[DEBUG] Actor Loss (final policy): {actor_losses.get('actor_loss', 0):.4f}")
+        print(f"[DEBUG] Comparing final actor policy vs current_obs action")
+    else:
+        losses['actor_loss'] = torch.tensor(0.0, device=device)
+        print("[DEBUG] No actor output available")
+    
+    return losses
+
+
 def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     """
     Run one BC training step with proper Thinker imaginary rollout
@@ -294,6 +441,10 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     
     print(f"[DEBUG] Starting {rec_t-1} imaginary steps...")
     
+    # Variables to collect first imagine step info for enhanced BC
+    first_imagine_state = None
+    first_imagine_action = None
+    
     # Perform rec_t-1 imaginary steps
     for step in range(rec_t - 1):
         print(f"[DEBUG] Imaginary step {step+1}/{rec_t-1}")
@@ -307,12 +458,22 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
         
         # 1. ModelNet forward pass FIRST (get SRN + VPN outputs)
         # This follows cenv.pyx order: ModelNet → tree_reps update → ActorNet → next_action
+        
+        # **ENHANCED BC**: Always use no_grad for rollout, collect info separately
+        # Standard rollout: No gradients for ModelNet during rollout
         with torch.no_grad():
             model_out = model_net.forward_single(
                 state=model_state,
                 action=last_action,
                 training=False
             )
+        
+        # **COLLECT FIRST IMAGINE STEP INFO for Enhanced BC (without gradients during rollout)**
+        if step == 0:
+            print(f"[DEBUG] Collecting first imagine step info for enhanced BC")
+            # Store the state and action for later separate forward pass
+            first_imagine_state = {k: v.clone() if hasattr(v, 'clone') else v for k, v in model_state.items()} if isinstance(model_state, dict) else model_state.clone()
+            first_imagine_action = last_action.clone()
         
         # Extract model outputs
         xs = model_out.xs[0] if model_out.xs is not None else None  # [B, C, H, W]
@@ -510,15 +671,36 @@ def run_bc_training_step(model_net, actor_net, batch_data, flags, device):
     
     print(f"[DEBUG] Thinker rollout completed, ready for BC loss")
     
+    # **Enhanced BC**: Perform separate forward pass for first imagine step with gradients
+    enhanced_imagine_step = None
+    if hasattr(flags, 'bc_enhanced') and flags.bc_enhanced and 'first_imagine_state' in locals() and 'first_imagine_action' in locals():
+        print(f"[DEBUG] Enhanced BC: Performing separate forward pass for first imagine step")
+        # Separate forward pass with gradients enabled
+        first_imagine_model_out = model_net.forward_single(
+            state=first_imagine_state,
+            action=first_imagine_action,
+            training=True  # Enable gradients for this forward pass
+        )
+        
+        enhanced_imagine_step = {
+            'vpn_policy': first_imagine_model_out.policy if hasattr(first_imagine_model_out, 'policy') else None,
+            'srn_reward': first_imagine_model_out.rs if hasattr(first_imagine_model_out, 'rs') else None,
+            'hidden_state': first_imagine_model_out.hs if hasattr(first_imagine_model_out, 'hs') else None,
+            'model_out': first_imagine_model_out
+        }
+        print(f"[DEBUG] Enhanced BC: Separate forward pass completed")
+    
     return {
-        'model_out': None,  # Not used for loss
+        'model_out': None,  # Not used for standard BC loss
         'actor_out': final_actor_out,
         'target_actions': target_actions,
         'rollout_info': {
             'xs_history': xs_history,
             'hs_history': hs_history,
             'steps_completed': rec_t - 1
-        }
+        },
+        # **Enhanced BC**: First imagine step outputs for ModelNet training
+        'first_imagine_step': enhanced_imagine_step
     }
 
 
@@ -882,7 +1064,7 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
     bc_loader = create_bc_data_loader(flags)
     
     # Test data loading
-    test_batch = bc_loader.get_paired_batch(batch_size=4)
+    test_batch = bc_loader.get_paired_batch(batch_size=flags.bc_batch_size)
     if test_batch is None:
         print("ERROR: Could not load test batch from BC data")
         return
@@ -892,19 +1074,65 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
         print(f"  {key}: {value.shape}")
     
     # Set networks to training mode
-    model_net.eval()  # Keep model in eval mode (frozen, only used for xs/hs generation)
-    actor_net.train()  # Only train actor
-    
-    # Freeze all model parameters (no model training in BC)
-    print("Freezing all Model parameters (SRN + VPN)...")
-    for param in model_net.parameters():
-        param.requires_grad = False
-    
-    total_model_params = sum(p.numel() for p in model_net.parameters())
-    print(f"Frozen {total_model_params:,} Model parameters")
-    
-    # Setup optimizer for Actor only
-    actor_optimizer = optim.Adam(actor_net.parameters(), lr=flags.bc_lr)
+    # **Enhanced BC**: Enable ModelNet training if enhanced mode
+    if hasattr(flags, 'bc_enhanced') and flags.bc_enhanced:
+        print("=== Enhanced BC Mode: Training both ModelNet and ActorNet ===")
+        
+        # Anomaly detection no longer needed - issue resolved
+        # torch.autograd.set_detect_anomaly(True)
+        print("Enhanced BC mode - gradient issues resolved")
+        
+        model_net.train()  # Enable ModelNet training
+        
+        # Disable half-gradient hook to avoid hook registration errors in BC
+        if hasattr(model_net, 'vp_net') and hasattr(model_net.vp_net, 'RNN'):
+            model_net.vp_net.RNN.disable_half_grad = True
+            print("Disabled half-gradient hook for BC training")
+            
+        actor_net.train()  # Train actor as well
+        
+        # Enable all model parameters for training
+        print("Enabling ModelNet parameters for training (SRN + VPN)...")
+        for param in model_net.parameters():
+            param.requires_grad = True
+        
+        total_model_params = sum(p.numel() for p in model_net.parameters())
+        print(f"Trainable ModelNet parameters: {total_model_params:,}")
+        
+        # Setup optimizers for both networks
+        model_optimizer = optim.Adam(model_net.parameters(), lr=flags.bc_lr)
+        actor_optimizer = optim.Adam(actor_net.parameters(), lr=flags.bc_lr)
+        
+        optimizers = {
+            'model': model_optimizer,
+            'actor': actor_optimizer
+        }
+        
+        print(f"Model parameters: {sum(p.numel() for p in model_net.parameters()):,} (trainable)")
+        print(f"Actor parameters: {sum(p.numel() for p in actor_net.parameters()):,} (trainable)")
+    else:
+        print("=== Standard BC Mode: Training ActorNet only ===")
+        model_net.eval()  # Keep model in eval mode (frozen, only used for xs/hs generation)
+        actor_net.train()  # Only train actor
+        
+        # Freeze all model parameters (no model training in BC)
+        print("Freezing all Model parameters (SRN + VPN)...")
+        for param in model_net.parameters():
+            param.requires_grad = False
+        
+        total_model_params = sum(p.numel() for p in model_net.parameters())
+        print(f"Frozen {total_model_params:,} Model parameters")
+        
+        # Setup optimizer for Actor only
+        actor_optimizer = optim.Adam(actor_net.parameters(), lr=flags.bc_lr)
+        
+        optimizers = {
+            'model': None,  # No model optimizer for standard BC
+            'actor': actor_optimizer
+        }
+        
+        print(f"Model parameters: {sum(p.numel() for p in model_net.parameters()):,} (frozen)")
+        print(f"Actor parameters: {sum(p.numel() for p in actor_net.parameters()):,} (trainable)")
     
     print(f"Model parameters: {sum(p.numel() for p in model_net.parameters()):,}")
     print(f"Actor parameters: {sum(p.numel() for p in actor_net.parameters()):,}")
@@ -983,60 +1211,149 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
                 print("ERROR: Could not load any batch data")
                 break
         
-        # Zero gradients (Actor only)
-        actor_optimizer.zero_grad()
+        # Zero gradients
+        if hasattr(flags, 'bc_enhanced') and flags.bc_enhanced:
+            # Enhanced BC: Zero gradients for both networks
+            optimizers['model'].zero_grad()
+            optimizers['actor'].zero_grad()
+        else:
+            # Standard BC: Zero gradients for Actor only
+            actor_optimizer.zero_grad()
             
         try:
             # Forward pass
             outputs = run_bc_training_step(model_net, actor_net, batch_data, flags, device)
             
-            # Compute losses (Actor only)
-            losses = compute_bc_losses(
-                outputs['model_out'],
-                outputs['actor_out'],
-                outputs['target_actions'],
-                device
-            )
+            # Compute losses
+            if hasattr(flags, 'bc_enhanced') and flags.bc_enhanced:
+                # Enhanced BC: Use enhanced loss computation
+                print(f"[DEBUG] Using enhanced BC loss computation")
+                losses = compute_enhanced_bc_losses(
+                    outputs,        # Contains first_imagine_step data
+                    batch_data,     # Contains rewards, next_obs  
+                    model_net,      # For encoding next_obs
+                    flags,
+                    device
+                )
+                
+                model_loss = losses['model_total_loss']
+                actor_loss = losses['actor_loss'] 
+                total_loss = model_loss + actor_loss
+                
+                print(f"[DEBUG] Enhanced BC losses - Model: {model_loss.item():.4f}, Actor: {actor_loss.item():.4f}, Total: {total_loss.item():.4f}")
+                
+                # Backward pass for both networks
+                total_loss.backward()
+            else:
+                # Standard BC: Use standard loss computation (Actor only)
+                print(f"[DEBUG] Using standard BC loss computation")
+                losses = compute_bc_losses(
+                    outputs['model_out'],
+                    outputs['actor_out'],
+                    outputs['target_actions'],
+                    device
+                )
+                
+                actor_loss = losses['actor_loss']
+                
+                # Backward pass (Actor only)
+                actor_loss.backward()
             
-            actor_loss = losses['actor_loss']
-            
-            # Backward pass (Actor only)
-            actor_loss.backward()
-            
-            # Gradient clipping (Actor only)
-            torch.nn.utils.clip_grad_norm_(actor_net.parameters(), max_norm=1.0)
-            
-            # Optimizer step (Actor only)
-            actor_optimizer.step()
-            
-            # Record losses
-            actor_loss_val = actor_loss.item()
-            total_loss_val = actor_loss_val  # Only actor loss now
-            epoch_losses.append(total_loss_val)
-            
-            if total_loss_val < best_loss:
-                best_loss = total_loss_val
-            
-            # Log every step
-            step_time = time.time() - step_start
-            print(f"Step {step+1:4d}/{flags.bc_epochs}: "
-                  f"Actor: {actor_loss_val:.4f}, "
-                  f"Best: {best_loss:.4f} "
-                  f"({step_time:.3f}s)")
+            # Gradient clipping and optimizer steps
+            if hasattr(flags, 'bc_enhanced') and flags.bc_enhanced:
+                # Enhanced BC: Gradient clipping for both networks
+                torch.nn.utils.clip_grad_norm_(model_net.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(actor_net.parameters(), max_norm=1.0)
+                
+                # Optimizer steps for both networks
+                optimizers['model'].step()
+                optimizers['actor'].step()
+                
+                # Record losses
+                model_loss_val = model_loss.item()
+                actor_loss_val = actor_loss.item()
+                total_loss_val = total_loss.item()
+                epoch_losses.append(total_loss_val)
+                
+                if total_loss_val < best_loss:
+                    best_loss = total_loss_val
+                
+                # Log every step
+                step_time = time.time() - step_start
+                print(f"Step {step+1:4d}/{flags.bc_epochs}: "
+                      f"Model: {model_loss_val:.4f}, Actor: {actor_loss_val:.4f}, "
+                      f"Total: {total_loss_val:.4f}, Best: {best_loss:.4f} "
+                      f"({step_time:.3f}s)")
+                
+                # Additional detailed logging for enhanced BC
+                if 'vpn_policy_loss' in losses:
+                    print(f"  VPN Policy: {losses['vpn_policy_loss'].item():.4f}")
+                if 'srn_reward_loss' in losses:
+                    print(f"  SRN Reward: {losses['srn_reward_loss'].item():.4f}")
+                if 'srn_next_state_loss' in losses:
+                    print(f"  SRN Next State: {losses['srn_next_state_loss'].item():.6f}")
+                    
+            else:
+                # Standard BC: Gradient clipping for Actor only
+                torch.nn.utils.clip_grad_norm_(actor_net.parameters(), max_norm=1.0)
+                
+                # Optimizer step (Actor only)
+                actor_optimizer.step()
+                
+                # Record losses
+                actor_loss_val = actor_loss.item()
+                total_loss_val = actor_loss_val  # Only actor loss
+                epoch_losses.append(total_loss_val)
+                
+                if total_loss_val < best_loss:
+                    best_loss = total_loss_val
+                
+                # Log every step
+                step_time = time.time() - step_start
+                print(f"Step {step+1:4d}/{flags.bc_epochs}: "
+                      f"Actor: {actor_loss_val:.4f}, "
+                      f"Best: {best_loss:.4f} "
+                      f"({step_time:.3f}s)")
             
             # Save every 100 steps
             if (step + 1) % 100 == 0:
-                # Model is frozen, no need to save model checkpoint
-                
-                # Save actor checkpoint (following original learn_actor.py structure)
-                actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
-                actor_checkpoint_data = {
-                    'step': step + 1,
-                    'real_step': step + 1,
-                    'actor_net_state_dict': actor_net.state_dict(),
-                    'actor_net_optimizer_state_dict': actor_optimizer.state_dict(),
-                    'flags': vars(flags)
-                }
+                if hasattr(flags, 'bc_enhanced') and flags.bc_enhanced:
+                    # Enhanced BC: Save both ModelNet and ActorNet checkpoints
+                    print(f"Saving Enhanced BC checkpoints at step {step + 1}...")
+                    
+                    # Save ModelNet checkpoint
+                    model_save_path = os.path.join(bc_log_dir, 'ckp_model.tar')
+                    model_checkpoint_data = {
+                        'step': step + 1,
+                        'real_step': step + 1,
+                        'model_net_state_dict': model_net.state_dict(),  # 올바른 키 이름
+                        'model_optimizer_state_dict': optimizers['model'].state_dict(),
+                        'flags': vars(flags)
+                    }
+                    torch.save(model_checkpoint_data, model_save_path)
+                    print(f"Saved ModelNet checkpoint: {model_save_path}")
+                    
+                    # Save ActorNet checkpoint
+                    actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
+                    actor_checkpoint_data = {
+                        'step': step + 1,
+                        'real_step': step + 1,
+                        'actor_net_state_dict': actor_net.state_dict(),
+                        'actor_net_optimizer_state_dict': optimizers['actor'].state_dict(),
+                        'flags': vars(flags)
+                    }
+                else:
+                    # Standard BC: Model is frozen, no need to save model checkpoint
+                    
+                    # Save actor checkpoint (following original learn_actor.py structure)
+                    actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
+                    actor_checkpoint_data = {
+                        'step': step + 1,
+                        'real_step': step + 1,
+                        'actor_net_state_dict': actor_net.state_dict(),
+                        'actor_net_optimizer_state_dict': actor_optimizer.state_dict(),
+                        'flags': vars(flags)
+                    }
                 
                 # Save with temporary file then rename (atomic operation)
                 torch.save(actor_checkpoint_data, actor_save_path + ".tmp")
@@ -1060,25 +1377,68 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
         param.requires_grad = True
     print(f"Unfrozen {sum(p.numel() for p in model_net.parameters()):,} Model parameters")
     
-    # Save final checkpoint (Actor only, Model unchanged)
+    # Save final checkpoint
     print(f"\nSaving final BC checkpoint...")
     
-    # Save final actor checkpoint
-    actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
-    actor_checkpoint_data = {
-        'step': flags.bc_epochs,
-        'real_step': flags.bc_epochs,
-        'actor_net_state_dict': actor_net.state_dict(),
-        'actor_net_optimizer_state_dict': actor_optimizer.state_dict(),
-        'flags': vars(flags)
-    }
-    torch.save(actor_checkpoint_data, actor_save_path + ".tmp")
-    os.replace(actor_save_path + ".tmp", actor_save_path)
-    
-    # Save final step-specific actor checkpoint
-    final_actor_save_path = os.path.join(bc_log_dir, f'ckp_actor.tar_step_{flags.bc_epochs}_final')
-    torch.save(actor_checkpoint_data, final_actor_save_path + ".tmp")
-    os.replace(final_actor_save_path + ".tmp", final_actor_save_path)
+    if hasattr(flags, 'bc_enhanced') and flags.bc_enhanced:
+        # Enhanced BC: Save both ModelNet and ActorNet final checkpoints
+        print("Enhanced BC: Saving both ModelNet and ActorNet final checkpoints...")
+        
+        # Save final ModelNet checkpoint
+        model_save_path = os.path.join(bc_log_dir, 'ckp_model.tar')
+        model_checkpoint_data = {
+            'step': flags.bc_epochs,
+            'real_step': flags.bc_epochs,
+            'model_net_state_dict': model_net.state_dict(),  # 올바른 키 이름
+            'model_optimizer_state_dict': optimizers['model'].state_dict(),
+            'flags': vars(flags)
+        }
+        torch.save(model_checkpoint_data, model_save_path + ".tmp")
+        os.replace(model_save_path + ".tmp", model_save_path)
+        
+        # Save final step-specific ModelNet checkpoint
+        final_model_save_path = os.path.join(bc_log_dir, f'ckp_model.tar_step_{flags.bc_epochs}_final')
+        torch.save(model_checkpoint_data, final_model_save_path + ".tmp")
+        os.replace(final_model_save_path + ".tmp", final_model_save_path)
+        
+        # Save final ActorNet checkpoint
+        actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
+        actor_checkpoint_data = {
+            'step': flags.bc_epochs,
+            'real_step': flags.bc_epochs,
+            'actor_net_state_dict': actor_net.state_dict(),
+            'actor_net_optimizer_state_dict': optimizers['actor'].state_dict(),
+            'flags': vars(flags)
+        }
+        torch.save(actor_checkpoint_data, actor_save_path + ".tmp")
+        os.replace(actor_save_path + ".tmp", actor_save_path)
+        
+        # Save final step-specific ActorNet checkpoint
+        final_actor_save_path = os.path.join(bc_log_dir, f'ckp_actor.tar_step_{flags.bc_epochs}_final')
+        torch.save(actor_checkpoint_data, final_actor_save_path + ".tmp")
+        os.replace(final_actor_save_path + ".tmp", final_actor_save_path)
+        
+        print(f"Enhanced BC final checkpoints saved: ckp_model.tar, ckp_actor.tar (both trained)")
+        
+    else:
+        # Standard BC: Save ActorNet only (Model unchanged)
+        actor_save_path = os.path.join(bc_log_dir, 'ckp_actor.tar')
+        actor_checkpoint_data = {
+            'step': flags.bc_epochs,
+            'real_step': flags.bc_epochs,
+            'actor_net_state_dict': actor_net.state_dict(),
+            'actor_net_optimizer_state_dict': actor_optimizer.state_dict(),
+            'flags': vars(flags)
+        }
+        torch.save(actor_checkpoint_data, actor_save_path + ".tmp")
+        os.replace(actor_save_path + ".tmp", actor_save_path)
+        
+        # Save final step-specific actor checkpoint
+        final_actor_save_path = os.path.join(bc_log_dir, f'ckp_actor.tar_step_{flags.bc_epochs}_final')
+        torch.save(actor_checkpoint_data, final_actor_save_path + ".tmp")
+        os.replace(final_actor_save_path + ".tmp", final_actor_save_path)
+        
+        print(f"Standard BC final checkpoints saved: ckp_actor.tar (Model unchanged - frozen during BC)")
     
     # Final summary
     print(f"\nBC Training completed!")
@@ -1086,7 +1446,6 @@ def run_bc_training(flags, model_net, actor_net, logger=None):
     if epoch_losses:
         print(f"Final loss: {epoch_losses[-1]:.4f}")
     print(f"Best loss: {best_loss:.4f}")
-    print(f"Final checkpoints saved: ckp_actor.tar (Model unchanged - frozen during BC)")
     print(f"All checkpoints saved in: {bc_log_dir}")
     
     return best_loss, epoch_losses

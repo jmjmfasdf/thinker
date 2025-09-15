@@ -230,6 +230,7 @@ def add_parse(filename, parser=None, prefix=''):
     # Add BC (Behavioral Cloning) specific arguments
     try:
         parser.add_argument('--bc_clone', action='store_true', help='Enable behavioral cloning training')
+        parser.add_argument('--bc_enhanced', action='store_true', help='Enable enhanced BC training (trains both ModelNet and ActorNet)')
         parser.add_argument('--bc_epochs', type=int, default=100, help='Number of BC training epochs')
         parser.add_argument('--bc_lr', type=float, default=0.0001, help='BC learning rate')
         parser.add_argument('--bc_batch_size', type=int, default=32, help='BC batch size')
