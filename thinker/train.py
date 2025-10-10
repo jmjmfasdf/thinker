@@ -3,6 +3,7 @@ import os
 import ray
 import torch
 import numpy as np
+from bc_trainer import run_pe_rlhf_training
 from thinker.buffer import ActorBuffer, GeneralBuffer, SelfPlayBuffer
 from thinker.self_play import SelfPlayWorker
 from thinker.logger import LogWorker
@@ -51,7 +52,6 @@ if __name__ == "__main__":
         logger.info("BC training mode enabled - initializing networks for BC training...")
         
         # Import BC training modules
-        from bc_trainer import run_bc_training
         from thinker.model_net import ModelNet
         from thinker.actor_net import ActorNet
         from gymnasium import spaces
@@ -314,15 +314,14 @@ if __name__ == "__main__":
             else:
                 logger.warning(f"Actor checkpoint not found at {actor_path}")
         
-        logger.info("Starting BC training with pretrained networks...")
+        logger.info("Starting offline PE-RLHF training with pretrained networks...")
         
-        # Run BC training
-        best_loss, epoch_losses = run_bc_training(flags, model_net, actor_net, logger)
+        best_metric, history = run_pe_rlhf_training(flags, model_net, actor_net, logger)
         
-        logger.info(f"BC training completed with best loss: {best_loss:.4f}")
-        print(f"BC training completed! Best loss: {best_loss:.4f}")
+        logger.info(f"Offline PE-RLHF training completed with best metric: {best_metric:.4f}")
+        print(f"Offline PE-RLHF training completed! Best metric: {best_metric:.4f}")
         
-        # Exit after BC training - skip the rest of the training pipeline
+        # Exit after offline training - skip the rest of the training pipeline
         import sys
         sys.exit(0)
 

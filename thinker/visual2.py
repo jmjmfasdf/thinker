@@ -185,6 +185,21 @@ def plot_qn_sa(q_s_a, n_s_a, action_meanings, max_q_s_a=None, ax=None):
     ax.set_title("q_s_a and n_s_a")
 
 
+def _extract_cur_reward(info):
+    if info is None or "cur_reward" not in info or info["cur_reward"] is None:
+        return np.nan
+
+    value = info["cur_reward"]
+    if torch.is_tensor(value):
+        value = value.detach().cpu().reshape(-1)
+        return value[0].item() if value.numel() > 0 else np.nan
+
+    value = np.asarray(value)
+    if value.size == 0:
+        return np.nan
+    return float(value.reshape(-1)[0])
+
+
 def gen_video(video_stats, file_path):
     import cv2
 
@@ -462,7 +477,7 @@ def visualize(
     im_done = False
 
     # video_stats 초기화 - 기존 이미지와 encoder 벡터 모두 저장
-    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": []}
+    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "cur_rewards": []}
     if save_encoder_vectors:
         video_stats.update({"real_vectors": [], "im_vectors": []})
         print("Saving both images and encoder vectors")
@@ -517,6 +532,7 @@ def visualize(
     
     video_stats["status"].append(0)  # 0 for real step, 1 for reset, 2 for normal
     video_stats["tree_reps"].append({k: v.cpu().numpy() for k, v in tree_reps.items()})
+    video_stats["cur_rewards"].append(_extract_cur_reward(info))
 
     # 메모리 관리를 위한 배치 크기 설정
     batch_size = 5  # 한 번에 처리할 프레임 수 제한 (더 작게 설정)
@@ -635,6 +651,8 @@ def visualize(
                     real_vectors = None
                     im_vectors = None
 
+        cur_reward_value = _extract_cur_reward(info)
+
         # record data for generating video (전체 프레임 저장)
         if len(video_stats["real_imgs"]) < max_video_frames:
             if last_real_step:
@@ -656,6 +674,7 @@ def visualize(
             video_stats["tree_reps"].append(
                 {k: v.cpu().numpy() for k, v in tree_reps.items()}
             )
+            video_stats["cur_rewards"].append(cur_reward_value)
 
             if im_dict["cur_reset"][-1] in [1, 3]:
                 # reset / force reset
@@ -668,6 +687,7 @@ def visualize(
                 video_stats["tree_reps"].append(
                     {k: v.cpu().numpy() for k, v in tree_reps.items()}
                 )
+                video_stats["cur_rewards"].append(cur_reward_value)
 
         # visualize when a real step is made
         if (saveimg or plot) and last_real_step:
@@ -784,6 +804,7 @@ def visualize(
             k: np.concatenate([v[k] for v in video_stats["tree_reps"]], axis=0)
             for k in video_stats["tree_reps"][0].keys()
         }
+        video_stats["cur_rewards"] = np.array(video_stats["cur_rewards"], dtype=np.float32)
         # gen_video(video_stats, outdir)
         np.save(os.path.join(outdir, "video_stat.npy"), video_stats)
 

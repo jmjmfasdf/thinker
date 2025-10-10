@@ -41,9 +41,43 @@ class FrameStackedBehavioralDataLoader:
         self.current_file_idx = 0
         self.current_pos = 0
         self.current_data = None  # Initialize current_data attribute
+        self.num_actions = 6
+        self.action_distribution = self._compute_action_distribution()
         
         print(f"Loaded {len(self.data_files)} data files")
+        print(f"Human action prior: {self.action_distribution}")
         
+    def _compute_action_distribution(self) -> np.ndarray:
+        """Aggregate action frequency across dataset"""
+        if len(self.data_files) == 0:
+            return np.full(self.num_actions, 1.0 / self.num_actions, dtype=np.float64)
+
+        action_counts = np.zeros(self.num_actions, dtype=np.float64)
+        total = 0.0
+
+        for file_path in self.data_files:
+            try:
+                data = np.load(file_path)
+                actions = data['action']
+            except Exception as e:
+                print(f"[WARNING] Failed to load actions from {file_path}: {e}")
+                continue
+
+            if actions.ndim >= 2 and actions.shape[-1] == self.num_actions:
+                flat = actions.reshape(-1, self.num_actions)
+                counts = flat.sum(axis=0)
+            else:
+                flat = actions.reshape(-1)
+                counts = np.bincount(flat.astype(np.int64), minlength=self.num_actions)
+
+            action_counts += counts
+            total += counts.sum()
+
+        if total == 0:
+            return np.full(self.num_actions, 1.0 / self.num_actions, dtype=np.float64)
+
+        return action_counts / total
+
     def _load_data_files(self) -> List[str]:
         """Load all .npz files from specified subjects and game"""
         data_files = []
@@ -279,8 +313,6 @@ class FrameStackedBehavioralDataLoader:
                 
             file_indices = list(range(num_files))
         
-        print(f"[DEBUG] Diverse sampling: {batch_size} samples from {num_files} files")
-        print(f"[DEBUG] Samples per file: {dict(zip(file_indices, samples_per_file))}")
         
         # Sample from each selected file
         for file_idx, num_samples in zip(file_indices, samples_per_file):
@@ -368,7 +400,6 @@ class FrameStackedBehavioralDataLoader:
             action = actions[curr_idx]
             reward = rewards[curr_idx]
             
-            print(f"[DEBUG] File {filename}: idx={curr_idx}, action={action}")
             
             file_obs.append(curr_obs)
             file_next_obs.append(next_obs)

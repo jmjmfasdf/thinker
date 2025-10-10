@@ -366,7 +366,7 @@ def calculate_r_squared(y_true, y_pred):
     """R² 결정계수 계산"""
     if len(y_true) < 2:
         return 0.0
-    ss_res = np.sum((y_true - y_pred)d ** 2)
+    ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
     if ss_tot == 0:
         return 0.0
@@ -465,33 +465,90 @@ def process_folder_analysis(folder_path, output_dir="./step_analysis"):
                 # values: list of {'r','r2','p','n'}
                 if not values:
                     return None
+
+                z_crit = stats.norm.ppf(0.975)
+
+                def _calc_ci_from_z(z_value, weight):
+                    if weight <= 0:
+                        r_val = float(np.tanh(z_value))
+                        return r_val, r_val
+                    z_se = 1.0 / np.sqrt(weight)
+                    z_lower = z_value - z_crit * z_se
+                    z_upper = z_value + z_crit * z_se
+                    return float(np.tanh(z_lower)), float(np.tanh(z_upper))
+
+                def _calc_r2_ci(r_lower, r_upper):
+                    lower = min(r_lower ** 2, r_upper ** 2)
+                    upper = max(r_lower ** 2, r_upper ** 2)
+                    return float(lower), float(upper)
+
                 if len(values) == 1:
                     v = values[0]
-                    return {'r': v['r'], 'r2': v['r2'], 'p': v['p'], 'n': v.get('n', None), 'count': 1}
+                    r_single = float(v['r'])
+                    r_clipped = np.clip(r_single, -0.999999, 0.999999)
+                    z_single = float(np.arctanh(r_clipped))
+                    n_single = max(int(v.get('n', 0) or 0), 0)
+                    weight_single = float(max(n_single - 3.0, 1.0)) if n_single else 1.0
+                    r_low, r_high = _calc_ci_from_z(z_single, weight_single)
+                    r2_low, r2_high = _calc_r2_ci(r_low, r_high)
+                    single_r2 = float(v.get('r2', r_single ** 2))
+                    p_val = v.get('p')
+                    p_single = float(p_val) if p_val is not None else np.nan
+                    return {
+                        'r': r_single,
+                        'r2': single_r2,
+                        'p': p_single,
+                        'n': n_single if n_single > 0 else None,
+                        'count': 1,
+                        'fisher_z': z_single,
+                        'fisher_weight': weight_single,
+                        'r_ci_lower': r_low,
+                        'r_ci_upper': r_high,
+                        'r2_ci_lower': r2_low,
+                        'r2_ci_upper': r2_high
+                    }
 
                 rs = np.array([v['r'] for v in values], dtype=float)
                 ps = np.array([v['p'] for v in values], dtype=float)
-                ns = np.array([max(int(v.get('n', 0)), 0) for v in values], dtype=float)
+                ns = np.array([max(int(v.get('n', 0) or 0), 0) for v in values], dtype=float)
                 # 유효 항목 필터
                 mask = np.isfinite(rs) & np.isfinite(ps) & (ns >= 1)
                 if not np.any(mask):
                     return None
-                rs = rs[mask]; ps = ps[mask]; ns = ns[mask]
+                rs = rs[mask]
+                ps = ps[mask]
+                ns = ns[mask]
                 # Fisher z 결합 (가중치 = n-3, 하한 1)
                 rs_clipped = np.clip(rs, -0.999999, 0.999999)
                 z = np.arctanh(rs_clipped)
                 w = np.maximum(ns - 3.0, 1.0)
-                z_bar = np.sum(w * z) / np.sum(w)
-                r_bar = np.tanh(z_bar)
+                weight_sum = float(np.sum(w))
+                z_bar = float(np.sum(w * z) / weight_sum)
+                r_bar = float(np.tanh(z_bar))
                 r2_bar = float(r_bar ** 2)
+                r_low, r_high = _calc_ci_from_z(z_bar, weight_sum)
+                r2_low, r2_high = _calc_r2_ci(r_low, r_high)
                 # Stouffer 방법 (방향성 반영)
                 try:
                     z_p = stats.norm.isf(ps / 2.0) * np.sign(rs)
                     Z = np.sum(w * z_p) / np.sqrt(np.sum(w ** 2))
                     p_comb = float(2.0 * stats.norm.sf(abs(Z)))
                 except Exception:
-                    p_comb = float(np.mean(ps))
-                return {'r': float(r_bar), 'r2': r2_bar, 'p': p_comb, 'n': int(np.sum(ns)), 'count': int(np.sum(mask))}
+                    p_comb = float(np.nanmean(ps))
+                n_total = int(np.sum(ns)) if float(np.sum(ns)) > 0 else None
+                return {
+                    'r': r_bar,
+                    'r2': r2_bar,
+                    'p': p_comb,
+                    'n': n_total,
+                    'count': int(np.sum(mask)),
+                    'fisher_z': z_bar,
+                    'fisher_weight': weight_sum,
+                    'r_ci_lower': r_low,
+                    'r_ci_upper': r_high,
+                    'r2_ci_lower': r2_low,
+                    'r2_ci_upper': r2_high
+                }
 
             step_avg_correlations = {}
             for key, values in step_correlations.items():
@@ -589,8 +646,8 @@ def calculate_file_correlations(data):
         correlations = {}
         
         # 1. NOOP frequency vs planning depth (sliding window)
-        if len(valid_actions) > 160:
-            window_size, stride = 160, 2
+        if len(valid_actions) > 150:
+            window_size, stride = 150, 1
             window_noop_freq, window_avg_depth = calculate_sliding_window_correlation(
                 valid_actions, valid_depths, window_size, stride, lambda x: np.sum(x == 0) / len(x)
             )
@@ -604,7 +661,7 @@ def calculate_file_correlations(data):
             correlations['noop_freq_vs_planning_depth'] = None
         
         # 2. NOOP frequency vs image similarity (sliding window)
-        if len(valid_actions) > 160:
+        if len(valid_actions) > 150:
             window_noop_freq, window_avg_sim = calculate_sliding_window_correlation(
                 valid_actions, valid_similarities, window_size, stride, lambda x: np.sum(x == 0) / len(x)
             )
@@ -634,7 +691,7 @@ def calculate_file_correlations(data):
             correlations['real_step_image_sim_vs_action_diversity'] = None
         
         # 5. NOOP frequency vs action diversity (sliding window)
-        if len(valid_actions) > 160:
+        if len(valid_actions) > 150:
             window_noop_freq, window_avg_action_div = calculate_sliding_window_correlation(
                 valid_actions, valid_action_diversities, window_size, stride, lambda x: np.sum(x == 0) / len(x)
             )
@@ -648,7 +705,7 @@ def calculate_file_correlations(data):
             correlations['noop_freq_vs_action_diversity'] = None
         
         # 6. Planning depth vs action diversity (sliding window)
-        if len(valid_depths) > 160:
+        if len(valid_depths) > 150:
             window_avg_depth, window_avg_action_div = calculate_sliding_window_correlation(
                 valid_depths, valid_action_diversities, window_size, stride, np.mean
             )
@@ -670,7 +727,7 @@ def calculate_file_correlations(data):
             correlations['real_step_image_sim_vs_imagination_diversity'] = None
         
         # 8. NOOP frequency vs imagination diversity (sliding window)
-        if len(valid_actions) > 160:
+        if len(valid_actions) > 150:
             window_noop_freq, window_avg_imagination_div = calculate_sliding_window_correlation(
                 valid_actions, valid_diversities, window_size, stride, lambda x: np.sum(x == 0) / len(x)
             )
@@ -684,7 +741,7 @@ def calculate_file_correlations(data):
             correlations['noop_freq_vs_imagination_diversity'] = None
         
         # 9. Planning depth vs imagination diversity (sliding window)
-        if len(valid_depths) > 160:
+        if len(valid_depths) > 150:
             window_avg_depth, window_avg_imagination_div = calculate_sliding_window_correlation(
                 valid_depths, valid_diversities, window_size, stride, np.mean
             )
@@ -798,19 +855,51 @@ def create_step_analysis_plots(gamename, step_data, output_dir):
         r2_values = []
         p_values = []
         counts = []
+        r_err_lower = []
+        r_err_upper = []
+        r2_err_lower = []
+        r2_err_upper = []
         
         for step, correlations in sorted(step_data.items()):
             if correlations and key in correlations and correlations[key] is not None:
+                corr = correlations[key]
                 steps.append(step)
-                r_values.append(correlations[key]['r'])
-                r2_values.append(correlations[key]['r2'])
-                p_values.append(correlations[key]['p'])
-                counts.append(correlations[key]['count'])
+                r_values.append(corr['r'])
+                r2_values.append(corr['r2'])
+                p_values.append(corr['p'])
+                counts.append(corr['count'])
+
+                r_lower = corr.get('r_ci_lower')
+                r_upper = corr.get('r_ci_upper')
+                if r_lower is None or r_upper is None:
+                    r_err_lower.append(0.0)
+                    r_err_upper.append(0.0)
+                else:
+                    r_err_lower.append(max(0.0, corr['r'] - r_lower))
+                    r_err_upper.append(max(0.0, r_upper - corr['r']))
+
+                r2_lower = corr.get('r2_ci_lower')
+                r2_upper = corr.get('r2_ci_upper')
+                if r2_lower is None or r2_upper is None:
+                    r2_err_lower.append(0.0)
+                    r2_err_upper.append(0.0)
+                else:
+                    r2_err_lower.append(max(0.0, corr['r2'] - r2_lower))
+                    r2_err_upper.append(max(0.0, r2_upper - corr['r2']))
         
         if len(steps) > 1:
             # R² 그래프
             plt.subplot(2, 1, 1)
-            plt.plot(steps, r2_values, 'o-', linewidth=2, markersize=8, color='blue')
+            plt.errorbar(
+                steps,
+                r2_values,
+                yerr=[r2_err_lower, r2_err_upper],
+                fmt='o-',
+                linewidth=2,
+                markersize=8,
+                color='blue',
+                capsize=4
+            )
             plt.xlabel('Training Steps')
             plt.ylabel('R²')
             plt.title(f'{gamename}: {title} - R² over Training Steps')
@@ -827,7 +916,16 @@ def create_step_analysis_plots(gamename, step_data, output_dir):
             
             # Pearson r 그래프
             plt.subplot(2, 1, 2)
-            plt.plot(steps, r_values, 'o-', linewidth=2, markersize=8, color='red')
+            plt.errorbar(
+                steps,
+                r_values,
+                yerr=[r_err_lower, r_err_upper],
+                fmt='o-',
+                linewidth=2,
+                markersize=8,
+                color='red',
+                capsize=4
+            )
             plt.xlabel('Training Steps')
             plt.ylabel('Pearson r')
             plt.title(f'{gamename}: {title} - Pearson r over Training Steps')
