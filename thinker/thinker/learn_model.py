@@ -13,6 +13,7 @@ from thinker.model_net import ModelNet, VPNet
 import thinker.util as util
 import gc
 from collections import namedtuple
+from thinker.bc_loader import FrameStackedBehavioralDataLoader
 
 def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_prob, is_weights, mask=None):
     k, b, d, _ = policy.shape
@@ -145,6 +146,9 @@ class SModelLearner:
         self.start_training = False
         self.finish = False
 
+        self._init_bc_components()
+        self.latest_icopro_model_stats = None
+
     def read_buffer_ptr(self):
         return self.model_buffer.read.remote(self.model_T, self.model_B, self.compute_beta(), add_t=self.flags.model_return_n+1)
 
@@ -269,6 +273,180 @@ class SModelLearner:
         self.real_step += new_psteps - self.last_psteps
         self.last_psteps = new_psteps
 
+    def _init_bc_components(self):
+        self.bc_loader = None
+        self.bc_enabled = False
+        self.bc_optimizer = None
+        self.bc_step = 0
+        self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
+        self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
+        self.bc_model_coef = float(getattr(self.flags, "icopro_model_coef", 1.0))
+
+        data_path = getattr(self.flags, "icopro_data_path", "")
+        if not data_path:
+            return
+        data_path = os.path.abspath(data_path)
+        subjects_raw = str(getattr(self.flags, "icopro_subjects", ""))
+        try:
+            subjects = [int(s.strip()) for s in subjects_raw.split(",") if s.strip()]
+        except ValueError:
+            self._logger.warning(f"Invalid icopro_subjects '{subjects_raw}'; disabling supervised model loss.")
+            return
+        if not subjects:
+            self._logger.warning("No valid icopro_subjects provided; disabling supervised model loss.")
+            return
+        game_id = int(getattr(self.flags, "icopro_game_id", 0))
+        try:
+            self.bc_loader = FrameStackedBehavioralDataLoader(
+                base_path=data_path,
+                subjects=subjects,
+                game_id=game_id,
+                frame_stack_n=self.flags.frame_stack_n,
+                target_size=(84, 84),
+                grayscale=self.flags.grayscale,
+                normalize=True,
+            )
+        except Exception as exc:
+            self._logger.warning(f"Failed to initialise IcoPro model data loader: {exc}")
+            self.bc_loader = None
+            return
+        if len(self.bc_loader.data_files) == 0:
+            self._logger.warning("IcoPro model data loader found no files; disabling supervised model loss.")
+            self.bc_loader = None
+            return
+        lr = float(getattr(self.flags, "icopro_model_lr", 0.0))
+        if lr <= 0:
+            self._logger.warning("icopro_model_lr <= 0; supervised model updates disabled.")
+            return
+        self.bc_optimizer = torch.optim.Adam(self.model_net.vp_net.parameters(), lr=lr)
+        self.bc_enabled = True
+        self._logger.info(f"IcoPro model data loader initialised with {len(self.bc_loader.data_files)} files (subjects={subjects}, game_id={game_id}).")
+
+    def _sample_bc_batch(self):
+        if self.bc_loader is None:
+            return None
+        batch = self.bc_loader.get_paired_batch(batch_size=self.bc_batch_size)
+        if batch is None:
+            return None
+        obs = torch.from_numpy(batch["obs"]).float().to(self.device)
+        next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)
+        actions_np = np.asarray(batch["actions"])
+        if actions_np.ndim > 1 and actions_np.shape[-1] > 1:
+            actions_idx = actions_np.argmax(axis=-1)
+        else:
+            actions_idx = actions_np.reshape(-1)
+        actions = torch.from_numpy(actions_idx.astype(np.int64)).long().to(self.device)
+        rewards = torch.from_numpy(np.asarray(batch["rewards"], dtype=np.float32)).to(self.device)
+        dones_np = batch.get("dones")
+        if dones_np is not None:
+            dones = torch.from_numpy(np.asarray(dones_np, dtype=np.float32)).to(self.device)
+        else:
+            dones = torch.zeros_like(rewards)
+        return {"obs": obs, "next_obs": next_obs, "actions": actions, "rewards": rewards, "dones": dones}
+
+    def _compute_bc_loss(self):
+        if not self.bc_enabled or self.bc_loader is None:
+            return None
+        batch = self._sample_bc_batch()
+        if batch is None:
+            return None
+        obs = batch["obs"]
+        next_obs = batch["next_obs"]
+        actions = batch["actions"]
+        rewards = batch["rewards"]
+        dones = batch["dones"]
+        if getattr(self.model_net, "state_dtype_n", 0) == 0:
+            obs_input = (obs * 255.0).clamp(0, 255).to(torch.uint8)
+            next_input = (next_obs * 255.0).clamp(0, 255).to(torch.uint8)
+        else:
+            obs_input = obs
+            next_input = next_obs
+        batch_size = obs.shape[0]
+        done = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        prev_actions = torch.zeros(batch_size, 1, dtype=torch.long, device=self.device)
+        current_actions = actions.view(batch_size, 1)
+        action_seq = torch.stack([prev_actions, current_actions], dim=0)
+        state = self.model_net.initial_state(batch_size=batch_size, device=self.device)
+        model_out = self.model_net.forward(
+            env_state=obs_input,
+            done=done,
+            actions=action_seq,
+            state=state,
+            future_env_state=next_input,
+            training=True,
+        )
+        losses = []
+        reward_loss = None
+        if getattr(model_out, "rs", None) is not None:
+            predicted_rewards = model_out.rs[0]
+            if predicted_rewards.ndim == 2:
+                predicted_rewards = predicted_rewards[:, 0]
+            reward_loss = F.mse_loss(predicted_rewards.float(), rewards.float())
+            losses.append(reward_loss)
+        policy_loss = None
+        if getattr(model_out, "policy", None) is not None:
+            policy_logits = model_out.policy[0].float()
+            policy_logits = policy_logits.view(policy_logits.shape[0], -1)
+            policy_loss = F.cross_entropy(policy_logits, actions.long())
+            losses.append(policy_loss)
+        state_loss = None
+        if getattr(model_out, "xs", None) is not None:
+            predicted_next = model_out.xs[0]
+            target_next = self.model_net.normalize(next_input)
+            predicted_next = predicted_next.float()
+            mask = (1.0 - dones.view(-1, *([1] * (predicted_next.dim() - 1)))).to(predicted_next.dtype)
+            diff = (predicted_next - target_next) * mask
+            state_loss = torch.mean(diff ** 2)
+            losses.append(state_loss)
+        done_loss = None
+        if getattr(model_out, "done_logits", None) is not None:
+            done_logits = model_out.done_logits[0].float()
+            if done_logits.dim() > 1:
+                done_logits = done_logits.squeeze(-1)
+            done_targets = dones.float()
+            done_loss = F.binary_cross_entropy_with_logits(done_logits, done_targets)
+            losses.append(done_loss)
+        if not losses:
+            return None
+        total_loss = sum(losses)
+        total_loss = self.bc_model_coef * total_loss
+        result = {"total_loss": total_loss}
+        if reward_loss is not None:
+            result["reward_loss"] = reward_loss
+        if policy_loss is not None:
+            result["policy_loss"] = policy_loss
+        if state_loss is not None:
+            result["state_loss"] = state_loss
+        if done_loss is not None:
+            result["done_loss"] = done_loss
+        return result
+
+    def _maybe_run_bc_update(self):
+        if not self.bc_enabled or self.bc_loader is None or self.bc_optimizer is None:
+            return None
+        self.bc_step += 1
+        if self.bc_step % self.bc_supervised_freq != 0:
+            return None
+        metrics = self._compute_bc_loss()
+        if metrics is None:
+            return None
+        total_loss = metrics["total_loss"]
+        self.bc_optimizer.zero_grad()
+        total_loss.backward()
+        if self.flags.model_grad_norm_clipping > 0:
+            torch.nn.utils.clip_grad_norm_(self.model_net.vp_net.parameters(), self.flags.model_grad_norm_clipping)
+        self.bc_optimizer.step()
+        out = {"total_loss": total_loss.detach().cpu().item()}
+        if "reward_loss" in metrics:
+            out["reward_loss"] = metrics["reward_loss"].detach().cpu().item()
+        if "policy_loss" in metrics:
+            out["policy_loss"] = metrics["policy_loss"].detach().cpu().item()
+        if "state_loss" in metrics:
+            out["state_loss"] = metrics["state_loss"].detach().cpu().item()
+        if "done_loss" in metrics:
+            out["done_loss"] = metrics["done_loss"].detach().cpu().item()
+        return out
+
     def consume_data(self, data, model_buffer=None):
         # model_buffer is only provided in non-parallel mode
         # which is required for updating the priorities of 
@@ -328,6 +506,9 @@ class SModelLearner:
             self.timing.time("update_priority")
         losses = losses_m
         losses.update(losses_p)
+        icopro_stats = self._maybe_run_bc_update()
+        if icopro_stats is not None:
+            self.latest_icopro_model_stats = icopro_stats
         # print statistics
         if self.timer() - self.start_time > 5:
             self.sps_buffer[self.sps_buffer_n] = (self.step, self.timer())
@@ -366,10 +547,8 @@ class SModelLearner:
             ]
             for k in print_stats:
                 if k in losses and losses[k] is not None:
-                    print_str += " %s %.6f" % (
-                        k,
-                        losses[k].item() / self.numel_per_step,
-                    )
+                    value = losses[k].item()
+                    print_str += " %s %.6f" % (k, value / self.numel_per_step)
             self._logger.info(print_str)
             self.start_time = self.timer()
 
@@ -380,14 +559,22 @@ class SModelLearner:
                 "model/total_norm_m": total_norm_m.item(),
                 "model/total_norm_p": total_norm_p.item(),
             }
-            for k in losses.keys():
-                stats["model/" + k] = (
-                    losses[k].item() / self.numel_per_step
-                    if k in losses and losses[k] is not None
-                    else None
-                )
-
+            for k, value in losses.items():
+                if value is None:
+                    continue
+                stats["model/" + k] = value.item() / self.numel_per_step
+            if self.latest_icopro_model_stats:
+                stats["icopro/model/total_loss"] = self.latest_icopro_model_stats["total_loss"]
+                if "reward_loss" in self.latest_icopro_model_stats:
+                    stats["icopro/model/reward_loss"] = self.latest_icopro_model_stats["reward_loss"]
+                if "policy_loss" in self.latest_icopro_model_stats:
+                    stats["icopro/model/policy_loss"] = self.latest_icopro_model_stats["policy_loss"]
+                if "state_loss" in self.latest_icopro_model_stats:
+                    stats["icopro/model/state_loss"] = self.latest_icopro_model_stats["state_loss"]
+                if "done_loss" in self.latest_icopro_model_stats:
+                    stats["icopro/model/done_loss"] = self.latest_icopro_model_stats["done_loss"]
             self.plogger.log(stats)
+            self.latest_icopro_model_stats = None
             if self.timing is not None:
                 print(self.timing.summary())
         if int(time.strftime("%M")) // 10 != self.ckp_start_time:

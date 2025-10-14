@@ -180,19 +180,22 @@ class FileWriter:
         self._logfile = open(self.paths["logs"], "a")
         self._logwriter = csv.DictWriter(self._logfile, fieldnames=self.fieldnames)
 
-    def log(self, to_log: Dict, verbose: bool = False) -> None:     
+    def log(self, to_log: Dict, verbose: bool = False) -> None:
         to_log["_tick"] = self._tick
         self._tick += 1
-        to_log["_time"] = time.time()        
+        to_log["_time"] = time.time()
 
-        old_len = len(self.fieldnames)
+        old_fieldnames = list(self.fieldnames)
         for k in to_log:
             if k not in self.fieldnames:
                 self.fieldnames.append(k)
 
+        new_fields_added = len(self.fieldnames) != len(old_fieldnames)
+
         if to_log["_tick"] == 0:
             self._logfile.write("%s\n" % ",".join(self.fieldnames))
-            self.fieldnames                
+        elif new_fields_added:
+            self._rewrite_logs_with_new_fields(old_fieldnames)
 
         if verbose:
             self._logger.info(
@@ -202,6 +205,49 @@ class FileWriter:
 
         self._logwriter.writerow(to_log)
         self._logfile.flush()
+
+    def _rewrite_logs_with_new_fields(self, previous_fieldnames):
+        """Rewrite the CSV log so that the header matches the expanded field list."""
+        self._logfile.close()
+
+        existing_rows = []
+        normalized_header = previous_fieldnames
+        if os.path.exists(self.paths["logs"]):
+            with open(self.paths["logs"], "r", newline="") as csvfile:
+                reader = csv.reader(csvfile)
+                rows = list(reader)
+            if rows:
+                header = rows[0]
+                normalized_header = [
+                    h if h != "# _tick" else "_tick" for h in header
+                ]
+                data_rows = rows[1:]
+                for row in data_rows:
+                    if not row:
+                        continue
+                    extra = []
+                    if len(row) < len(normalized_header):
+                        row = row + [""] * (len(normalized_header) - len(row))
+                    elif len(row) > len(normalized_header):
+                        extra = row[len(normalized_header):]
+                        row = row[:len(normalized_header)]
+                    row_dict = dict(zip(normalized_header, row))
+                    if extra:
+                        new_keys = [fn for fn in self.fieldnames if fn not in normalized_header]
+                        for key, value in zip(new_keys, extra):
+                            row_dict[key] = value
+                    existing_rows.append(row_dict)
+
+        with open(self.paths["logs"], "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=self.fieldnames)
+            csvfile.write("%s\n" % ",".join(self.fieldnames))
+            for row in existing_rows:
+                for key in self.fieldnames:
+                    row.setdefault(key, "")
+                writer.writerow(row)
+
+        self._logfile = open(self.paths["logs"], "a", newline="")
+        self._logwriter = csv.DictWriter(self._logfile, fieldnames=self.fieldnames)
 
     def close(self, successful: bool = True) -> None:
         self.metadata["date_end"] = datetime.datetime.now().strftime(

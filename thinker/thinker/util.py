@@ -157,6 +157,9 @@ def process_flags_actor(flags):
         flags.cur_cost = 0.
         flags.cur_enable = False    
 
+    if getattr(flags, 'preload', '') and not getattr(flags, 'preload_actor', ''):
+        flags.preload_actor = flags.preload
+
     if not flags.has_model:
         flags.train_model = False
     
@@ -227,35 +230,6 @@ def add_parse(filename, parser=None, prefix=''):
         except:
             # if there is dulplicate key, just ignore
             pass
-    # Add BC (Behavioral Cloning) specific arguments
-    try:
-        parser.add_argument('--bc_clone', action='store_true', help='Enable offline PE-RLHF training instead of the default pipeline')
-        parser.add_argument('--mode', type=int, choices=[1, 2, 3], default=1, help='1=actor only, 2=model only, 3=actor and model')
-        parser.add_argument('--bc_epochs', type=int, default=100, help='Number of offline training epochs')
-        parser.add_argument('--bc_lr', type=float, default=0.0001, help='Learning rate for actor and critics during offline training')
-        parser.add_argument('--bc_model_lr', type=float, default=0.0001, help='Learning rate for ModelNet updates during offline training')
-        parser.add_argument('--bc_prior_coef', type=float, default=1.0, help='Weight for the behavior cloning log-likelihood term')
-        parser.add_argument('--bc_batch_size', type=int, default=32, help='Offline batch size')
-        parser.add_argument('--bc_subjects', type=str, default='1,2,3', help='Comma-separated subject IDs for offline data')
-        parser.add_argument('--bc_game_id', type=int, default=1, help='Game ID for offline data (0: Enduro, 1: Pong, 2: Space Invaders)')
-        parser.add_argument('--bc_data_path', type=str, default='../behavioral_data_4kframe_legacy', help='Path to offline behavioral data')
-        parser.add_argument('--proj_name', type=str, default='bc_checkpoints', help='Directory name for saving offline checkpoints')
-        parser.add_argument('--bc_save_interval', type=int, default=10, help='Save offline checkpoint every N epochs')
-        parser.add_argument('--bc_eval_interval', type=int, default=0, help='How often (in epochs) to run offline evaluation; 0 disables periodic eval')
-        parser.add_argument('--bc_eval_batches', type=int, default=1, help='Number of batches to average during offline evaluation')
-        parser.add_argument('--bc_eval_batch_size', type=int, default=32, help='Batch size to use during offline evaluation')
-        parser.add_argument('--bc_gamma', type=float, default=0.99, help='Discount factor for offline PE-RLHF updates')
-        parser.add_argument('--bc_alpha', type=float, default=0.1, help='Initial entropy temperature for the actor')
-        parser.add_argument('--bc_cost_coef', type=float, default=1.0, help='Coefficient for takeover-cost regularisation in the actor loss')
-        parser.add_argument('--bc_default_takeover_cost', type=float, default=1.0, help='Fallback takeover cost when the dataset does not provide it')
-        parser.add_argument('--bc_target_entropy', type=float, default=None, help='Target entropy override for temperature tuning; defaults to -num_actions')
-        parser.add_argument('--bc_updates_per_epoch', type=int, default=128, help='Gradient updates per epoch during offline training')
-        parser.add_argument('--bc_cql_alpha', type=float, default=0.0, help='Weight of the conservative Q-learning penalty applied to critics')
-        parser.add_argument('--bc_max_grad_norm', type=float, default=10.0, help='Gradient clipping threshold for offline training')
-    except:
-        # If arguments already exist, ignore
-        pass
-    
     return parser
 
 def create_flags(filename, save_flags=True, post_fn=None, **kwargs):

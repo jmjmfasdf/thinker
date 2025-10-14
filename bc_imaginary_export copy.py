@@ -109,21 +109,6 @@ def record_entry(entries, status, real_img, im_img, tree_reps, real_vec, im_vec,
     entries.append(entry)
 
 
-def node_expanded_check(node, current_t):
-    """
-    Check if a node is already expanded, mimicking cenv.pyx node_expanded().
-    
-    In cenv.pyx:
-        bool node_expanded(Node* pnode, int t):
-            return pnode[0].ppchildren[0].size() > 0 and t <= pnode[0].t
-    
-    In python_tree:
-        - node.children is the equivalent of ppchildren
-        - node.time_step is the equivalent of t
-    """
-    return len(node.children) > 0 and current_t <= node.time_step
-
-
 def run_planning_step(
     obs_stack,
     dataset_action_idx,
@@ -222,115 +207,51 @@ def run_planning_step(
     last_reset = torch.zeros(1, dtype=torch.long, device=device)
     final_action_idx = prev_action_idx
 
-    # Track current time step for node expansion checking
-    current_t = 0
-
     for step in range(flags.rec_t - 1):
-        current_t += 1
-        
-        # Get current node and check next node status BEFORE advance
-        # This mirrors cenv.pyx lines 762-773
-        current_node = tree_manager.cur_nodes[0]
-        action_idx = int(last_action.item())
-        
-        # Ensure children exist
-        if not current_node.children:
-            current_node.ensure_children(torch.zeros(num_actions, device=device))
-        
-        next_node = current_node.children[action_idx]
-        
-        # Determine status: 2 (expanded), 3 (done), or 4 (need expand)
-        # Mimicking cenv.pyx lines 765-773
-        if node_expanded_check(next_node, current_t):
-            # Status 2: already expanded
-            status = 2
-            needs_expansion = False
-        elif current_node.done:
-            # Status 3: done already
-            status = 3
-            needs_expansion = False
+        with torch.no_grad():
+            step_out = model_net.forward_single(state=model_state, action=last_action, training=False)
+        xs = step_out.xs[0] if step_out.xs is not None else None
+        hs = step_out.hs[0] if step_out.hs is not None else None
+
+        if xs is not None:
+            current_xs = xs.clone()
+        if hs is not None:
+            current_hs = hs.clone()
+
+        model_state = clone_state(step_out.state)
+
+        encoded_payload = [{}]
+        if xs is not None:
+            encoded_payload[0]["xs"] = xs[0]
+        if hs is not None:
+            encoded_payload[0]["hs"] = hs[0]
+
+        logits = step_out.policy[0] if step_out.policy is not None else torch.zeros(1, num_actions, device=device)
+        if logits.dim() == 3:
+            logits = logits.squeeze(1)
+
+        if hasattr(step_out, "rs") and step_out.rs is not None:
+            rewards_step = step_out.rs[0]
+            if rewards_step.dim() == 2:
+                rewards_step = rewards_step.squeeze(1)
         else:
-            # Status 4: need expand
-            status = 4
-            needs_expansion = True
+            rewards_step = torch.zeros(1, device=device)
 
-        # Only run model forward if we need to expand (status 4)
-        # Mimicking cenv.pyx lines 835-851
-        if needs_expansion:
-            with torch.no_grad():
-                step_out = model_net.forward_single(state=model_state, action=last_action, training=False)
-            xs = step_out.xs[0] if step_out.xs is not None else None
-            hs = step_out.hs[0] if step_out.hs is not None else None
+        if step_out.vs is not None:
+            values_step = step_out.vs[0]
+            if values_step.dim() == 2:
+                values_step = values_step.squeeze(1)
+        else:
+            values_step = torch.zeros(1, device=device)
 
-            if xs is not None:
-                current_xs = xs.clone()
-            if hs is not None:
-                current_hs = hs.clone()
+        if hasattr(step_out, "dones") and step_out.dones is not None:
+            dones_step = step_out.dones[0]
+            if dones_step.dim() == 2:
+                dones_step = dones_step.squeeze(1)
+        else:
+            dones_step = torch.zeros(1, dtype=torch.bool, device=device)
 
-            model_state = clone_state(step_out.state)
-
-            encoded_payload = [{}]
-            if xs is not None:
-                encoded_payload[0]["xs"] = xs[0]
-            if hs is not None:
-                encoded_payload[0]["hs"] = hs[0]
-
-            logits = step_out.policy[0] if step_out.policy is not None else torch.zeros(1, num_actions, device=device)
-            if logits.dim() == 3:
-                logits = logits.squeeze(1)
-
-            if hasattr(step_out, "rs") and step_out.rs is not None:
-                rewards_step = step_out.rs[0]
-                if rewards_step.dim() == 2:
-                    rewards_step = rewards_step.squeeze(1)
-            else:
-                rewards_step = torch.zeros(1, device=device)
-
-            if step_out.vs is not None:
-                values_step = step_out.vs[0]
-                if values_step.dim() == 2:
-                    values_step = values_step.squeeze(1)
-            else:
-                values_step = torch.zeros(1, device=device)
-
-            if hasattr(step_out, "dones") and step_out.dones is not None:
-                dones_step = step_out.dones[0]
-                if dones_step.dim() == 2:
-                    dones_step = dones_step.squeeze(1)
-            else:
-                dones_step = torch.zeros(1, dtype=torch.bool, device=device)
-        
-        # Advance to next node (mimicking cenv.pyx lines 887, 890, 901, 923)
-        # Note: we haven't advanced yet, so we're still at the parent
-        tree_manager.advance(last_action)
-        
-        # Now tree_manager.cur_nodes[0] is the next_node
-        # Expand if needed (Status 4) - mimicking cenv.pyx lines 903-923
-        if needs_expansion:
-            # Override=True because we're updating an existing child node
-            # The child was created by ensure_children, but needs its values set
-            tree_manager.expand_current(rewards_step, values_step, dones_step, logits, encoded_payload, override=True)
-        elif status == 3:
-            # Status 3: done node - expand with zero values
-            # Mimicking cenv.pyx lines 894-901
-            logits_zero = torch.tensor([child.logit for child in current_node.children], device=device).unsqueeze(0)
-            tree_manager.expand_current(
-                torch.zeros(1, device=device),
-                torch.zeros(1, device=device),
-                torch.ones(1, dtype=torch.bool, device=device),
-                logits_zero,
-                [current_node.encoded or {}],
-                override=True
-            )
-        # Status 2 (already expanded): no expand needed, just visit (done by expand_current or manually below)
-
-        # Always visit after advance (mimicking cenv.pyx lines 888, 899, 921, 929)
-        # This is crucial for rollout statistics accumulation
-        from python_tree import node_visit
-        current_visited_node = tree_manager.cur_nodes[0]
-        # Force visit to accumulate stats even if already visited
-        current_visited_node.visited = False
-        node_visit(current_visited_node)
+        tree_manager.expand_current(rewards_step, values_step, dones_step, logits, encoded_payload)
 
         step_status = 2 if step == flags.rec_t - 2 else 1
         env_out = SimpleNamespace()
@@ -372,10 +293,11 @@ def run_planning_step(
                 for key in model_state:
                     if key in initial_model_state and hasattr(model_state[key], "clone"):
                         model_state[key][should_reset] = initial_model_state[key][should_reset].clone()
-            # Reset: go back to root (mimicking cenv.pyx lines 980-984)
-            tree_manager.cur_nodes[0] = tree_manager.root_nodes[0]
-            node_visit(tree_manager.cur_nodes[0])
-        
+            tree_manager.advance(next_action, resets=should_reset)
+        else:
+            last_reset.zero_()
+            tree_manager.advance(next_action)
+
         tree_reps = tree_manager.compute_tree_reps(reset_flags=should_reset)
 
         current_im = None

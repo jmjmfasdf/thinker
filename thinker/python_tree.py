@@ -320,12 +320,24 @@ class TreeManager:
         values: torch.Tensor,
         logits: torch.Tensor,
         encoded: Sequence[Dict[str, Any]],
+        dones: Optional[torch.Tensor] = None,
     ) -> None:
         for idx, root in enumerate(self.root_nodes):
-            r = rewards[idx] if rewards is not None else torch.tensor(0.0, device=values.device)
+            if rewards is not None:
+                r = rewards[idx]
+            else:
+                r = torch.tensor(0.0, device=values.device)
             v = values[idx]
             logit_vec = logits[idx]
-            node_expand(root, r, v, t=0, done=torch.tensor(False), logits=logit_vec, encoded=encoded[idx], override=False)
+            if dones is not None:
+                done_flag = dones[idx]
+                if not torch.is_tensor(done_flag):
+                    done_flag = torch.tensor(bool(done_flag), device=values.device)
+                else:
+                    done_flag = done_flag.to(device=values.device)
+            else:
+                done_flag = torch.tensor(False, device=values.device)
+            node_expand(root, r, v, t=0, done=done_flag, logits=logit_vec, encoded=encoded[idx], override=False)
             node_visit(root)
             root.max_q = max(root.max_q, root.rollout_q)
 
@@ -431,12 +443,17 @@ class TreeManager:
 
             if self.has_action_seq:
                 base = idx5
+                node = current
                 depth = int(self.rollout_depth[idx].item())
-                if depth >= 0:
-                    action = current.action
-                    seq_idx = base + depth * self.num_actions + action
+                # Trace back through parent nodes to record full action sequence
+                # Mimicking cenv.pyx lines 454-458
+                for j in range(depth + 1):
+                    if node is None:
+                        break
+                    seq_idx = base + (depth - j) * self.num_actions + node.action
                     if seq_idx < reps.shape[1]:
                         reps[idx, seq_idx] = 1.0
+                    node = node.parent
 
         return reps
 

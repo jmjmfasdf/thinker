@@ -54,6 +54,7 @@ class SelfPlayWorker:
         self.rank = rank
         self.env_n = env_n
         self.flags = flags
+        self.ckpdir = getattr(flags, 'ckpdir', None)
      
         self.timing = util.Timings()
         self.actor_id = (

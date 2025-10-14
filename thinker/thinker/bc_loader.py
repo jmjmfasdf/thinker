@@ -315,6 +315,8 @@ class FrameStackedBehavioralDataLoader:
         
         
         # Sample from each selected file
+        batch_dones = []
+        batch_next_actions = []
         for file_idx, num_samples in zip(file_indices, samples_per_file):
             file_samples = self._sample_from_file(file_idx, num_samples)
             if file_samples:
@@ -322,17 +324,26 @@ class FrameStackedBehavioralDataLoader:
                 batch_next_obs.extend(file_samples['next_obs'])
                 batch_actions.extend(file_samples['actions'])
                 batch_rewards.extend(file_samples['rewards'])
-        
+                if 'dones' in file_samples:
+                    batch_dones.extend(file_samples['dones'])
+                if 'next_actions' in file_samples:
+                    batch_next_actions.extend(file_samples['next_actions'])
+
         if len(batch_obs) == 0:
             return None
-            
-        return {
+
+        batch = {
             'obs': np.stack(batch_obs, axis=0),           # [B, C*stack_n, H, W]
             'next_obs': np.stack(batch_next_obs, axis=0), # [B, C*stack_n, H, W]
             'actions': np.stack(batch_actions, axis=0),   # [B, action_dim]
             'rewards': np.stack(batch_rewards, axis=0)    # [B]
         }
-    
+        if batch_dones:
+            batch['dones'] = np.stack(batch_dones, axis=0)
+        if batch_next_actions:
+            batch['next_actions'] = np.stack(batch_next_actions, axis=0)
+        return batch
+
     def _sample_from_file(self, file_idx: int, num_samples: int) -> Optional[Dict[str, list]]:
         """
         Sample specified number of data points from a specific file
@@ -356,20 +367,11 @@ class FrameStackedBehavioralDataLoader:
         if len(images) < min_length:
             return None
         
-        # Find valid indices (not episode boundaries, not terminal)
+        # Find valid indices (ensure sufficient frames)
         valid_indices = []
         for i in range(self.frame_stack_n - 1, len(images) - 1):
             curr_idx = i
             next_idx = i + 1
-            
-            # Skip if next frame is first frame (episode boundary)
-            if next_idx < len(is_first) and is_first[next_idx]:
-                continue
-                
-            # Skip if current frame is terminal
-            if curr_idx < len(is_terminal) and is_terminal[curr_idx]:
-                continue
-                
             valid_indices.append(curr_idx)
         
         if len(valid_indices) == 0:
@@ -385,32 +387,50 @@ class FrameStackedBehavioralDataLoader:
         file_obs = []
         file_next_obs = []
         file_actions = []
+        file_next_actions = []
         file_rewards = []
-        
+        file_dones = []
+
         filename = os.path.basename(self.data_files[file_idx])
-        
+
         for curr_idx in sampled_indices:
             next_idx = curr_idx + 1
-            
+
             # Create frame stacks
             curr_obs = self._create_frame_stack(images, curr_idx)
             next_obs = self._create_frame_stack(images, next_idx)
-            
-            # Get action and reward
-            action = actions[curr_idx]
-            reward = rewards[curr_idx]
-            
-            
+
+            # Get action, reward, and terminal flag
+            action_curr = actions[curr_idx]
+            action_next = actions[next_idx] if next_idx < len(actions) else actions[curr_idx]
+            if actions.ndim > 1 and actions.shape[-1] > 1:
+                action_curr_idx = int(np.argmax(action_curr))
+                action_next_idx = int(np.argmax(action_next))
+            else:
+                action_curr_idx = int(action_curr)
+                action_next_idx = int(action_next)
+            start_idx = max(0, curr_idx - self.frame_stack_n + 1)
+            reward_sum = float(np.sum(rewards[start_idx:curr_idx + 1]))
+            done_flag = False
+            if curr_idx < len(is_terminal) and is_terminal[curr_idx]:
+                done_flag = True
+            elif next_idx < len(is_first) and is_first[next_idx]:
+                done_flag = True
+
             file_obs.append(curr_obs)
             file_next_obs.append(next_obs)
-            file_actions.append(action)
-            file_rewards.append(reward)
-        
+            file_actions.append(action_curr_idx)
+            file_next_actions.append(action_next_idx)
+            file_rewards.append(reward_sum)
+            file_dones.append(done_flag)
+
         return {
             'obs': file_obs,
             'next_obs': file_next_obs,
             'actions': file_actions,
-            'rewards': file_rewards
+            'next_actions': file_next_actions,
+            'rewards': file_rewards,
+            'dones': file_dones
         }
 
     def reset(self):
