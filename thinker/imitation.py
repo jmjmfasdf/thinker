@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Optional, NamedTuple
+from typing import Any, Dict, List, Optional, Tuple, NamedTuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from python_tree import TreeManager
+from python_tree import TreeManager, node_expand, node_visit
 
 
 class PolicyBatch(NamedTuple):
@@ -36,6 +36,8 @@ def compute_icopro_actor_losses(
     obs: torch.Tensor,
     actions: torch.Tensor,
     *,
+    prev_actions: Optional[torch.Tensor] = None,
+    sequence_starts: Optional[torch.Tensor] = None,
     margin_value: float,
     margin_coef: float,
     ce_coef: float,
@@ -43,7 +45,13 @@ def compute_icopro_actor_losses(
     requires_grad: bool = True,
 ) -> dict[str, torch.Tensor | float]:
     """Run Thinker forward pass and compute IcoPro-style actor losses."""
-    policy = policy_adapter.forward(obs, actions=actions, requires_grad=requires_grad)
+    policy = policy_adapter.forward(
+        obs,
+        actions=actions,
+        prev_actions=prev_actions,
+        sequence_starts=sequence_starts,
+        requires_grad=requires_grad,
+    )
     q_policy = policy.logits
     tree_q = policy_adapter.last_tree_q
     if tree_q is not None and tree_coef != 0.0:
@@ -88,16 +96,37 @@ class ThinkerPolicyAdapter:
         if self.num_actions is None:
             raise ValueError("Actor network must define 'num_actions'.")
         self._latent_buffer: Optional[torch.Tensor] = None
+        self._tree_manager: Optional[TreeManager] = None
+        self._time_step: Optional[torch.Tensor] = None
+        self._last_real_actions: Optional[torch.Tensor] = None
         self._last_tree_q: Optional[torch.Tensor] = None
         self._last_tree_reps: Optional[torch.Tensor] = None
+        self._last_rollout_history: Optional[List[List[Dict[str, Any]]]] = None
+        self._last_imagined_actions: Optional[torch.Tensor] = None
+        self._pending_force_reset: Optional[torch.Tensor] = None
         if not hasattr(self.actor_net, "policy"):
             raise AttributeError("Actor network must expose a 'policy' layer for imitation training")
         self._hook = self.actor_net.policy.register_forward_pre_hook(self._capture_latent)
+        self.training = self.actor_net.training or self.model_net.training
+
+    def train(self, mode: bool = True):
+        self.training = bool(mode)
+        self.actor_net.train(mode)
+        self.model_net.train(mode)
+        return self
+
+    def eval(self):
+        return self.train(False)
 
     def close(self) -> None:
         if self._hook is not None:
             self._hook.remove()
             self._hook = None
+        self._tree_manager = None
+        self._time_step = None
+        self._last_real_actions = None
+        self._last_rollout_history = None
+        self._last_imagined_actions = None
 
     def _capture_latent(self, _module, inputs):
         if not inputs:
@@ -113,6 +142,28 @@ class ThinkerPolicyAdapter:
         if torch.is_tensor(state):
             return state.detach().clone()
         return state
+
+    def _extract_single_state(self, state, idx):
+        if isinstance(state, dict):
+            return {k: self._extract_single_state(v, idx) for k, v in state.items()}
+        if isinstance(state, (list, tuple)):
+            return type(state)(self._extract_single_state(v, idx) for v in state)
+        if torch.is_tensor(state):
+            return state[idx].detach().clone()
+        return state
+
+    def _restore_state_indices(self, target, reference, indices):
+        if not indices.numel():
+            return
+        if isinstance(target, dict):
+            for key in target:
+                if key in reference:
+                    self._restore_state_indices(target[key], reference[key], indices)
+        elif isinstance(target, list):
+            for tgt, ref in zip(target, reference):
+                self._restore_state_indices(tgt, ref, indices)
+        elif torch.is_tensor(target):
+            target[indices] = reference[indices].detach().clone()
 
     def _prepare_model_obs(self, obs: torch.Tensor) -> torch.Tensor:
         if getattr(self.model_net, "state_dtype_n", 0) == 0:
@@ -172,6 +223,69 @@ class ThinkerPolicyAdapter:
         env_out.reward = torch.zeros(1, batch_size, reward_dim, device=self.device)
         return env_out
 
+    def _compute_sr_vectors(self, real_state: torch.Tensor, model_state) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if not hasattr(self.model_net, "sr_net"):
+            return None, None
+        sr = self.model_net.sr_net
+        with torch.no_grad():
+            state = real_state.unsqueeze(0)
+            state = self._prepare_model_obs(state)
+            state = self.model_net.normalize(state)
+            dim_actions = getattr(sr, "dim_rep_actions", 1)
+            dummy_action = torch.zeros(1, dim_actions, device=state.device)
+            dummy_done = torch.zeros(1, dtype=torch.bool, device=state.device)
+            real_vec, _ = sr.encoder(state, dummy_done, dummy_action, {}, flatten=False)
+            real_vec = real_vec.squeeze(0).detach().cpu().numpy()
+            im_vec = None
+            if isinstance(model_state, dict) and "sr_h" in model_state:
+                im_vec = model_state["sr_h"].detach().cpu().numpy()
+        if im_vec is None and real_vec is not None:
+            im_vec = np.copy(real_vec)
+        return real_vec, im_vec
+    
+    def _build_history_entry(
+        self,
+        real_state: torch.Tensor,
+        encoded: Dict[str, Any],
+        tree_rep: torch.Tensor,
+        *,
+        status: int,
+        human_action: Optional[int],
+        imagined_action: Optional[int],
+        forced_reset: bool = False,
+    ) -> Dict[str, Any]:
+        real_img = torch.clamp(real_state, 0.0, 1.0).detach().cpu().numpy()
+        real_img_uint8 = (real_img * 255.0).clip(0, 255).astype(np.uint8)
+    
+        xs = encoded.get("xs")
+        if xs is not None:
+            im_tensor = torch.clamp(xs.detach().cpu(), 0.0, 1.0)
+            im_img = im_tensor.numpy().astype(np.float32)
+        else:
+            im_img = np.zeros_like(real_img, dtype=np.float32)
+    
+        model_state = encoded.get("model_state")
+        real_vec, im_vec = self._compute_sr_vectors(real_state, model_state)
+    
+        if torch.is_tensor(tree_rep):
+            tree_rep_np = tree_rep.detach().cpu().numpy()
+        else:
+            tree_rep_np = np.asarray(tree_rep)
+    
+        entry = {
+            "status": int(status),
+            "real_img": real_img_uint8,
+            "im_img": im_img,
+            "tree_reps": tree_rep_np,
+            "real_vectors": real_vec,
+            "im_vectors": im_vec,
+            "human_action": int(human_action) if human_action is not None else -1,
+            "imagined_action": int(imagined_action) if imagined_action is not None else None,
+            "forced_reset": bool(forced_reset),
+        }
+        return entry
+    
+    
     def _rollout(
         self,
         obs: torch.Tensor,
@@ -179,17 +293,42 @@ class ThinkerPolicyAdapter:
         requires_grad: bool,
         real_rewards: Optional[torch.Tensor] = None,
         real_dones: Optional[torch.Tensor] = None,
+        sequence_starts: Optional[torch.Tensor] = None,
+        prev_actions: Optional[torch.Tensor] = None,
+        record_history: bool = False,
     ):
         device = self.device
         obs_float = obs.to(device).float()
-        model_input = self._prepare_model_obs(obs_float)
         batch_size = obs_float.shape[0]
+    
+        if sequence_starts is not None:
+            sequence_starts = sequence_starts.to(device=device, dtype=torch.bool).view(batch_size)
+        else:
+            sequence_starts = torch.ones(batch_size, dtype=torch.bool, device=device)
+    
+        if prev_actions is not None:
+            prev_actions = prev_actions.to(device=device, dtype=torch.long).view(batch_size)
+        elif self._last_real_actions is not None and self._last_real_actions.shape[0] == batch_size:
+            prev_actions = self._last_real_actions.to(device=device, dtype=torch.long)
+        else:
+            prev_actions = torch.zeros(batch_size, dtype=torch.long, device=device)
+    
+        teacher_actions = (
+            initial_action.to(device=device, dtype=torch.long).view(batch_size)
+            if initial_action is not None
+            else None
+        )
+    
+        model_input = self._prepare_model_obs(obs_float)
         init_state = self.model_net.initial_state(batch_size=batch_size, device=device)
         dummy_actions = torch.zeros(1, batch_size, 1, dtype=torch.long, device=device)
         dummy_done = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    
         self._last_tree_q = None
         self._last_tree_reps = None
-        with torch.enable_grad():
+    
+        grad_context = torch.enable_grad if requires_grad else torch.no_grad
+        with grad_context():
             initial_model_out = self.model_net.forward(
                 env_state=model_input,
                 done=dummy_done,
@@ -197,6 +336,7 @@ class ThinkerPolicyAdapter:
                 state=init_state,
                 training=False,
             )
+    
         initial_policy = getattr(initial_model_out, "policy", None)
         if initial_policy is not None:
             init_policy = initial_policy[0]
@@ -205,6 +345,7 @@ class ThinkerPolicyAdapter:
             init_policy = init_policy.detach()
         else:
             init_policy = torch.full((batch_size, self.num_actions), 1.0 / self.num_actions, device=device)
+    
         initial_values = getattr(initial_model_out, "vs", None)
         if initial_values is not None:
             init_values = initial_values[0]
@@ -213,6 +354,7 @@ class ThinkerPolicyAdapter:
             init_values = init_values.detach()
         else:
             init_values = torch.zeros(batch_size, device=device)
+    
         initial_rewards = getattr(initial_model_out, "rs", None)
         if initial_rewards is not None:
             init_rewards = initial_rewards[0]
@@ -221,21 +363,22 @@ class ThinkerPolicyAdapter:
             init_rewards = init_rewards.detach()
         else:
             init_rewards = None
+    
         if real_rewards is not None:
             root_rewards = real_rewards.to(device=device, dtype=torch.float32).view(-1).detach()
         else:
             root_rewards = init_rewards
         if root_rewards is not None:
             root_rewards = root_rewards.detach()
+    
         if real_dones is not None:
-            root_dones = real_dones.to(device=device)
-            if root_dones.dtype != torch.bool:
-                root_dones = root_dones.bool()
-            root_dones = root_dones.view(-1).detach()
+            root_dones = real_dones.to(device=device, dtype=torch.bool).view(-1).detach()
         else:
             root_dones = None
+    
         initial_xs = initial_model_out.xs[0].detach() if getattr(initial_model_out, "xs", None) is not None else None
         initial_hs = initial_model_out.hs[0].detach() if getattr(initial_model_out, "hs", None) is not None else None
+    
         root_payload = []
         for idx in range(batch_size):
             encoded = {"real_states": obs_float[idx]}
@@ -243,83 +386,186 @@ class ThinkerPolicyAdapter:
                 encoded["xs"] = initial_xs[idx]
             if initial_hs is not None:
                 encoded["hs"] = initial_hs[idx]
+            encoded["model_state"] = self._extract_single_state(initial_model_out.state, idx)
             root_payload.append(encoded)
-        tree_manager = TreeManager(batch_size=batch_size, num_actions=self.num_actions, flags=self.flags, device=device)
-        tree_manager.expand_root(root_rewards, init_values, init_policy, root_payload, root_dones)
-        tree_reps = tree_manager.compute_tree_reps()
-        current_xs = initial_xs.clone() if initial_xs is not None else None
-        current_hs = initial_hs.clone() if initial_hs is not None else None
-        model_state = self._clone_state(initial_model_out.state)
+    
+        rewards_tensor = (
+            root_rewards.to(device=device, dtype=torch.float32)
+            if root_rewards is not None
+            else torch.zeros(batch_size, dtype=torch.float32, device=device)
+        )
+        dones_tensor = (
+            root_dones.to(device=device, dtype=torch.bool)
+            if root_dones is not None
+            else torch.zeros(batch_size, dtype=torch.bool, device=device)
+        )
+    
+        if self._tree_manager is None or self._tree_manager.batch_size != batch_size:
+            tree_manager = TreeManager(batch_size=batch_size, num_actions=self.num_actions, flags=self.flags, device=device)
+            tree_manager.set_remember_path(bool(getattr(self.flags, "tree_carry", True)))
+            tree_manager.expand_root(root_rewards, init_values, init_policy, root_payload, root_dones)
+            self._tree_manager = tree_manager
+            self._time_step = torch.zeros(batch_size, dtype=torch.long, device=device)
+        else:
+            tree_manager = self._tree_manager
+            if self._time_step is None or self._time_step.shape[0] != batch_size:
+                self._time_step = torch.zeros(batch_size, dtype=torch.long, device=device)
+            tree_manager.set_remember_path(bool(getattr(self.flags, "tree_carry", True)))
+            refresh_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            for idx in range(batch_size):
+                tree_manager.record_real_transition(idx)
+                if sequence_starts[idx]:
+                    tree_manager.reset_root(
+                        idx,
+                        rewards_tensor[idx],
+                        init_values[idx],
+                        init_policy[idx],
+                        root_payload[idx],
+                        dones_tensor[idx],
+                        time_step=0,
+                    )
+                    self._time_step[idx] = 0
+                else:
+                    prev_act_val = int(prev_actions[idx].item())
+                    done_flag = bool(dones_tensor[idx].item()) if dones_tensor is not None else False
+                    if tree_manager.can_carry(idx, prev_act_val, done=done_flag):
+                        carried = tree_manager.carry_root(idx, prev_act_val)
+                    else:
+                        carried = False
+                    if carried:
+                        refresh_mask[idx] = True
+                        self._time_step[idx] += 1
+                    else:
+                        tree_manager.reset_root(
+                            idx,
+                            rewards_tensor[idx],
+                            init_values[idx],
+                            init_policy[idx],
+                            root_payload[idx],
+                            dones_tensor[idx],
+                            time_step=0,
+                        )
+                        self._time_step[idx] = 0
+            if refresh_mask.any():
+                tree_manager.refresh_root(
+                    rewards_tensor,
+                    init_values,
+                    init_policy,
+                    root_payload,
+                    dones_tensor,
+                    time_step=self._time_step,
+                    mask=refresh_mask,
+                )
+    
+        self._tree_manager = tree_manager
+    
+        root_status = torch.ones(batch_size, dtype=torch.long, device=self.device)
+        tree_reps = tree_manager.compute_tree_reps(status=root_status)
+        history = [[] for _ in range(batch_size)] if record_history else None
+        root_entry_idx: List[Optional[int]] = [None] * batch_size
+    
+        if record_history:
+            tree_reps_cpu = tree_reps.detach().cpu()
+            for idx in range(batch_size):
+                encoded_root = tree_manager.root_nodes[idx].encoded or {}
+                human_action = (
+                    int(teacher_actions[idx].item())
+                    if teacher_actions is not None
+                    else int(prev_actions[idx].item())
+                )
+                entry = self._build_history_entry(
+                    obs_float[idx],
+                    encoded_root,
+                    tree_reps_cpu[idx],
+                    status=1,
+                    human_action=human_action,
+                    imagined_action=None,
+                )
+                history[idx].append(entry)
+                root_entry_idx[idx] = len(history[idx]) - 1
+    
+        current_xs = tree_manager.get_current_encoded("xs")
+        if current_xs is not None:
+            current_xs = current_xs.detach()
+        elif initial_xs is not None:
+            current_xs = initial_xs.clone()
+    
+        current_hs = tree_manager.get_current_encoded("hs")
+        if current_hs is not None:
+            current_hs = current_hs.detach()
+        elif initial_hs is not None:
+            current_hs = initial_hs.clone()
+    
+        initial_model_state = self._clone_state(initial_model_out.state)
+        model_state = self._clone_state(initial_model_state)
         actor_core_state = self.actor_net.initial_state(batch_size=batch_size, device=device)
         last_reset = torch.zeros(batch_size, dtype=torch.long, device=device)
-        if initial_action is not None:
-            initial_action = initial_action.detach()
-            last_action = initial_action.to(device=device, dtype=torch.long).view(batch_size)
-        else:
-            self._latent_buffer = None
-            env_out_root = self._make_env_out(
-                current_xs if current_xs is not None else obs_float,
-                tree_reps,
-                torch.zeros(batch_size, dtype=torch.long, device=device),
-                last_reset,
-                0,
-                current_xs=current_xs,
-                current_hs=current_hs,
-            )
-            with torch.no_grad():
-                actor_out, actor_core_state = self.actor_net(env_out_root, core_state=actor_core_state)
-            last_action = self._extract_action(actor_out)
-            self._latent_buffer = None
+        next_reset_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    
+        self._latent_buffer = None
+        env_out_root = self._make_env_out(
+            current_xs if current_xs is not None else obs_float,
+            tree_reps,
+            prev_actions,
+            last_reset,
+            0,
+            current_xs=current_xs,
+            current_hs=current_hs,
+        )
+        with torch.no_grad():
+            actor_out, actor_core_state = self.actor_net(env_out_root, core_state=actor_core_state)
+        root_actor_action = self._extract_action(actor_out).long()
+    
+        last_action = prev_actions.clone()
+        if sequence_starts.any():
+            last_action = torch.where(sequence_starts, root_actor_action, last_action)
+    
         rollout_steps = max(0, int(getattr(self.flags, "rec_t", 1)) - 1)
-        
-        # Track current time step for node expansion checking
         current_t = 0
-        
+
+        prev_force_reset = getattr(self, "_pending_force_reset", None)
+        if prev_force_reset is None or prev_force_reset.shape[0] != batch_size:
+            prev_force_reset = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        else:
+            prev_force_reset = prev_force_reset.to(device=device, dtype=torch.bool)
+        prev_force_reset = torch.where(sequence_starts, torch.zeros_like(prev_force_reset), prev_force_reset)
+        current_force_reset = prev_force_reset.clone()
+    
         for step in range(rollout_steps):
             current_t += 1
-            
-            # Check node expansion status BEFORE advancing (mimicking cenv.pyx lines 762-773)
-            # Determine which nodes need expansion (status 4) vs already expanded (status 2) vs done (status 3)
-            needs_expansion_mask = []
             status_mask = []
-            
+            needs_expansion_mask = []
+            parent_nodes = list(tree_manager.cur_nodes)
+            apply_reset_mask = next_reset_mask.clone()
+    
             for batch_idx in range(batch_size):
-                current_node = tree_manager.cur_nodes[batch_idx]
+                if apply_reset_mask[batch_idx]:
+                    status_mask.append(5)
+                    needs_expansion_mask.append(False)
+                    continue
+                current_node = parent_nodes[batch_idx]
                 action_idx = int(last_action[batch_idx].item())
-                
-                # Ensure children exist
                 if not current_node.children:
                     current_node.ensure_children(torch.zeros(self.num_actions, device=device))
-                
                 next_node = current_node.children[action_idx]
-                
-                # Check if node is already expanded (mimicking cenv.pyx node_expanded())
-                # bool node_expanded(Node* pnode, int t):
-                #     return pnode[0].ppchildren[0].size() > 0 and t <= pnode[0].t
                 is_expanded = len(next_node.children) > 0 and current_t <= next_node.time_step
-                
                 if is_expanded:
-                    # Status 2: already expanded
-                    needs_expansion_mask.append(False)
                     status_mask.append(2)
-                elif current_node.done:
-                    # Status 3: done already
                     needs_expansion_mask.append(False)
+                elif current_node.done:
                     status_mask.append(3)
+                    needs_expansion_mask.append(False)
                 else:
-                    # Status 4: need expand
-                    needs_expansion_mask.append(True)
                     status_mask.append(4)
-            
-            needs_expansion_mask = torch.tensor(needs_expansion_mask, device=device)
-            any_needs_expansion = needs_expansion_mask.any()
-            
-            # Only run model forward if ANY node needs expansion (status 4)
-            # Mimicking cenv.pyx lines 835-851
+                    needs_expansion_mask.append(True)
+    
+            needs_expansion_mask = torch.tensor(needs_expansion_mask, device=device, dtype=torch.bool)
+            any_needs_expansion = bool(needs_expansion_mask.any())
+            xs = hs = logits = rewards = dones = values = None
+            payload = [None] * batch_size
+
             if any_needs_expansion:
-                # For efficiency, only forward the subset that needs expansion
-                # But for simplicity in batched operations, we forward all and only use needed outputs
-                with torch.enable_grad():
+                with grad_context():
                     model_out = self.model_net.forward_single(state=model_state, action=last_action, training=False)
                 xs = model_out.xs[0].detach() if getattr(model_out, "xs", None) is not None else None
                 hs = model_out.hs[0].detach() if getattr(model_out, "hs", None) is not None else None
@@ -331,60 +577,67 @@ class ThinkerPolicyAdapter:
                 logits = model_out.policy[0] if getattr(model_out, "policy", None) is not None else torch.zeros(batch_size, self.num_actions, device=device)
                 if logits.dim() == 3:
                     logits = logits.squeeze(1)
-                logits = logits.detach()
+                if torch.is_tensor(logits):
+                    logits = logits.detach()
                 rewards = model_out.rs[0] if getattr(model_out, "rs", None) is not None else torch.zeros(batch_size, device=device)
-                if rewards.dim() == 2:
+                if torch.is_tensor(rewards) and rewards.dim() == 2:
                     rewards = rewards.squeeze(-1)
-                rewards = rewards.detach() if torch.is_tensor(rewards) else rewards
+                if torch.is_tensor(rewards):
+                    rewards = rewards.detach()
                 dones = model_out.dones[0] if getattr(model_out, "dones", None) is not None else torch.zeros(batch_size, dtype=torch.bool, device=device)
-                dones = dones.detach() if torch.is_tensor(dones) else dones
+                if torch.is_tensor(dones):
+                    dones = dones.detach()
                 values = model_out.vs[0] if getattr(model_out, "vs", None) is not None else torch.zeros(batch_size, device=device)
-                if values.dim() == 2:
+                if torch.is_tensor(values) and values.dim() == 2:
                     values = values.squeeze(-1)
-                values = values.detach() if torch.is_tensor(values) else values
-                payload = []
+                if torch.is_tensor(values):
+                    values = values.detach()
+    
                 for idx in range(batch_size):
                     encoded = {}
                     if xs is not None:
                         encoded["xs"] = xs[idx]
                     if hs is not None:
                         encoded["hs"] = hs[idx]
-                    payload.append(encoded)
-            
-            # Advance to next node (mimicking cenv.pyx lines 887, 890, 901, 923)
-            tree_manager.advance(last_action)
-            
-            # Now tree_manager.cur_nodes point to the next nodes
-            # Expand if needed based on status (mimicking cenv.pyx status handling)
+                    encoded["model_state"] = self._extract_single_state(model_out.state, idx)
+                    payload[idx] = encoded
+    
+            tree_manager.advance(last_action, resets=apply_reset_mask)
+            if apply_reset_mask.any():
+                tree_manager.cur_t[apply_reset_mask] = 0
+                reset_indices = torch.nonzero(apply_reset_mask, as_tuple=False).view(-1)
+                if reset_indices.numel():
+                    if current_xs is not None and initial_xs is not None:
+                        current_xs[reset_indices] = initial_xs[reset_indices]
+                    if current_hs is not None and initial_hs is not None:
+                        current_hs[reset_indices] = initial_hs[reset_indices]
+                    self._restore_state_indices(model_state, initial_model_state, reset_indices)
+    
             for batch_idx in range(batch_size):
                 status = status_mask[batch_idx]
                 current_node = tree_manager.cur_nodes[batch_idx]
-                
+                parent_node = parent_nodes[batch_idx]
+    
                 if status == 4:
-                    # Status 4: need expand - use model outputs
-                    # Mimicking cenv.pyx lines 903-923
-                    from python_tree import node_expand, node_visit
+                    encoded = payload[batch_idx] or {"model_state": self._extract_single_state(model_out.state, batch_idx)}
                     node_expand(
                         current_node,
-                        rewards[batch_idx],
-                        values[batch_idx],
+                        rewards[batch_idx] if rewards is not None else torch.tensor(0.0, device=device),
+                        values[batch_idx] if values is not None else torch.tensor(0.0, device=device),
                         t=current_t,
-                        done=dones[batch_idx],
-                        logits=logits[batch_idx],
-                        encoded=payload[batch_idx],
-                        override=True  # Override because child was created by ensure_children
+                        done=dones[batch_idx] if dones is not None else torch.tensor(False, device=device),
+                        logits=logits[batch_idx] if logits is not None else torch.zeros(self.num_actions, device=device),
+                        encoded=encoded,
+                        override=True,
                     )
                     node_visit(current_node)
                     current_node.max_q = max(current_node.max_q, current_node.rollout_q)
                 elif status == 3:
-                    # Status 3: done node - expand with zero values
-                    # Mimicking cenv.pyx lines 894-901
-                    from python_tree import node_expand, node_visit
-                    parent_node = tree_manager.root_nodes[batch_idx]  # Get parent for logits
-                    if len(parent_node.children) > 0:
+                    if parent_node.children:
                         logits_zero = torch.tensor([child.logit for child in parent_node.children], device=device)
                     else:
                         logits_zero = torch.zeros(self.num_actions, device=device)
+                    encoded = dict(parent_node.encoded or {})
                     node_expand(
                         current_node,
                         torch.tensor(0.0, device=device),
@@ -392,25 +645,42 @@ class ThinkerPolicyAdapter:
                         t=current_t,
                         done=torch.tensor(True, device=device),
                         logits=logits_zero,
-                        encoded=parent_node.encoded or {},
-                        override=True
+                        encoded=encoded,
+                        override=True,
                     )
                     node_visit(current_node)
                     current_node.max_q = max(current_node.max_q, current_node.rollout_q)
                 else:
-                    # Status 2: already expanded - just visit
-                    # Mimicking cenv.pyx lines 887-890
-                    from python_tree import node_visit
-                    # Force visit to accumulate rollout statistics
-                    current_node.visited = False
                     node_visit(current_node)
-            
-            # Update rollout depth after processing
-            tree_manager.cur_t[:] = current_t
-            tree_manager.rollout_depth += 1
-            
-            tree_reps = tree_manager.compute_tree_reps()
+    
+            status_tensor = torch.tensor(status_mask, dtype=torch.long, device=self.device)
+            tree_reps = tree_manager.compute_tree_reps(reset_flags=apply_reset_mask, status=status_tensor)
             step_status = 2 if step == rollout_steps - 1 else 1
+            last_reset = apply_reset_mask.long()
+    
+            if record_history:
+                tree_reps_cpu = tree_reps.detach().cpu()
+                for idx in range(batch_size):
+                    status_val = int(status_mask[idx])
+                    encoded_node = tree_manager.cur_nodes[idx].encoded or {}
+                    human_action = (
+                        int(teacher_actions[idx].item())
+                        if teacher_actions is not None
+                        else int(prev_actions[idx].item())
+                    )
+                    imagined_action = int(last_action[idx].item())
+                    forced_reset_flag = bool(prev_force_reset[idx].item()) if status_val == 5 else False
+                    entry = self._build_history_entry(
+                        obs_float[idx],
+                        encoded_node,
+                        tree_reps_cpu[idx],
+                        status=status_val,
+                        human_action=human_action,
+                        imagined_action=imagined_action,
+                        forced_reset=forced_reset_flag,
+                    )
+                    history[idx].append(entry)
+    
             env_out_im = self._make_env_out(
                 current_xs if current_xs is not None else obs_float,
                 tree_reps,
@@ -424,15 +694,51 @@ class ThinkerPolicyAdapter:
             with torch.no_grad():
                 actor_out, actor_core_state = self.actor_net(env_out_im, core_state=actor_core_state)
             next_action = self._extract_action(actor_out).long()
+            reset_action = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            if hasattr(actor_out, "reset") and actor_out.reset is not None:
+                reset_probs = actor_out.reset[0]
+                reset_action = reset_probs > 0.5
+            force_reset = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            max_depth = getattr(self.flags, "max_depth", 0)
+            if max_depth > 0:
+                force_reset = tree_manager.rollout_depth >= max_depth
+            next_reset_mask = (reset_action | force_reset).detach().bool()
+            current_force_reset = force_reset.detach().bool()
+            if record_history:
+                tree_reps_cpu = tree_reps.detach().cpu()
+                next_action_cpu = next_action.detach().cpu()
+                for idx in range(batch_size):
+                    status_val = int(status_mask[idx])
+                    encoded_node = tree_manager.cur_nodes[idx].encoded or {}
+                    human_action = (
+                        int(teacher_actions[idx].item())
+                        if teacher_actions is not None
+                        else int(prev_actions[idx].item())
+                    )
+                    imagined_action = int(next_action_cpu[idx].item())
+                    forced_reset_flag = bool(current_force_reset[idx].item()) if status_val == 5 else False
+                    entry = self._build_history_entry(
+                        obs_float[idx],
+                        encoded_node,
+                        tree_reps_cpu[idx],
+                        status=status_val,
+                        human_action=human_action,
+                        imagined_action=imagined_action,
+                        forced_reset=forced_reset_flag,
+                    )
+                    history[idx].append(entry)
             self._latent_buffer = None
             last_action = next_action
-            last_reset.zero_()
+            prev_force_reset = current_force_reset.clone()
+
+        self._pending_force_reset = current_force_reset.detach().clone()
         tree_manager.reset_real_step()
-        tree_reps = tree_manager.compute_tree_reps()
+        tree_reps = tree_manager.compute_tree_reps(status=torch.ones(batch_size, dtype=torch.long, device=self.device))
         q_values = torch.zeros(batch_size, self.num_actions, dtype=torch.float32, device=self.device)
         for idx, root in enumerate(tree_manager.root_nodes):
             for action_idx, child in enumerate(root.children):
                 q_values[idx, action_idx] = float(child.rollout_q)
+    
         final_reset = torch.zeros_like(last_reset)
         final_visual = current_xs if current_xs is not None else obs_float
         env_out_final = self._make_env_out(
@@ -450,24 +756,49 @@ class ThinkerPolicyAdapter:
         else:
             with torch.no_grad():
                 actor_out, _ = self.actor_net(env_out_final, core_state=actor_core_state, compute_loss=True)
+    
+        final_actions = self._extract_action(actor_out).long()
+        self._last_real_actions = final_actions.detach().clone()
+    
+        if record_history:
+            final_actions_cpu = final_actions.detach().cpu()
+            for idx, entry_idx in enumerate(root_entry_idx):
+                if entry_idx is not None:
+                    history[idx][entry_idx]["imagined_action"] = int(final_actions_cpu[idx].item())
+            self._last_rollout_history = history
+            self._last_imagined_actions = final_actions_cpu
+        else:
+            self._last_rollout_history = None
+            self._last_imagined_actions = None
+    
         self._last_tree_q = q_values
         self._last_tree_reps = tree_reps.detach()
         return actor_out
-
     def forward(
         self,
         obs: torch.Tensor,
         actions: Optional[torch.Tensor] = None,
-        requires_grad: bool = True,
+        *,
+        prev_actions: Optional[torch.Tensor] = None,
+        requires_grad: Optional[bool] = None,
         real_rewards: Optional[torch.Tensor] = None,
         real_dones: Optional[torch.Tensor] = None,
+        sequence_starts: Optional[torch.Tensor] = None,
+        record_history: bool = False,
     ) -> PolicyBatch:
+        if requires_grad is None:
+            requires_grad = self.actor_net.training or self.model_net.training or self.training
+        self.training = bool(requires_grad)
+
         actor_out = self._rollout(
             obs,
             actions,
             requires_grad,
             real_rewards=real_rewards,
             real_dones=real_dones,
+            sequence_starts=sequence_starts,
+            prev_actions=prev_actions,
+            record_history=record_history,
         )
         logits_tensor = getattr(actor_out, "pri_param", None)
         if logits_tensor is not None:
@@ -484,6 +815,7 @@ class ThinkerPolicyAdapter:
         if self._latent_buffer is None:
             raise RuntimeError("Actor latent representation hook did not trigger.")
         latent = torch.relu(self._latent_buffer)
+        self._last_real_actions = torch.argmax(logits.detach(), dim=-1).to(device=self.device)
         latent = latent.view(latent.shape[0], -1)
         if not requires_grad:
             latent = latent.detach()
@@ -499,3 +831,11 @@ class ThinkerPolicyAdapter:
     @property
     def last_tree_reps(self) -> Optional[torch.Tensor]:
         return self._last_tree_reps
+
+    @property
+    def last_rollout_history(self) -> Optional[List[List[Dict[str, Any]]]]:
+        return self._last_rollout_history
+
+    @property
+    def last_imagined_actions(self) -> Optional[torch.Tensor]:
+        return self._last_imagined_actions

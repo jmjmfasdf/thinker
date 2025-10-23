@@ -2,7 +2,6 @@
 import argparse
 import os
 import sys
-from types import SimpleNamespace
 import math
 
 import cv2
@@ -16,7 +15,7 @@ sys.path.insert(0, os.path.join(SCRIPT_DIR, "thinker"))
 from thinker import util
 from thinker.actor_net import ActorNet
 from thinker.model_net import ModelNet
-from python_tree import TreeManager
+from imitation import ThinkerPolicyAdapter
 
 
 def parse_args():
@@ -25,7 +24,12 @@ def parse_args():
     parser.add_argument("--preload", required=True, help="Path to checkpoint directory containing ckp_*.tar")
     parser.add_argument("--savedir", required=True, help="Directory to store the generated npy")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="Computation device")
-    parser.add_argument("--max-steps", type=int, default=None, help="Optional limit on processed steps")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Optional limit on processed logical steps (each consumes frame_stack frames)",
+    )
     return parser.parse_args()
 
 
@@ -34,31 +38,76 @@ def ensure_dir(path):
 
 
 def preprocess_frame(frame, target_size, grayscale):
-    if frame.shape[:2] != target_size:
-        frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
-    if grayscale and frame.shape[-1] == 3:
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    if frame.ndim == 2:
         frame = frame[..., np.newaxis]
-    frame = frame.astype(np.uint8)
+    if frame.shape[0] != target_size[1] or frame.shape[1] != target_size[0]:
+        frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+        if frame.ndim == 2:
+            frame = frame[..., np.newaxis]
+    if grayscale:
+        if frame.shape[-1] == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        frame = frame[..., np.newaxis]
+    else:
+        if frame.shape[-1] == 1:
+            frame = np.repeat(frame, 3, axis=-1)
+        elif frame.shape[-1] == 4:
+            frame = frame[..., :3]
+    frame = frame.astype(np.float32) / 255.0
     frame = np.transpose(frame, (2, 0, 1))
     return frame
 
 
-def build_frame_stack(history, frame_stack, blank_frame):
+def build_stack_for_index(
+    images: np.ndarray,
+    index: int,
+    frame_stack: int,
+    blank_frame: np.ndarray,
+    target_size,
+    grayscale: bool,
+    episode_ids: np.ndarray,
+) -> np.ndarray:
     frames = []
-    missing = frame_stack - len(history)
-    for _ in range(missing):
-        frames.append(blank_frame)
-    frames.extend(list(history))
+    target_episode = episode_ids[index]
+    for offset in range(frame_stack - 1, -1, -1):
+        src_idx = index - offset
+        if src_idx < 0 or episode_ids[src_idx] != target_episode:
+            frames.append(blank_frame)
+        else:
+            frames.append(preprocess_frame(images[src_idx], target_size, grayscale))
     return np.concatenate(frames, axis=0)
 
 
-def clone_state(state):
-    if isinstance(state, dict):
-        return {k: (v.clone() if hasattr(v, "clone") else v) for k, v in state.items()}
-    if hasattr(state, "clone"):
-        return state.clone()
-    return state
+def compute_stack_step_metadata(
+    valid_mask: np.ndarray,
+    is_first: np.ndarray,
+    frame_stack: int,
+) -> tuple[list[int], list[int], list[bool]]:
+    """Identify frame indices that correspond to complete stacked observations."""
+    is_first_bool = np.asarray(is_first, dtype=bool)
+    logical_indices: list[int] = []
+    prev_indices: list[int] = []
+    seq_flags: list[bool] = []
+
+    frames_since_reset = 0
+    total_frames = len(valid_mask)
+    for idx in range(total_frames):
+        new_episode = idx == 0 or is_first_bool[idx]
+        if new_episode:
+            frames_since_reset = 1
+        else:
+            frames_since_reset += 1
+
+        if not valid_mask[idx]:
+            continue
+
+        if frames_since_reset >= frame_stack and frames_since_reset % frame_stack == 0:
+            prev_idx = idx - frame_stack if frames_since_reset > frame_stack else -1
+            logical_indices.append(idx)
+            prev_indices.append(prev_idx)
+            seq_flags.append(prev_idx < 0)
+
+    return logical_indices, prev_indices, seq_flags
 
 
 def convert_obs(obs_stack, model_net, device):
@@ -70,23 +119,33 @@ def convert_obs(obs_stack, model_net, device):
     return obs_tensor.float()
 
 
-def extract_vectors(model_net, obs_tensor, model_state):
-    real_vec = None
-    im_vec = None
-    if hasattr(model_net, "sr_net"):
-        with torch.no_grad():
-            sr = model_net.sr_net
-            real_state = obs_tensor.unsqueeze(0).unsqueeze(0)
-            real_state_norm = model_net.normalize(real_state)
-            dummy_action = torch.zeros(1, 1, sr.dim_rep_actions, device=obs_tensor.device)
-            dummy_done = torch.zeros(1, 1, dtype=torch.bool, device=obs_tensor.device)
-            real_vec, _ = sr.encoder(real_state_norm, dummy_done, dummy_action, {}, flatten=True)
-            real_vec = real_vec.squeeze(0).detach().cpu().numpy()
-            if isinstance(model_state, dict) and "sr_h" in model_state:
-                im_vec = model_state["sr_h"].detach().cpu().numpy()
-    if im_vec is None and real_vec is not None:
-        im_vec = np.copy(real_vec)
-    return real_vec, im_vec
+
+
+def compute_episode_ids(is_first: np.ndarray) -> np.ndarray:
+    flags = is_first.astype(bool)
+    episode_ids = np.zeros_like(flags, dtype=np.int64)
+    current_id = -1
+    for idx, flag in enumerate(flags):
+        if flag or current_id < 0:
+            current_id += 1
+        episode_ids[idx] = current_id
+    if current_id < 0:
+        episode_ids[:] = 0
+    return episode_ids
+
+
+
+def extract_human_actions(actions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if actions.ndim == 1:
+        human_actions = actions.astype(np.int64)
+        valid_mask = human_actions >= 0
+    elif actions.ndim == 2:
+        human_actions = np.argmax(actions, axis=1).astype(np.int64)
+        valid_mask = actions.sum(axis=1) > 0.0
+    else:
+        raise ValueError(f"Unsupported action tensor shape: {actions.shape}")
+    return human_actions, valid_mask
+
 
 
 def decode_tree_reps_tensor(tree_reps_tensor, num_actions, dim_actions, rec_t, flags):
@@ -95,330 +154,6 @@ def decode_tree_reps_tensor(tree_reps_tensor, num_actions, dim_actions, rec_t, f
     decoded = util.decode_tree_reps(tree_reps_tensor.unsqueeze(0), num_actions, dim_actions, rec_t, enc_type, enc_f_type)
     return {k: v.detach().cpu().numpy() for k, v in decoded.items()}
 
-
-def record_entry(entries, status, real_img, im_img, tree_reps, real_vec, im_vec, human_action):
-    entry = {
-        "status": int(status),
-        "real_img": real_img,
-        "im_img": im_img,
-        "tree_reps": tree_reps,
-        "real_vectors": real_vec,
-        "im_vectors": im_vec,
-        "human_action": int(human_action),
-    }
-    entries.append(entry)
-
-
-def node_expanded_check(node, current_t):
-    """
-    Check if a node is already expanded, mimicking cenv.pyx node_expanded().
-    
-    In cenv.pyx:
-        bool node_expanded(Node* pnode, int t):
-            return pnode[0].ppchildren[0].size() > 0 and t <= pnode[0].t
-    
-    In python_tree:
-        - node.children is the equivalent of ppchildren
-        - node.time_step is the equivalent of t
-    """
-    return len(node.children) > 0 and current_t <= node.time_step
-
-
-def run_planning_step(
-    obs_stack,
-    dataset_action_idx,
-    prev_action_idx,
-    prev_reward_value,
-    prev_done_flag,
-    model_net,
-    actor_net,
-    flags,
-    device,
-    num_actions,
-    dim_actions,
-    copy_ch,
-):
-    obs_tensor = convert_obs(obs_stack, model_net, device)
-    current_obs = obs_tensor.float() if obs_tensor.dtype == torch.uint8 else obs_tensor
-
-    with torch.no_grad():
-        initial_state = model_net.initial_state(batch_size=1, device=device)
-        initial_out = model_net.forward(
-            env_state=obs_tensor,
-            actions=torch.zeros(1, 1, 1, dtype=torch.long, device=device),
-            done=torch.zeros(1, dtype=torch.bool, device=device),
-            state=initial_state,
-        )
-
-    model_state = clone_state(initial_out.state)
-    initial_model_state = clone_state(model_state)
-    initial_xs = initial_out.xs[0] if initial_out.xs is not None else None
-    initial_hs = initial_out.hs[0] if initial_out.hs is not None else None
-
-    if initial_out.policy is not None:
-        init_policy = initial_out.policy[0]
-        if init_policy.dim() == 3:
-            init_policy = init_policy.squeeze(1)
-    else:
-        init_policy = torch.full((1, num_actions), 1.0 / num_actions, device=device)
-
-    if initial_out.vs is not None:
-        init_values = initial_out.vs[0]
-        if init_values.dim() == 2:
-            init_values = init_values.squeeze(-1)
-    else:
-        init_values = torch.zeros(1, device=device)
-
-    init_rewards = None
-    if hasattr(initial_out, "rs") and initial_out.rs is not None:
-        init_rewards = initial_out.rs[0]
-
-    tree_manager = TreeManager(batch_size=1, num_actions=num_actions, flags=flags, device=device)
-    root_payload = {"real_states": obs_tensor[0]}
-    if initial_xs is not None:
-        root_payload["xs"] = initial_xs[0]
-    if initial_hs is not None:
-        root_payload["hs"] = initial_hs[0]
-    tree_manager.expand_root(init_rewards, init_values, init_policy, [root_payload])
-    tree_reps = tree_manager.compute_tree_reps()
-
-    frame_ch = obs_stack.shape[0] // flags.frame_stack_n
-    last_frame = obs_stack[-copy_ch:, :, :]
-    if initial_xs is not None:
-        im_root = torch.clamp(initial_xs[0], 0.0, 1.0).detach().cpu().numpy()
-        im_root = im_root[-copy_ch:, :, :]
-    else:
-        im_root = np.zeros_like(last_frame, dtype=np.float32)
-
-    real_vec, im_vec = extract_vectors(model_net, obs_tensor[0], initial_model_state)
-
-    done_tensor = torch.full((1, 1), bool(prev_done_flag), dtype=torch.bool, device=device)
-
-    entries = []
-    imagined_actions = []
-    decoded_root = decode_tree_reps_tensor(tree_reps, num_actions, dim_actions, flags.rec_t, flags)
-    dataset_onehot = np.zeros(num_actions, dtype=np.float32)
-    dataset_onehot[dataset_action_idx] = 1.0
-
-    root_shape = decoded_root["root_action"].shape
-    cur_shape = decoded_root["cur_action"].shape
-    root_onehot = np.zeros(root_shape, dtype=np.float32)
-    root_onehot.reshape(-1)[:] = dataset_onehot
-    cur_onehot = np.zeros(cur_shape, dtype=np.float32)
-    cur_onehot.reshape(-1)[:] = dataset_onehot
-    decoded_root["root_action"] = root_onehot
-    decoded_root["cur_action"] = cur_onehot
-    record_entry(entries, 0, last_frame.copy(), im_root.copy(), decoded_root, real_vec, im_vec, dataset_action_idx)
-    imagined_actions.append(99)
-    root_entry_index = 0
-
-    current_xs = initial_xs.clone() if initial_xs is not None else None
-    current_hs = initial_hs.clone() if initial_hs is not None else None
-
-    reward_dim = 1 + int(flags.im_cost > 0.0) + int(flags.cur_cost > 0.0)
-    actor_state = actor_net.initial_state(batch_size=1, device=device)
-
-    last_action = torch.tensor([prev_action_idx], dtype=torch.long, device=device)
-    last_reset = torch.zeros(1, dtype=torch.long, device=device)
-    final_action_idx = prev_action_idx
-
-    # Track current time step for node expansion checking
-    current_t = 0
-
-    for step in range(flags.rec_t - 1):
-        current_t += 1
-        
-        # Get current node and check next node status BEFORE advance
-        # This mirrors cenv.pyx lines 762-773
-        current_node = tree_manager.cur_nodes[0]
-        action_idx = int(last_action.item())
-        
-        # Ensure children exist
-        if not current_node.children:
-            current_node.ensure_children(torch.zeros(num_actions, device=device))
-        
-        next_node = current_node.children[action_idx]
-        
-        # Determine status: 2 (expanded), 3 (done), or 4 (need expand)
-        # Mimicking cenv.pyx lines 765-773
-        if node_expanded_check(next_node, current_t):
-            # Status 2: already expanded
-            status = 2
-            needs_expansion = False
-        elif current_node.done:
-            # Status 3: done already
-            status = 3
-            needs_expansion = False
-        else:
-            # Status 4: need expand
-            status = 4
-            needs_expansion = True
-
-        # Only run model forward if we need to expand (status 4)
-        # Mimicking cenv.pyx lines 835-851
-        if needs_expansion:
-            with torch.no_grad():
-                step_out = model_net.forward_single(state=model_state, action=last_action, training=False)
-            xs = step_out.xs[0] if step_out.xs is not None else None
-            hs = step_out.hs[0] if step_out.hs is not None else None
-
-            if xs is not None:
-                current_xs = xs.clone()
-            if hs is not None:
-                current_hs = hs.clone()
-
-            model_state = clone_state(step_out.state)
-
-            encoded_payload = [{}]
-            if xs is not None:
-                encoded_payload[0]["xs"] = xs[0]
-            if hs is not None:
-                encoded_payload[0]["hs"] = hs[0]
-
-            logits = step_out.policy[0] if step_out.policy is not None else torch.zeros(1, num_actions, device=device)
-            if logits.dim() == 3:
-                logits = logits.squeeze(1)
-
-            if hasattr(step_out, "rs") and step_out.rs is not None:
-                rewards_step = step_out.rs[0]
-                if rewards_step.dim() == 2:
-                    rewards_step = rewards_step.squeeze(1)
-            else:
-                rewards_step = torch.zeros(1, device=device)
-
-            if step_out.vs is not None:
-                values_step = step_out.vs[0]
-                if values_step.dim() == 2:
-                    values_step = values_step.squeeze(1)
-            else:
-                values_step = torch.zeros(1, device=device)
-
-            if hasattr(step_out, "dones") and step_out.dones is not None:
-                dones_step = step_out.dones[0]
-                if dones_step.dim() == 2:
-                    dones_step = dones_step.squeeze(1)
-            else:
-                dones_step = torch.zeros(1, dtype=torch.bool, device=device)
-        
-        # Advance to next node (mimicking cenv.pyx lines 887, 890, 901, 923)
-        # Note: we haven't advanced yet, so we're still at the parent
-        tree_manager.advance(last_action)
-        
-        # Now tree_manager.cur_nodes[0] is the next_node
-        # Expand if needed (Status 4) - mimicking cenv.pyx lines 903-923
-        if needs_expansion:
-            # Override=True because we're updating an existing child node
-            # The child was created by ensure_children, but needs its values set
-            tree_manager.expand_current(rewards_step, values_step, dones_step, logits, encoded_payload, override=True)
-        elif status == 3:
-            # Status 3: done node - expand with zero values
-            # Mimicking cenv.pyx lines 894-901
-            logits_zero = torch.tensor([child.logit for child in current_node.children], device=device).unsqueeze(0)
-            tree_manager.expand_current(
-                torch.zeros(1, device=device),
-                torch.zeros(1, device=device),
-                torch.ones(1, dtype=torch.bool, device=device),
-                logits_zero,
-                [current_node.encoded or {}],
-                override=True
-            )
-        # Status 2 (already expanded): no expand needed, just visit (done by expand_current or manually below)
-
-        # Always visit after advance (mimicking cenv.pyx lines 888, 899, 921, 929)
-        # This is crucial for rollout statistics accumulation
-        from python_tree import node_visit
-        current_visited_node = tree_manager.cur_nodes[0]
-        # Force visit to accumulate stats even if already visited
-        current_visited_node.visited = False
-        node_visit(current_visited_node)
-
-        step_status = 2 if step == flags.rec_t - 2 else 1
-        env_out = SimpleNamespace()
-        env_out.real_states = current_obs.unsqueeze(0)
-        env_out.tree_reps = tree_manager.compute_tree_reps().unsqueeze(0)
-        env_out.xs = current_xs.unsqueeze(0) if current_xs is not None else None
-        env_out.hs = current_hs.unsqueeze(0) if current_hs is not None else None
-        env_out.step_status = torch.full((1, 1), step_status, dtype=torch.long, device=device)
-        env_out.done = done_tensor.clone()
-        env_out.real_done = done_tensor.clone()
-        env_out.last_pri = last_action.unsqueeze(0)
-        env_out.last_reset = last_reset.unsqueeze(0)
-        env_out.reward = torch.zeros(1, 1, reward_dim, device=device)
-        if step == 0:
-            env_out.reward[0, 0, 0] = float(prev_reward_value)
-
-        with torch.no_grad():
-            actor_out, actor_state = actor_net.forward(env_out=env_out, core_state=actor_state)
-        action_probs = actor_out.action_prob[0]
-        next_action = torch.argmax(action_probs, dim=-1)
-
-        reset_action = torch.zeros(1, dtype=torch.bool, device=device)
-        if hasattr(actor_out, "reset") and actor_out.reset is not None:
-            reset_probs = actor_out.reset[0]
-            reset_action = reset_probs > 0.5
-        force_reset = torch.zeros(1, dtype=torch.bool, device=device)
-        if getattr(flags, "max_depth", 0) > 0:
-            force_reset = tree_manager.rollout_depth >= flags.max_depth
-        should_reset = reset_action | force_reset
-
-        if should_reset.any():
-            tree_manager.rollout_depth[should_reset] = 0
-            last_reset[should_reset] = 1
-            if current_xs is not None and initial_xs is not None:
-                current_xs[should_reset] = initial_xs[should_reset]
-            if current_hs is not None and initial_hs is not None:
-                current_hs[should_reset] = initial_hs[should_reset]
-            if isinstance(model_state, dict) and isinstance(initial_model_state, dict):
-                for key in model_state:
-                    if key in initial_model_state and hasattr(model_state[key], "clone"):
-                        model_state[key][should_reset] = initial_model_state[key][should_reset].clone()
-            # Reset: go back to root (mimicking cenv.pyx lines 980-984)
-            tree_manager.cur_nodes[0] = tree_manager.root_nodes[0]
-            node_visit(tree_manager.cur_nodes[0])
-        
-        tree_reps = tree_manager.compute_tree_reps(reset_flags=should_reset)
-
-        current_im = None
-        if current_xs is not None:
-            current_im = torch.clamp(current_xs[0], 0.0, 1.0).detach().cpu().numpy()
-            current_im = current_im[-copy_ch:, :, :]
-        else:
-            current_im = np.zeros_like(last_frame, dtype=np.float32)
-
-        status_value = 2
-        if force_reset.any():
-            status_value = 3
-        elif reset_action.any():
-            status_value = 1
-
-        real_vec_step, im_vec_step = extract_vectors(model_net, obs_tensor[0], model_state)
-        decoded = decode_tree_reps_tensor(tree_reps, num_actions, dim_actions, flags.rec_t, flags)
-        record_entry(entries, status_value, last_frame.copy(), current_im.copy(), decoded, real_vec_step, im_vec_step, 99)
-        imagined_actions.append(99)
-
-        final_action_idx = int(next_action.item())
-        last_action = next_action
-
-    tree_manager.reset_real_step()
-    final_tree = tree_manager.compute_tree_reps()
-    env_out = SimpleNamespace()
-    env_out.real_states = current_obs.unsqueeze(0)
-    env_out.tree_reps = final_tree.unsqueeze(0)
-    env_out.xs = current_xs.unsqueeze(0) if current_xs is not None else None
-    env_out.hs = current_hs.unsqueeze(0) if current_hs is not None else None
-    env_out.step_status = torch.zeros((1, 1), dtype=torch.long, device=device)
-    env_out.done = done_tensor.clone()
-    env_out.real_done = done_tensor.clone()
-    env_out.last_pri = last_action.unsqueeze(0)
-    env_out.last_reset = last_reset.unsqueeze(0)
-    env_out.reward = torch.zeros(1, 1, reward_dim, device=device)
-    with torch.no_grad():
-        _ = actor_net.forward(env_out=env_out, core_state=actor_state)
-
-    if 0 <= final_action_idx < num_actions:
-        imagined_actions[root_entry_index] = final_action_idx
-
-    return entries, imagined_actions
 
 
 def _squeeze_singletons(array: np.ndarray) -> np.ndarray:
@@ -501,6 +236,10 @@ def main():
             flags.grayscale = getattr(pretrained_flags, "grayscale", flags.grayscale)
             flags.env_n = getattr(pretrained_flags, "env_n", flags.env_n)
 
+    if flags.grayscale:
+        print("[INFO] Overriding grayscale=True to False to match SR checkpoint expectations.")
+        flags.grayscale = False
+
     data = np.load(args.data)
     images = data["image"]
     actions = data["action"]
@@ -517,6 +256,8 @@ def main():
 
     target_h, target_w = images.shape[1], images.shape[2]
     raw_channels = images.shape[3]
+    if raw_channels == 1:
+        raw_channels = 3
     action_dim = actions.shape[1]
 
     frame_stack = flags.frame_stack_n
@@ -580,8 +321,9 @@ def main():
         checkpoint = torch.load(actor_ckp, map_location=device, weights_only=False)
         actor_net.set_weights(checkpoint["actor_net_state_dict"])
 
-    blank_frame = np.zeros((channels_per_frame, target_h, target_w), dtype=np.uint8)
-    copy_ch = channels_per_frame
+    policy_adapter = ThinkerPolicyAdapter(actor_net, model_net, flags, device)
+
+    blank_frame = np.zeros((channels_per_frame, target_h, target_w), dtype=np.float32)
 
     video_stats = {
         "real_imgs": [],
@@ -594,105 +336,88 @@ def main():
         "imagined_real_action": [],
     }
 
-    total_frames = len(images)
-    limit = args.max_steps if args.max_steps is not None else total_frames
+    episode_ids = compute_episode_ids(is_first)
+    human_actions, valid_mask = extract_human_actions(actions)
 
-    estimated_steps = 0
-    frames_in_episode_for_est = 0
-    for idx in range(total_frames):
-        if is_first[idx]:
-            if frames_in_episode_for_est > 0:
-                estimated_steps += math.ceil(frames_in_episode_for_est / frame_stack)
-            frames_in_episode_for_est = 0
-        frames_in_episode_for_est += 1
-    if frames_in_episode_for_est > 0:
-        estimated_steps += math.ceil(frames_in_episode_for_est / frame_stack)
+    stack_indices, prev_indices, seq_flags = compute_stack_step_metadata(
+        valid_mask=valid_mask,
+        is_first=is_first,
+        frame_stack=frame_stack,
+    )
+    total_logical_steps = len(stack_indices)
+    if total_logical_steps == 0:
+        print("[WARNING] No complete frame stacks found; nothing to export")
+        policy_adapter.close()
+        return
+
+    if args.max_steps is not None:
+        total_logical_steps = min(args.max_steps, total_logical_steps)
 
     processed_steps = 0
-    current_frames = []
-    current_actions = []
-    current_rewards = []
-    current_dones = []
-    prev_action_idx = 0
-    prev_reward_value = 0.0
-    prev_done_flag = False
 
-    def emit_stack():
-        nonlocal current_frames, current_actions, current_rewards, current_dones, processed_steps
-        nonlocal prev_action_idx, prev_reward_value, prev_done_flag
-        if not current_frames:
-            return
+    for step_idx in range(total_logical_steps):
+        next_idx = stack_indices[step_idx]
+        prev_idx = prev_indices[step_idx]
+        sequence_start_flag = seq_flags[step_idx]
 
-        frames_to_stack = list(current_frames)
-        stack_input = build_frame_stack(frames_to_stack, frame_stack, blank_frame)
-        dataset_action = current_actions[-1] if current_actions else 0
-        reward_sum = float(np.sum(current_rewards)) if current_rewards else 0.0
-        done_flag = bool(current_dones[-1]) if current_dones else False
-
-        entries, imagined_actions = run_planning_step(
-            stack_input,
-            dataset_action,
-            prev_action_idx,
-            prev_reward_value,
-            prev_done_flag,
-            model_net,
-            actor_net,
-            flags,
-            device,
-            num_actions,
-            dim_actions,
-            copy_ch,
+        stack_input = build_stack_for_index(
+            images,
+            next_idx,
+            frame_stack,
+            blank_frame,
+            (target_w, target_h),
+            flags.grayscale,
+            episode_ids,
         )
+        obs_tensor = torch.from_numpy(stack_input).unsqueeze(0).to(device=device)
+
+        prev_action_val = 0
+        if prev_idx >= 0 and valid_mask[prev_idx]:
+            prev_action_val = int(human_actions[prev_idx])
+        prev_action_tensor = torch.tensor([prev_action_val], dtype=torch.long, device=device)
+
+        sequence_start_tensor = torch.tensor([sequence_start_flag], dtype=torch.bool, device=device)
+
+        teacher_action_val = int(human_actions[next_idx])
+        teacher_tensor = torch.tensor([teacher_action_val], dtype=torch.long, device=device)
+
+        with torch.no_grad():
+            _ = policy_adapter.forward(
+                obs_tensor,
+                actions=teacher_tensor,
+                prev_actions=prev_action_tensor,
+                sequence_starts=sequence_start_tensor,
+                requires_grad=False,
+                record_history=True,
+            )
+
+        history = policy_adapter.last_rollout_history or [[]]
+        entries = history[0]
+        imagined_actions = []
+
         for entry in entries:
+            tree_rep_tensor = torch.from_numpy(entry["tree_reps"]).float()
+            decoded_tree = decode_tree_reps_tensor(tree_rep_tensor, num_actions, dim_actions, flags.rec_t, flags)
             video_stats["real_imgs"].append(entry["real_img"].astype(np.uint8))
             video_stats["im_imgs"].append(entry["im_img"].astype(np.float32))
-            video_stats["status"].append(entry["status"])
-            video_stats["tree_reps"].append(entry["tree_reps"])
+            video_stats["status"].append(int(entry["status"]))
+            video_stats["tree_reps"].append(decoded_tree)
             video_stats["real_vectors"].append(entry["real_vectors"] if entry["real_vectors"] is not None else None)
             video_stats["im_vectors"].append(entry["im_vectors"] if entry["im_vectors"] is not None else None)
-            video_stats["human_action"].append(entry["human_action"])
+            video_stats["human_action"].append(int(entry["human_action"]))
+            imagined_actions.append(entry["imagined_action"] if entry["imagined_action"] is not None else -1)
+
         video_stats["imagined_real_action"].extend(imagined_actions)
 
-        processed_steps += 1
+        processed_steps = step_idx + 1
         if processed_steps % 100 == 0 or processed_steps == 1:
-            denom = estimated_steps if estimated_steps > 0 else "?"
-            print(f"[INFO] Processing logical step {processed_steps}/{denom}")
+            print(f"[INFO] Processing logical step {processed_steps}/{total_logical_steps}")
 
-        prev_action_idx = dataset_action
-        prev_reward_value = reward_sum
-        prev_done_flag = done_flag
-        current_frames = []
-        current_actions = []
-        current_rewards = []
-        current_dones = []
-
-    for idx in range(min(total_frames, limit)):
-        if is_first[idx] and current_frames:
-            emit_stack()
-        if is_first[idx]:
-            current_frames = []
-            current_actions = []
-            current_rewards = []
-            current_dones = []
-            prev_action_idx = 0
-            prev_reward_value = 0.0
-            prev_done_flag = False
-
-        frame = preprocess_frame(images[idx], (target_w, target_h), flags.grayscale)
-        current_frames.append(frame)
-        current_actions.append(int(np.argmax(actions[idx])))
-        current_rewards.append(float(rewards[idx]))
-        current_dones.append(bool(is_terminal[idx]))
-
-        if len(current_frames) == frame_stack:
-            emit_stack()
-
-    if current_frames:
-        emit_stack()
-
-    if len(video_stats["real_imgs"]) == 0:
+    if processed_steps == 0:
         print("[WARNING] No logical steps processed; nothing to save")
+        policy_adapter.close()
         return
+
 
     video_stats["real_imgs"] = np.stack(video_stats["real_imgs"], axis=0)
     video_stats["im_imgs"] = np.stack(video_stats["im_imgs"], axis=0)
@@ -704,7 +429,7 @@ def main():
     video_stats["imagined_real_action"] = np.array(video_stats["imagined_real_action"], dtype=np.int32)
 
     total_entries = video_stats["real_imgs"].shape[0]
-    parts = 5
+    parts = 10
     part_size = max(1, math.ceil(total_entries / parts))
     base_name = os.path.basename(args.data)
     saved_parts = 0
@@ -736,6 +461,8 @@ def main():
         print("[WARNING] No data chunks were saved")
     else:
         print(f"Saved {saved_parts} chunk(s) to {args.savedir}")
+
+    policy_adapter.close()
 
 
 if __name__ == "__main__":

@@ -50,9 +50,17 @@ class IcoProBehaviorCloningTrainer:
         warm_batch = self._sample_batch(batch_size=self.batch_size)
         if warm_batch is None:
             raise RuntimeError("Unable to load behavioral cloning data for warm-up.")
-        obs = warm_batch["obs"][:1]
+        obs = warm_batch["next_obs"][:1]
         warm_actions = warm_batch["actions"][:1]
-        warm_policy = self.policy_adapter.forward(obs, actions=warm_actions, requires_grad=False)
+        warm_prev_actions = warm_batch["prev_actions"][:1]
+        warm_sequence_starts = warm_batch["sequence_starts"][:1]
+        warm_policy = self.policy_adapter.forward(
+            obs,
+            actions=warm_actions,
+            prev_actions=warm_prev_actions,
+            sequence_starts=warm_sequence_starts,
+            requires_grad=False,
+        )
         self.num_actions = warm_policy.logits.shape[-1]
 
         lr_actor = getattr(flags, "bc_lr", 1e-4)
@@ -111,20 +119,36 @@ class IcoProBehaviorCloningTrainer:
             return None
         obs = torch.from_numpy(batch["obs"]).float().to(self.device)
         next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)
-        actions_np = np.asarray(batch["actions"])
+        actions_np = np.asarray(batch.get("next_action_idx", batch["actions"]))
         if actions_np.ndim > 1 and actions_np.shape[-1] > 1:
             actions_np = actions_np.argmax(axis=-1)
         actions = torch.from_numpy(actions_np.astype(np.int64)).to(self.device)
         rewards = torch.from_numpy(np.asarray(batch["rewards"], dtype=np.float32)).to(self.device)
+        curr_rewards = torch.from_numpy(np.asarray(batch["curr_rewards"], dtype=np.float32)).to(self.device)
+        next_rewards = torch.from_numpy(np.asarray(batch["next_rewards"], dtype=np.float32)).to(self.device)
+        curr_dones = torch.from_numpy(np.asarray(batch["curr_dones"], dtype=np.float32)).to(self.device)
+        next_dones = torch.from_numpy(np.asarray(batch["next_dones"], dtype=np.float32)).to(self.device)
+        curr_action_onehot = torch.from_numpy(batch["curr_action_onehot"]).float().to(self.device)
+        next_action_onehot = torch.from_numpy(batch["next_action_onehot"]).float().to(self.device)
+        prev_actions = torch.from_numpy(np.asarray(batch["prev_actions"], dtype=np.int64)).to(self.device)
+        sequence_starts = torch.from_numpy(np.asarray(batch["sequence_starts"], dtype=np.bool_)).to(self.device)
         return {
             "obs": obs,
             "next_obs": next_obs,
             "actions": actions,
             "rewards": rewards,
+            "curr_rewards": curr_rewards,
+            "next_rewards": next_rewards,
+            "curr_dones": curr_dones,
+            "next_dones": next_dones,
+            "curr_action_onehot": curr_action_onehot,
+            "next_action_onehot": next_action_onehot,
+            "prev_actions": prev_actions,
+            "sequence_starts": sequence_starts,
         }
 
     def _actor_step(self, batch: Dict[str, torch.Tensor], train: bool) -> Dict[str, float]:
-        obs = batch["obs"]
+        obs = batch["next_obs"]
         actions = batch["actions"]
         context = torch.enable_grad() if train else torch.no_grad()
         with context:
@@ -132,6 +156,8 @@ class IcoProBehaviorCloningTrainer:
                 self.policy_adapter,
                 obs,
                 actions,
+                prev_actions=batch['prev_actions'],
+                sequence_starts=batch['sequence_starts'],
                 margin_value=self.margin_value,
                 margin_coef=self.margin_coef,
                 ce_coef=self.ce_coef,

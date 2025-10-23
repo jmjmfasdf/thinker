@@ -292,7 +292,15 @@ class FrameStackedBehavioralDataLoader:
         batch_next_obs = []
         batch_actions = []
         batch_rewards = []
-        
+        batch_curr_rewards = []
+        batch_next_rewards = []
+        batch_curr_dones = []
+        batch_next_dones = []
+        batch_curr_action_onehot = []
+        batch_next_action_onehot = []
+        batch_prev_actions = []
+        batch_sequence_starts = []
+
         num_files = len(self.data_files)
         
         if batch_size <= num_files:
@@ -322,8 +330,16 @@ class FrameStackedBehavioralDataLoader:
             if file_samples:
                 batch_obs.extend(file_samples['obs'])
                 batch_next_obs.extend(file_samples['next_obs'])
-                batch_actions.extend(file_samples['actions'])
+                batch_actions.extend(file_samples['next_action_idx'])
                 batch_rewards.extend(file_samples['rewards'])
+                batch_curr_rewards.extend(file_samples['curr_rewards'])
+                batch_next_rewards.extend(file_samples['next_rewards'])
+                batch_curr_dones.extend(file_samples['curr_dones'])
+                batch_next_dones.extend(file_samples['next_dones'])
+                batch_curr_action_onehot.extend(file_samples['curr_action_onehot'])
+                batch_next_action_onehot.extend(file_samples['next_action_onehot'])
+                batch_prev_actions.extend(file_samples['prev_actions'])
+                batch_sequence_starts.extend(file_samples['sequence_starts'])
                 if 'dones' in file_samples:
                     batch_dones.extend(file_samples['dones'])
                 if 'next_actions' in file_samples:
@@ -336,7 +352,16 @@ class FrameStackedBehavioralDataLoader:
             'obs': np.stack(batch_obs, axis=0),           # [B, C*stack_n, H, W]
             'next_obs': np.stack(batch_next_obs, axis=0), # [B, C*stack_n, H, W]
             'actions': np.stack(batch_actions, axis=0),   # [B, action_dim]
-            'rewards': np.stack(batch_rewards, axis=0)    # [B]
+            'rewards': np.stack(batch_rewards, axis=0),    # [B]
+            'curr_rewards': np.array(batch_curr_rewards, dtype=np.float32),
+            'next_rewards': np.array(batch_next_rewards, dtype=np.float32),
+            'curr_dones': np.array(batch_curr_dones, dtype=np.float32),
+            'next_dones': np.array(batch_next_dones, dtype=np.float32),
+            'curr_action_onehot': np.stack(batch_curr_action_onehot, axis=0).astype(np.float32),
+            'next_action_onehot': np.stack(batch_next_action_onehot, axis=0).astype(np.float32),
+            'prev_actions': np.array(batch_prev_actions, dtype=np.int64),
+            'sequence_starts': np.array(batch_sequence_starts, dtype=np.bool_),
+            'next_action_idx': np.stack(batch_actions, axis=0),
         }
         if batch_dones:
             batch['dones'] = np.stack(batch_dones, axis=0)
@@ -390,6 +415,14 @@ class FrameStackedBehavioralDataLoader:
         file_next_actions = []
         file_rewards = []
         file_dones = []
+        file_curr_rewards = []
+        file_next_rewards = []
+        file_curr_dones = []
+        file_next_dones = []
+        file_curr_action_onehot = []
+        file_next_action_onehot = []
+        file_prev_actions = []
+        file_sequence_starts = []
 
         filename = os.path.basename(self.data_files[file_idx])
 
@@ -402,7 +435,8 @@ class FrameStackedBehavioralDataLoader:
 
             # Get action, reward, and terminal flag
             action_curr = actions[curr_idx]
-            action_next = actions[next_idx] if next_idx < len(actions) else actions[curr_idx]
+            next_stack_start = max(0, next_idx - self.frame_stack_n + 1)
+            action_next = actions[next_stack_start]
             if actions.ndim > 1 and actions.shape[-1] > 1:
                 action_curr_idx = int(np.argmax(action_curr))
                 action_next_idx = int(np.argmax(action_next))
@@ -411,11 +445,18 @@ class FrameStackedBehavioralDataLoader:
                 action_next_idx = int(action_next)
             start_idx = max(0, curr_idx - self.frame_stack_n + 1)
             reward_sum = float(np.sum(rewards[start_idx:curr_idx + 1]))
+            next_start_idx = max(0, next_idx - self.frame_stack_n + 1)
+            next_reward_sum = float(np.sum(rewards[next_start_idx:next_idx + 1]))
             done_flag = False
             if curr_idx < len(is_terminal) and is_terminal[curr_idx]:
                 done_flag = True
             elif next_idx < len(is_first) and is_first[next_idx]:
                 done_flag = True
+            next_done_flag = False
+            if next_idx < len(is_terminal) and is_terminal[next_idx]:
+                next_done_flag = True
+            elif (next_idx + 1) < len(is_first) and is_first[next_idx + 1]:
+                next_done_flag = True
 
             file_obs.append(curr_obs)
             file_next_obs.append(next_obs)
@@ -423,6 +464,20 @@ class FrameStackedBehavioralDataLoader:
             file_next_actions.append(action_next_idx)
             file_rewards.append(reward_sum)
             file_dones.append(done_flag)
+            file_curr_rewards.append(reward_sum)
+            file_next_rewards.append(next_reward_sum)
+            file_curr_dones.append(done_flag)
+            file_next_dones.append(next_done_flag)
+            curr_onehot = np.zeros(self.num_actions, dtype=np.float32)
+            curr_onehot[action_curr_idx] = 1.0
+            next_onehot = np.zeros(self.num_actions, dtype=np.float32)
+            next_onehot[action_next_idx] = 1.0
+            file_curr_action_onehot.append(curr_onehot)
+            file_next_action_onehot.append(next_onehot)
+            sequence_start_flag = bool(is_first[next_idx]) or curr_idx == 0
+            prev_action_idx = action_curr_idx if not sequence_start_flag else 0
+            file_prev_actions.append(prev_action_idx)
+            file_sequence_starts.append(sequence_start_flag)
 
         return {
             'obs': file_obs,
@@ -430,7 +485,16 @@ class FrameStackedBehavioralDataLoader:
             'actions': file_actions,
             'next_actions': file_next_actions,
             'rewards': file_rewards,
-            'dones': file_dones
+            'dones': file_dones,
+            'curr_rewards': file_curr_rewards,
+            'next_rewards': file_next_rewards,
+            'curr_dones': file_curr_dones,
+            'next_dones': file_next_dones,
+            'curr_action_onehot': file_curr_action_onehot,
+            'next_action_onehot': file_next_action_onehot,
+            'prev_actions': file_prev_actions,
+            'sequence_starts': file_sequence_starts,
+            'next_action_idx': file_next_actions,
         }
 
     def reset(self):
