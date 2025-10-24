@@ -323,7 +323,22 @@ class SActorLearner:
             dones = torch.from_numpy(np.asarray(dones_np, dtype=np.float32)).to(self.device)
         else:
             dones = torch.zeros_like(rewards)
-        return {"obs": obs, "actions": actions, "rewards": rewards, "dones": dones}
+        prev_actions = torch.from_numpy(batch["prev_actions"]).long().to(self.device)
+        sequence_starts_np = batch.get("sequence_starts")
+        if sequence_starts_np is not None:
+            sequence_starts = torch.from_numpy(sequence_starts_np.astype(np.bool_)).to(self.device)
+        else:
+            sequence_starts = torch.zeros_like(prev_actions, dtype=torch.bool)
+        # Supervised BC samples are IID across the dataset, so make every item a new sequence
+        sequence_starts = torch.ones_like(sequence_starts, dtype=torch.bool)
+        return {
+            "obs": obs,
+            "actions": actions,
+            "rewards": rewards,
+            "dones": dones,
+            "prev_actions": prev_actions,
+            "sequence_starts": sequence_starts,
+        }
 
     def _compute_bc_loss(self):
         if not self.bc_enabled or self.bc_loader is None:
@@ -338,12 +353,16 @@ class SActorLearner:
             return None
         obs = batch["obs"]
         human_actions = batch["actions"]
+        prev_actions = batch["prev_actions"]
+        sequence_starts = batch["sequence_starts"]
         policy = self.bc_policy_adapter.forward(
             obs,
             actions=None,
             requires_grad=True,
             real_rewards=batch["rewards"],
             real_dones=batch["dones"],
+            prev_actions=prev_actions,
+            sequence_starts=sequence_starts,
         )
         logits = policy.logits
         tree_q = self.bc_policy_adapter.last_tree_q
