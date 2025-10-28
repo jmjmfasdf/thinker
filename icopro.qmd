@@ -1,0 +1,195 @@
+---
+title: "IcoPro 학습 구성 요소"
+format:
+  pdf:
+    pdf-engine: xelatex
+    include-in-header:
+      text: |
+        \usepackage{kotex}
+        \usepackage{amsmath, amssymb}
+        \usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+  html:
+    toc: false
+    keep-tex: true
+    embed-resources: true
+    code-fold: false
+execute:
+  echo: false
+---
+
+IcoPro 학습 구성 요소
+======================
+
+- `train.py` 실행 시 `--icopro_*` 플래그가 활성화되면 온라인 강화학습 루프 안에 두 갈래의 오프라인 보정 경로가 삽입된다.  
+- **행동자 경로**는 `thinker/learn_actor.py`의 `SActorLearner`에서 호출되며, Ray self-play로 얻은 PPO/V-trace 업데이트 직후에 사람 시연 데이터로 보정한다. 이때 `FrameStackedBehavioralDataLoader`가 반환하는 프레임 스택, 사람의 직전 행동(`prev_actions`), 에피소드 시작 여부(`sequence_starts`)를 사용해 루트 상태를 사람 히스토리에 맞게 재설정한 뒤 1-step 상상(rollout)을 수행한다.  
+- **월드 모델 경로**는 `thinker/learn_model.py`의 `LearnModel` 루프에서 캐시된 리플레이 미니배치와 함께 사람 데이터로 비전·정책·보상 헤드를 지도 학습한다.  
+- 두 경로 모두 주기(`icopro_supervised_freq`)마다 별도의 Adam 옵티마이저로 역전파하며, KL 정규화에는 사람 데이터에서 추정한 행동 분포만을 사용한다.  
+- 학습 지표는 wandb 및 텍스트 로거에 `thinker/total_loss`, `imit/total_loss`, `icopro/actor/*`, `icopro/model/*` 네임스페이스로 보고되어 RL 손실과 모방 손실을 구분해 추적할 수 있다.
+
+수학적 요약
+----------
+
+- 온라인 정책 업데이트는 샘플 효율을 위해 RL 손실과 동시에 IcoPro 손실을 활용한다.  
+- IcoPro 정책 손실은 DQfD-style margin + cross-entropy + PvP 합으로 정의된다.  
+- IcoPro 모델 손실은 보상·정책·상태·종료 예측 헤드의 가중 합으로 정의된다.
+
+Loss Details
+------------
+
+- **Planner-enhanced score $q^{\ast}$.** IcoPro 행동자 업데이트는 사람 히스토리로 초기화한 루트 상태에서 월드 모델을 통해 1-step 상상 rollout을 생성하고, 이어서 planner가 루트 자식 노드까지 확장한 뒤 정책 로짓 $\ell$과 트리 기반 값 추정 $q^{\text{tree}}$를 동시에 읽어낸다. 두 신호를 $\lambda_{\mathrm{tree}}$ 가중치로 합쳐 $q^{\ast} = \ell + \lambda_{\mathrm{tree}} q^{\text{tree}}$를 구성하며, $\lambda_{\mathrm{tree}}$가 0이면 단순 로짓 감독, 양수이면 planner의 전방 탐색 편향을 반영한다.
+- **Margin matrix $m$.** Inside the DQfD objective we build a $B \times |\mathcal{A}|$ matrix with entries $m_{i,a} = \alpha \cdot \mathbf{1}[a \neq a^{H}_i]$. This means only the expert column stays at zero, while all non-expert actions are padded upward by $\alpha$. Broadcasting $m$ across $q^{\ast}$ effectively raises the bar the rival actions must clear before they can beat the demonstration, which is precisely what the hinge loss evaluates.
+- **DQfD margin loss.** For each demonstration $(o_i, a_i^{H})$, the planner-enhanced scores $q^{\ast}_{i,a}$ combine logits and tree estimates. The per-sample margin matrix assigns $m_{i,a} = 0$ if $a = a_i^{H}$ and $m_{i,a} = \alpha$ otherwise, enforcing a gap of at least $\alpha$ between the expert action and competitors. The loss implemented in `thinker/imitation.py` is:
+
+  ```{=tex}
+  \begin{equation*}
+  L_{\mathrm{margin}} = \frac{1}{B} \sum_{i=1}^{B} \left[ \max_{a \in \mathcal{A}}\big(q^{\ast}_{i,a} + m_{i,a}\big) - q^{\ast}_{i,a_i^{H}}\right]
+  \end{equation*}
+  ```
+
+  which causes any action whose margin-adjusted value overtakes the expert to incur a positive penalty.
+- **PvP regularizer.** Let $a_i^{\text{agent}} = \arg\max_{a} \ell_{i,a}$ denote the action preferred by the current policy logits $\ell$, and define $q^{\ast}_{i,a}$ as above. Internally we build one-hot targets $t^{+}=+1$ for the human action and $t^{-}=-1$ for the policy-preferred action whenever they disagree. The PvP term then pushes the human-aligned score toward the positive target while pulling any mismatched agent preference toward the negative target, effectively performing a calibrated two-way regression between planner-backed values and discrete action identities:
+
+  ```{=tex}
+  \begin{equation*}
+  L_{\mathrm{PvP}} = \frac{1}{B} \sum_{i=1}^{B} \left[(q^{\ast}_{i,a_i^{H}} - 1)^2 + \mathbf{1}[a_i^{\text{agent}} \neq a_i^{H}]\,(q^{\ast}_{i,a_i^{\text{agent}}} + 1)^2\right]
+  \end{equation*}
+  ```
+
+  This mirrors the mean-squared-error structure implemented in `thinker/thinker/learn_actor.py`, rewarding agreement between the tree-informed Q-values and the human policy while penalizing confident disagreement.
+- **KL regularisers.** 사람 prior를 참조 정책으로 사용해 KL 손실을 추가한다.
+  1. 온라인 RL 단계에서 `icopro_actor_kl_coef` 가중치로 $\mathbb{E}_{s}[\mathrm{KL}(\pi_{H}^{\mathrm{actor}}(\cdot\mid s)\,\|\,\pi_{\theta}^{\mathrm{actor}}(\cdot\mid s))]$을 더해 정책이 사람 분포 근처에 머물도록 규제한다.
+  2. 오프라인 감독 단계에서는 `icopro_bc_actor_kl_coef`로 행동자 로짓에, `icopro_model_kl_coef`로 월드 모델의 정책 헤드에 동일한 사람 prior를 기준으로 KL을 더해 둘 다 사람-유사 행동을 유지하도록 유도한다. margin/PvP 항이 다루지 못한 확률 질량도 직접 보정할 수 있다.
+
+파라미터 표
+-----------
+
+| 기호 | CLI 플래그 | 설명 |
+|------|------------|------|
+| $\pi_{\theta}^{\mathrm{actor}}$ | `--preload` | Initial Thinker actor policy parameters that seed IcoPro; this policy receives both online RL gradients and the offline corrective gradients described below. |
+| $M_{\phi}$ (with $\pi_{\phi}^{\mathrm{model}}$) | `--preload` | World model weights loaded before training; IcoPro actor 단계 직전에 planner가 최신 파라미터로 재동기화되어 상상 rollout이 현재 동역학을 반영한다. |
+| $\mathcal{D}_L$ | `--icopro_data_path` | Human-labeled trajectory buffer providing observation stacks, previous-action markers, rewards, and done targets for offline corrections. |
+| $B$ | `--icopro_batch_size` | Mini-batch size sampled from $\mathcal{D}_L$ whenever an IcoPro actor or model update is triggered. |
+| $\alpha$ | `--icopro_margin` | DQfD large-margin constant that enforces the expert action to be at least $\alpha$ higher in $q^{\ast}$ than competing actions. |
+| $\lambda_{\text{margin}}$ | `--icopro_margin_coef` | Scalar multiplying the DQfD margin loss inside the actor objective to balance against other supervised terms. |
+| $\lambda_{\text{CE}}$ | `--icopro_ce_coef` | Weight on the cross-entropy loss between policy logits and human actions; regulates how aggressively logits match demonstrations. |
+| $\lambda_{\text{PvP}}$ | `--icopro_pvp_coef` | Coefficient on the policy-versus-policy (PvP) regularizer that constrains human and agent Q-ranks to stay aligned. |
+| $\lambda_{\text{tree}}$ | `--icopro_tree_coef` | Mix-in factor applied to tree-based Q estimates when constructing $q^{\ast}$ for the supervised actor loss. |
+| $\lambda_{\text{model}}$ | `--icopro_model_coef` | Global weight applied to the sum of model heads (reward, policy, state, done) during the IcoPro model update. |
+| $\lambda_{\text{KL}}^{\text{actor}}$ | `--icopro_actor_kl_coef` | Weight on the KL penalty between the empirical human prior and the online policy during RL updates. |
+| $\lambda_{\text{KL}}^{\text{bc}}$ | `--icopro_bc_actor_kl_coef` | Weight on the KL penalty applied inside the offline supervised batch so that human actions receive extra probability mass. |
+| $\lambda_{\text{KL}}^{\text{model}}$ | `--icopro_model_kl_coef` | Weight on the KL penalty that aligns the world-model policy head with the empirical human action prior during its offline update. |
+| $f$ | `--icopro_supervised_freq` | Interval in online updates between IcoPro corrections; only every $f$-th actor/model step consumes human data. |
+| $\eta_{\text{actor}}, \eta_{\text{model}}$ | `--icopro_actor_lr`, `--icopro_model_lr` | Learning rates for the dedicated Adam optimizers that apply the actor and model IcoPro gradients, respectively. |
+
+라텍스 알고리즘
+---------------
+
+Algorithm~\ref{alg:icopro} tracks two counters: $c_{\pi}$ counts how many IcoPro actor triggers have fired, and $c_{M}$ does the same for the model pathway. Incrementing, e.g. $c_{\pi} \leftarrow c_{\pi}+1$, simply records that another trigger occurred; the subsequent modulus check enforces the frequency gate so that only every $f$-th trigger actually runs an offline batch. The dataset $\mathcal{D}_L$ is the buffered human demonstration store defined earlier, and $M_{\phi}$ denotes the world-model parameters that the planner and adapter share. Both symbols appear in the pseudo-code to highlight when the algorithm pulls batches from human data versus when it refreshes the planner-facing network.
+
+```{=tex}
+\begin{algorithm}[H]
+\SetKwInOut{KwInit}{Init}
+\caption{IcoPro-보강 Thinker 학습 절차}
+\label{alg:icopro}
+\KwIn{행동자 정책 $\pi_{\theta}^{\mathrm{actor}}$, 월드 모델 $M_{\phi}$ (정책 헤드 $\pi_{\phi}^{\mathrm{model}}$), 인간 데이터셋 $\mathcal{D}_L$, 배치 크기 $B$, 마진 $\alpha$, 가중치 $\lambda_{\mathrm{margin}}, \lambda_{\mathrm{CE}}, \lambda_{\mathrm{PvP}}, \lambda_{\mathrm{tree}}, \lambda_{\mathrm{model}}$, 주기 $f$, 학습률 $\eta_{\mathrm{actor}}, \eta_{\mathrm{model}}$, KL 계수 $\lambda_{\mathrm{KL}}^{\mathrm{actor}}, \lambda_{\mathrm{KL}}^{\mathrm{bc}}, \lambda_{\mathrm{KL}}^{\mathrm{model}}$}
+\KwInit{행동자 IcoPro 스텝 $c_{\pi}\leftarrow 0$, 모델 IcoPro 스텝 $c_{M}\leftarrow 0$}
+
+\For{\texttt{each IcoPro actor trigger}}{
+    $c_{\pi} \leftarrow c_{\pi}+1$\;
+    \If(\tcp*[f]{주기 조건}){$c_{\pi} \bmod f \neq 0$}{
+        \textbf{continue}\;
+    }
+    샘플 배치 $(o, a^{H}, r^{H}, d^{H}) \sim \mathcal{D}_L$ with size $B$\;
+    최신 $M_{\phi}$ 파라미터로 planner 입력을 재동기화하고 루트 히스토리를 사람 데이터에 맞게 재설정\;
+    $(\ell, q^{\text{tree}}) \leftarrow \textsc{PlannerRollout}(o, r^{H}, d^{H})$ \tcp*[f]{$\ell$: 행동자 로짓, $q^{\text{tree}}$: 1-step 확장 값}
+    $q^{\ast} \leftarrow \ell + \lambda_{\mathrm{tree}} q^{\text{tree}}$\;
+    $\tilde{\pi}_{H} \leftarrow \textsc{HumanPrior}(\mathcal{D}_L)$ \tcp*[r]{데이터셋 기반 사람 prior}
+    $L_{\mathrm{margin}} \leftarrow \mathrm{DQfD}(q^{\ast}, a^{H}, \alpha)$\;
+    $L_{\mathrm{CE}} \leftarrow \mathrm{CrossEntropy}(\ell, a^{H})$\;
+    $L_{\mathrm{PvP}} \leftarrow \mathrm{PvP}(q^{\ast}, \pi_{\theta}^{\mathrm{actor}})$\;
+    $L_{\mathrm{KL}}^{\mathrm{bc}} \leftarrow \lambda_{\mathrm{KL}}^{\mathrm{bc}} \,\mathrm{KL}\!\left(\tilde{\pi}_{H} \,\middle\|\, \pi_{\theta}^{\mathrm{actor}}\right)$\;
+    $L_{\pi}^{\mathrm{IcoPro}} \leftarrow \lambda_{\mathrm{margin}}L_{\mathrm{margin}} + \lambda_{\mathrm{CE}}L_{\mathrm{CE}} + \lambda_{\mathrm{PvP}}L_{\mathrm{PvP}} + L_{\mathrm{KL}}^{\mathrm{bc}}$\;
+    $\theta \leftarrow \theta - \eta_{\mathrm{actor}} \nabla_{\theta} L_{\pi}^{\mathrm{IcoPro}}$ (clip if needed)\;
+    로깅: $L_{\pi}^{\mathrm{IcoPro}}$, 서브 손실, 정확도\;
+}
+
+\For{\texttt{each IcoPro model trigger}}{
+    $c_{M} \leftarrow c_{M}+1$\;
+    \If{$c_{M} \bmod f \neq 0$}{
+        \textbf{continue}\;
+    }
+    샘플 배치 $(s, s', a, r, d) \sim \mathcal{D}_L$ with size $B$\;
+    $y \leftarrow M_{\phi}(s, a, s')$ \tcp*[f]{forward pass with teacher action seq}
+    $L_{\mathrm{KL}}^{\mathrm{model}} \leftarrow 0$\;
+    \If{$y$ contains reward head}{
+        $L_{r} \leftarrow \mathrm{MSE}(y_{\mathrm{reward}}, r)$\;
+    }
+    \If{$y$ contains policy head}{
+        $L_{p} \leftarrow \mathrm{CrossEntropy}(y_{\mathrm{policy}}, a)$\;
+        $\pi_{H}^{\text{model}} \leftarrow \textsc{HumanPrior}(\mathcal{D}_L)$ \tcp*[r]{사람 prior}
+        $L_{\mathrm{KL}}^{\mathrm{model}} \leftarrow \lambda_{\mathrm{KL}}^{\mathrm{model}} \,\mathrm{KL}\!\left(\pi_{H}^{\text{model}} \,\middle\|\, \pi_{\phi}^{\mathrm{model}}\right)$\;
+    }
+    \If{$y$ contains state head}{
+        $L_{s} \leftarrow \mathrm{MSE}((1-d)\odot y_{\mathrm{state}}, (1-d)\odot s')$\;
+    }
+    \If{$y$ contains done head}{
+        $L_{d} \leftarrow \mathrm{BCE}(y_{\mathrm{done}}, d)$\;
+    }
+    $L_{M}^{\mathrm{IcoPro}} \leftarrow \lambda_{\mathrm{model}}\left(L_{r} + L_{p} + L_{s} + L_{d}\right) + L_{\mathrm{KL}}^{\mathrm{model}}$\;
+    $\phi \leftarrow \phi - \eta_{\mathrm{model}} \nabla_{\phi} L_{M}^{\mathrm{IcoPro}}$ (clip if needed)\;
+    로깅: $L_{M}^{\mathrm{IcoPro}}$, 구성 요소 손실, KL 항\;
+}
+
+\Return{$\pi_{\theta}^{\mathrm{actor}}, M_{\phi}$}
+\end{algorithm}
+```
+
+\paragraph{Notation.}
+\begin{itemize}
+  \item $\pi_{\theta}^{\mathrm{actor}}$ – 행동자 네트워크가 생성한 정책 분포(행동자 로짓 $\ell$의 softmax), $\theta$는 행동자 파라미터.
+  \item $\pi_{\phi}^{\mathrm{model}}$ – 월드 모델의 정책 헤드가 예측한 분포(모델 로짓 $y_{\mathrm{policy}}$의 softmax), $\phi$는 모델 파라미터.
+  \item $\pi_{H}^{\mathrm{actor}} = \textsc{HumanPrior}(\mathcal{D}_L)$ – 행동자 KL에 사용되는 사람 prior.
+  \item $\pi_{H}^{\mathrm{model}} = \textsc{HumanPrior}(\mathcal{D}_L)$ – 모델 KL에 사용되는 사람 prior.
+  \item $q^{\text{tree}}$ – planner가 1-step 확장에서 산출한 가치/정책 요약.
+  \item $q^{\ast} = \ell + \lambda_{\mathrm{tree}} q^{\text{tree}}$ – planner-enhanced score, margin/PvP 손실에 사용.
+  \item $L_{\mathrm{margin}}, L_{\mathrm{CE}}, L_{\mathrm{PvP}}, L_{\mathrm{KL}}^{\mathrm{bc}}$ – 행동자 감독 손실 구성 요소.
+  \item $L_{r}, L_{p}, L_{s}, L_{d}, L_{\mathrm{KL}}^{\mathrm{model}}$ – 월드 모델 보상/정책/상태/종료/정규화 손실.
+\end{itemize}
+
+Thinker 기본 학습 (IcoPro 제외)
+-----------------------------
+
+```{=tex}
+\begin{algorithm}[H]
+\SetKwInOut{KwInit}{Init}
+\caption{Thinker 학습 절차 (IcoPro 미사용)}
+\label{alg:thinker-baseline}
+\KwIn{행동자 정책 $\pi_{\theta}^{\mathrm{actor}}$, 가치 헤드 $V_{\psi}$, 월드 모델 $M_{\phi}$ (정책 헤드 $\pi_{\phi}^{\mathrm{model}}$), actor replay $\mathcal{B}_{\text{actor}}$, model replay $\mathcal{B}_{\text{model}}$, 모델 업데이트 주기 $f_{\text{model}}$, 학습률 $\eta_{\text{act}}, \eta_{\text{model}}$}
+\KwInit{Reset planner state, clear $\mathcal{B}_{\text{actor}}, \mathcal{B}_{\text{model}}$, set step counter $t \leftarrow 0$}
+
+\For{\texttt{each actor learner step}}{
+    $t \leftarrow t + 1$\;
+    수집된 self-play 배치 $\tau$에 대해 V-trace 타깃 $(\hat{v}, \hat{a})$와 보조 계획 손실을 계산\;
+    $\tilde{\pi}_{H} \leftarrow \textsc{HumanPrior}(\mathcal{D}_L)$\;
+    $L_{\mathrm{KL}}^{\mathrm{actor}} \leftarrow \lambda_{\mathrm{KL}}^{\mathrm{actor}} \,\mathrm{KL}\!\left(\tilde{\pi}_{H} \,\middle\|\, \pi_{\theta}^{\mathrm{actor}}(\cdot \mid \tau)\right)$\;
+    $\theta, \psi \leftarrow \theta, \psi - \eta_{\text{act}} \nabla_{\theta,\psi} \big(L_{\text{IMPALA}}(\tau, \hat{v}, \hat{a}) + L_{\mathrm{KL}}^{\mathrm{actor}}\big)$ \tcp*[f]{환경 보상 + 사람 prior 정규화}
+    환경 전이와 트리 rollouts를 $\mathcal{B}_{\text{actor}}$, $\mathcal{B}_{\text{model}}$에 적재\;
+    \If{$t \bmod f_{\text{model}} = 0$}{
+        $(s, a, r, s', d) \sim \mathcal{B}_{\text{model}}$ 추출\;
+        $M_{\phi}$로 보상, 정책, 상태, 종료 헤드 예측을 수행하고 손실 $L_{\text{model}}$ 계산\;
+        $\phi \leftarrow \phi - \eta_{\text{model}} \nabla_{\phi} L_{\text{model}}$\;
+    }
+    로깅: 가치/정책 손실, 엔트로피, 계획 사용률, 모델 재구성 오차\;
+}
+
+\Return{$\pi_{\theta}^{\mathrm{actor}}, V_{\psi}, M_{\phi}$}
+\end{algorithm}
+```
+
+실제 코드 연결
+--------------
+
+- `thinker/learn_actor.py:210`–`thinker/learn_actor.py:410`  
+- `thinker/learn_model.py:276`–`thinker/learn_model.py:448`  
+- `thinker/imitation.py:34`–`thinker/imitation.py:384`  
+- `thinker/bc_loader.py:10`–`thinker/bc_loader.py:160`  

@@ -1,0 +1,109 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\SetKwInOut{KwInit}{Init}
+
+\title{Behavioural Cloning Workflow in Thinker}
+\author{Jeongmin Seo}
+\date{October 2025}
+
+\begin{document}
+
+\maketitle
+
+\section{Notation}
+\begin{itemize}
+  \item $\pi_{\theta}^{\mathrm{actor}}$ – actor policy produced by the Thinker network (softmax of logits $\ell$), parameterised by $\theta$.
+  \item $\pi_{\phi}^{\mathrm{model}}$ – policy head of the world model (softmax of logits $y_{\mathrm{policy}}$), parameterised by $\phi$.
+  \item $\mathcal{D}_L$ – human demonstration dataset containing stacked observations $o$, human actions $a^{H}$, action distributions $\pi^{H}$ (one-hot by default), rewards $r^{H}$, and done flags $d^{H}$.
+  \item $B$ – mini-batch size sampled from $\mathcal{D}_L$ whenever an IcoPro trigger fires.
+  \item $\alpha$ – DQfD margin constant.
+  \item $\lambda_{\mathrm{margin}}, \lambda_{\mathrm{CE}}, \lambda_{\mathrm{PvP}}, \lambda_{\mathrm{tree}}, \lambda_{\mathrm{model}}$ – weights applied to the actor margin / CE / PvP terms, the tree-mixing score, and the aggregated model-head loss.
+  \item $\lambda_{\mathrm{KL}}^{\mathrm{actor}}, \lambda_{\mathrm{KL}}^{\mathrm{model}}$ – KL-divergence weights for actor and model supervision.
+  \item $f$ – supervision period; only every $f$-th trigger consumes human data.
+  \item $\eta_{\mathrm{actor}}, \eta_{\mathrm{model}}$ – learning rates for the actor and model IcoPro optimisers.
+  \item $q^{\text{tree}}$ – tree-based value/policy summary retrieved from the world model expansion.
+  \item $q^{\ast} = \ell + \lambda_{\mathrm{tree}} q^{\text{tree}}$ – planner-enhanced score used by the actor losses.
+  \item $L_{\mathrm{margin}}, L_{\mathrm{CE}}, L_{\mathrm{PvP}}, L_{\mathrm{KL}}^{\mathrm{actor}}$ – supervised actor loss components; $L_{\pi}^{\mathrm{IcoPro}}$ is their weighted combination.
+  \item $L_{r}, L_{p}, L_{s}, L_{d}, L_{\mathrm{KL}}^{\mathrm{model}}$ – model losses for reward, policy, state, done, and policy-KL predictions.
+\end{itemize}
+
+\begin{algorithm}[H]
+\caption{IcoPro-augmented Thinker Training Procedure}
+\label{alg:icopro}
+\KwIn{$\pi_{\theta}^{\mathrm{actor}}$, $M_{\phi}$ with policy head $\pi_{\phi}^{\mathrm{model}}$, dataset $\mathcal{D}_L$, batch size $B$, margin $\alpha$, weights $\lambda_{\mathrm{margin}}, \lambda_{\mathrm{CE}}, \lambda_{\mathrm{PvP}}, \lambda_{\mathrm{tree}}, \lambda_{\mathrm{model}}, \lambda_{\mathrm{KL}}^{\mathrm{actor}}, \lambda_{\mathrm{KL}}^{\mathrm{model}}$, period $f$, learning rates $\eta_{\mathrm{actor}}, \eta_{\mathrm{model}}$}
+\KwInit{$c_{\pi}\gets 0$, $c_{M}\gets 0$}
+
+\For{\texttt{each IcoPro actor trigger}}{
+    $c_{\pi} \leftarrow c_{\pi}+1$\;
+    \If{$c_{\pi} \bmod f \neq 0$}{\textbf{continue}}
+    Sample $(o, a^{H}, \pi^{H}, r^{H}, d^{H}) \sim \mathcal{D}_L$ of size $B$\;
+    Resynchronise planner inputs with $M_{\phi}$, reset root history, and treat each element as a fresh sequence\;
+    $(\ell, q^{\text{tree}}) \leftarrow \textsc{PlannerRollout}(o, r^{H}, d^{H})$\;
+    $q^{\ast} \leftarrow \ell + \lambda_{\mathrm{tree}} q^{\text{tree}}$\;
+    $L_{\mathrm{margin}} \leftarrow \mathrm{DQfD}(q^{\ast}, a^{H}, \alpha)$\;
+    $L_{\mathrm{CE}} \leftarrow \mathrm{CrossEntropy}(\ell, a^{H})$\;
+    $L_{\mathrm{KL}}^{\mathrm{actor}} \leftarrow \mathrm{KL}\!\left(\pi^{H} \parallel \pi_{\theta}^{\mathrm{actor}}\right)$\;
+    $L_{\mathrm{PvP}} \leftarrow \mathrm{PvP}(q^{\ast}, \pi_{\theta}^{\mathrm{actor}})$\;
+    $L_{\pi}^{\mathrm{IcoPro}} \leftarrow \lambda_{\mathrm{margin}}L_{\mathrm{margin}} + \lambda_{\mathrm{CE}}L_{\mathrm{CE}} + \lambda_{\mathrm{PvP}}L_{\mathrm{PvP}} + \lambda_{\mathrm{KL}}^{\mathrm{actor}} L_{\mathrm{KL}}^{\mathrm{actor}}$\;
+    $\theta \leftarrow \theta - \eta_{\mathrm{actor}} \nabla_{\theta} L_{\pi}^{\mathrm{IcoPro}}$\;
+    Log $L_{\pi}^{\mathrm{IcoPro}}$, sub-losses, accuracy\;
+}
+
+\For{\texttt{each IcoPro model trigger}}{
+    $c_{M} \leftarrow c_{M}+1$\;
+    \If{$c_{M} \bmod f \neq 0$}{\textbf{continue}}
+    Sample $(s, s', a, \pi^{H}, r, d) \sim \mathcal{D}_L$ of size $B$\;
+    $y \leftarrow M_{\phi}(s, a, s')$\;
+    $L_{r} \leftarrow \mathrm{MSE}(y_{\mathrm{reward}}, r)$ if reward head exists, else $0$\;
+    $L_{p} \leftarrow \mathrm{CrossEntropy}(y_{\mathrm{policy}}, a)$ if policy head exists, else $0$\;
+    $L_{\mathrm{KL}}^{\mathrm{model}} \leftarrow \mathrm{KL}\!\left(\pi^{H} \parallel \pi_{\phi}^{\mathrm{model}}\right)$ if policy head exists, else $0$\;
+    $L_{s} \leftarrow \mathrm{MSE}((1-d)\odot y_{\mathrm{state}}, (1-d)\odot s')$ if state head exists, else $0$\;
+    $L_{d} \leftarrow \mathrm{BCE}(y_{\mathrm{done}}, d)$ if done head exists, else $0$\;
+    $L_{M}^{\mathrm{IcoPro}} \leftarrow \lambda_{\mathrm{model}}\big(L_{r} + L_{p} + L_{s} + L_{d} + \lambda_{\mathrm{KL}}^{\mathrm{model}} L_{\mathrm{KL}}^{\mathrm{model}}\big)$\;
+    $\phi \leftarrow \phi - \eta_{\mathrm{model}} \nabla_{\phi} L_{M}^{\mathrm{IcoPro}}$\;
+    Log $L_{M}^{\mathrm{IcoPro}}$, component losses\;
+}
+
+\Return{$\pi_{\theta}^{\mathrm{actor}}, M_{\phi}$}
+\end{algorithm}
+
+\section{Loss Details}
+\paragraph{DQfD Margin Loss.}
+Given planner-enhanced logits $q^{\ast} \in \mathbb{R}^{B \times A}$ and demonstrator actions $a^{H} \in \{0,\dots,A-1\}^{B}$, the DQfD margin loss enforces a fixed safety gap $\alpha$ around the expert branch:
+\[
+L_{\mathrm{margin}} = \frac{1}{B} \sum_{b=1}^{B} \left(\max_{a \neq a^{H}_b} \big(q^{\ast}_{b,a} + \alpha\big) - q^{\ast}_{b,a^{H}_b}\right)_{+}.
+\]
+Here $(x)_{+} = \max(x, 0)$ implements the hinge. If every competing action already trails the expert by at least $\alpha$, the loss for that sample is zero. Otherwise, the term penalises whichever alternative encroaches on the expert’s margin, pushing $q^{\ast}_{b,a^{H}_b}$ up or $q^{\ast}_{b,a}$ down until the gap is restored.
+
+\paragraph{Definitions.}
+\begin{itemize}
+  \item $B$: batch size.
+  \item $A$: number of discrete actions.
+  \item $q^{\ast}_{b,a}$: planner-enhanced score (actor logits plus $\lambda_{\mathrm{tree}}$-scaled tree contribution) for sample $b$ and action $a$.
+  \item $a^{H}_b$: demonstrator action index for sample $b$.
+  \item $\alpha$: positive margin constant drawn from $\lambda_{\mathrm{margin}}$ schedule.
+\end{itemize}
+
+\paragraph{PvP Regularisation Loss.}
+PvP treats the demonstrator and the agent’s greedy policy as two competing players. Using the same $q^{\ast}$, we gather
+\[
+q^{\text{human}}_b = q^{\ast}_{b,a^{H}_b}, \qquad
+q^{\text{agent}}_b = q^{\ast}_{b,\hat{a}_b}, \quad \text{where } \hat{a}_b = \arg\max_a q^{\ast}_{b,a}.
+\]
+The loss is composed of a positive push for the demonstrator branch and, when the agent disagrees, a penalty for the agent’s alternative:
+\[
+L_{\mathrm{PvP}} = \frac{1}{B} \sum_{b=1}^{B} \left[(q^{\text{human}}_b - 1)^2 + \mathbf{1}[\hat{a}_b \neq a^{H}_b] \, (q^{\text{agent}}_b + 1)^2 \right].
+\]
+The first term encourages the planner-adjusted value of the human action to sit near a canonical target of $+1$, reinforcing it as “strongly preferred.” The second term activates only on disagreements; it drags the agent’s counter move toward $-1$, discouraging the policy from favouring that branch on future passes.
+
+\paragraph{Definitions.}
+\begin{itemize}
+  \item $q^{\text{human}}_b$: value/logit assigned to the human action after tree mixing.
+  \item $q^{\text{agent}}_b$: value/logit of the agent’s greedy action.
+  \item $\hat{a}_b$: agent-chosen action $\arg\max_a q^{\ast}_{b,a}$.
+  \item $\mathbf{1}[\cdot]$: indicator returning 1 when its predicate holds.
+  \item Targets $\pm 1$: fixed constants that define the desired separation between human and agent values inside PvP.
+\end{itemize}
+
+\end{document}

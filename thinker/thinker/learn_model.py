@@ -281,6 +281,7 @@ class SModelLearner:
         self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
         self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
         self.bc_model_coef = float(getattr(self.flags, "icopro_model_coef", 1.0))
+        self.bc_model_kl_coef = float(getattr(self.flags, "icopro_model_kl_coef", 0.0))
 
         data_path = getattr(self.flags, "icopro_data_path", "")
         if not data_path:
@@ -342,7 +343,15 @@ class SModelLearner:
             dones = torch.from_numpy(np.asarray(dones_np, dtype=np.float32)).to(self.device)
         else:
             dones = torch.zeros_like(rewards)
-        return {"obs": obs, "next_obs": next_obs, "actions": actions, "rewards": rewards, "dones": dones}
+        action_probs = torch.from_numpy(batch["curr_action_onehot"]).float().to(self.device)
+        return {
+            "obs": obs,
+            "next_obs": next_obs,
+            "actions": actions,
+            "rewards": rewards,
+            "dones": dones,
+            "action_probs": action_probs,
+        }
 
     def _compute_bc_loss(self):
         if not self.bc_enabled or self.bc_loader is None:
@@ -384,11 +393,14 @@ class SModelLearner:
             reward_loss = F.mse_loss(predicted_rewards.float(), rewards.float())
             losses.append(reward_loss)
         policy_loss = None
+        policy_kl_loss = None
         if getattr(model_out, "policy", None) is not None:
             policy_logits = model_out.policy[0].float()
             policy_logits = policy_logits.view(policy_logits.shape[0], -1)
             policy_loss = F.cross_entropy(policy_logits, actions.long())
             losses.append(policy_loss)
+            policy_log_probs = F.log_softmax(policy_logits, dim=-1)
+            policy_kl_loss = F.kl_div(policy_log_probs, batch["action_probs"], reduction="batchmean")
         state_loss = None
         if getattr(model_out, "xs", None) is not None:
             predicted_next = model_out.xs[0]
@@ -406,15 +418,22 @@ class SModelLearner:
             done_targets = dones.float()
             done_loss = F.binary_cross_entropy_with_logits(done_logits, done_targets)
             losses.append(done_loss)
-        if not losses:
+        if not losses and (policy_kl_loss is None or self.bc_model_kl_coef == 0.0):
             return None
-        total_loss = sum(losses)
+        if losses:
+            total_loss = sum(losses)
+        else:
+            total_loss = torch.zeros((), device=self.device)
+        if policy_kl_loss is not None:
+            total_loss = total_loss + self.bc_model_kl_coef * policy_kl_loss
         total_loss = self.bc_model_coef * total_loss
         result = {"total_loss": total_loss}
         if reward_loss is not None:
             result["reward_loss"] = reward_loss
         if policy_loss is not None:
             result["policy_loss"] = policy_loss
+        if policy_kl_loss is not None:
+            result["policy_kl_loss"] = policy_kl_loss
         if state_loss is not None:
             result["state_loss"] = state_loss
         if done_loss is not None:

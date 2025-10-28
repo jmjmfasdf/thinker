@@ -218,6 +218,7 @@ class SActorLearner:
         self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
         self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
         self.bc_ce_coef = float(getattr(self.flags, "icopro_ce_coef", 1.0))
+        self.bc_actor_kl_coef = float(getattr(self.flags, "icopro_actor_kl_coef", 0.0))
         self.bc_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
         self.bc_tree_coef = float(getattr(self.flags, "icopro_tree_coef", 0.0))
         self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
@@ -324,6 +325,7 @@ class SActorLearner:
         else:
             dones = torch.zeros_like(rewards)
         prev_actions = torch.from_numpy(batch["prev_actions"]).long().to(self.device)
+        action_probs = torch.from_numpy(batch["curr_action_onehot"]).float().to(self.device)
         sequence_starts_np = batch.get("sequence_starts")
         if sequence_starts_np is not None:
             sequence_starts = torch.from_numpy(sequence_starts_np.astype(np.bool_)).to(self.device)
@@ -338,6 +340,7 @@ class SActorLearner:
             "dones": dones,
             "prev_actions": prev_actions,
             "sequence_starts": sequence_starts,
+            "action_probs": action_probs,
         }
 
     def _compute_bc_loss(self):
@@ -353,6 +356,7 @@ class SActorLearner:
             return None
         obs = batch["obs"]
         human_actions = batch["actions"]
+        human_action_probs = batch["action_probs"]
         prev_actions = batch["prev_actions"]
         sequence_starts = batch["sequence_starts"]
         policy = self.bc_policy_adapter.forward(
@@ -365,6 +369,7 @@ class SActorLearner:
             sequence_starts=sequence_starts,
         )
         logits = policy.logits
+        log_probs = policy.log_probs
         tree_q = self.bc_policy_adapter.last_tree_q
         if tree_q is not None and self.bc_tree_coef != 0.0:
             q_values = logits + self.bc_tree_coef * tree_q
@@ -376,6 +381,7 @@ class SActorLearner:
             ce_loss = F.cross_entropy(logits, human_actions)
         else:
             ce_loss = torch.zeros((), device=self.device)
+        kl_loss = F.kl_div(log_probs, human_action_probs, reduction="batchmean")
         if self.bc_pvp_coef > 0.0:
             agent_actions = torch.argmax(logits.detach(), dim=-1)
             q_human = q_values.gather(1, human_actions.unsqueeze(1)).squeeze(1)
@@ -393,6 +399,7 @@ class SActorLearner:
             self.bc_margin_coef * margin_loss
             + self.bc_ce_coef * ce_loss
             + self.bc_pvp_coef * pvp_loss
+            + self.bc_actor_kl_coef * kl_loss
         )
         accuracy = float((torch.argmax(logits.detach(), dim=-1) == human_actions).float().mean().item())
         return {
@@ -400,6 +407,7 @@ class SActorLearner:
             "margin_loss": margin_loss,
             "ce_loss": ce_loss,
             "pvp_loss": pvp_loss,
+            "kl_loss": kl_loss,
             "accuracy": accuracy,
         }
 
