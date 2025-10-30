@@ -110,6 +110,7 @@ icopro_tree_coef: 0.0
 icopro_actor_lr: 0.0001
 icopro_model_lr: 0.0001
 icopro_supervised_freq: 1
+icopro_device: cpu
 
 # ray resources
 auto_res: True # whether to auto allocate gpu
@@ -121,4 +122,3 @@ env_n: 16  # number of parallel environment for each self-play ray actors
 gpu_self_play: 0.25 # gpu for each self-play ray actor (will be set automatically if auto_res is enabled)
 gpu_learn_actor: 0.25 # gpu for the actor-learning ray actor (will be set automatically if auto_res is enabled)
 gpu_learn: 0.5 # gpu for the model-learning ray actor (will be set automatically if auto_res is enabled)
-

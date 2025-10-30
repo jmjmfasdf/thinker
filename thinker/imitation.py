@@ -4,10 +4,13 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, NamedTuple
 
 import numpy as np
+from thinker import util
 import torch
 import torch.nn.functional as F
 
 from python_tree import TreeManager, node_expand, node_visit
+from thinker.cenv import cModelWrapper
+from thinker.dataset_env import BehaviorBatchEnv
 
 
 class PolicyBatch(NamedTuple):
@@ -108,6 +111,14 @@ class ThinkerPolicyAdapter:
             raise AttributeError("Actor network must expose a 'policy' layer for imitation training")
         self._hook = self.actor_net.policy.register_forward_pre_hook(self._capture_latent)
         self.training = self.actor_net.training or self.model_net.training
+        # Backend selection: use cenv wrapper for offline rollout
+        self._use_cenv_backend = bool(getattr(flags, "icopro_use_cenv", True))
+        # Device for IcoPro planner rollout (default CPU to avoid GPU spikes)
+        try:
+            icopro_dev = getattr(flags, "icopro_device", "cpu")
+        except Exception:
+            icopro_dev = "cpu"
+        self.icopro_device = torch.device(icopro_dev if isinstance(icopro_dev, str) else "cpu")
 
     def train(self, mode: bool = True):
         self.training = bool(mode)
@@ -206,10 +217,19 @@ class ThinkerPolicyAdapter:
         env_out = SimpleNamespace()
         env_out.real_states = visual_input.unsqueeze(0)
         env_out.tree_reps = tree_reps.unsqueeze(0)
+        # xs/hs optional features
         if current_xs is not None:
             env_out.xs = current_xs.unsqueeze(0)
+        elif getattr(self.actor_net, "see_x", False):
+            xs_shape = getattr(self.actor_net, "xs_shape", None)
+            if xs_shape is not None:
+                env_out.xs = torch.zeros((1, batch_size, *xs_shape), dtype=torch.float32, device=self.device)
         if current_hs is not None:
             env_out.hs = current_hs.unsqueeze(0)
+        elif getattr(self.actor_net, "see_h", False):
+            hs_shape = getattr(self.actor_net, "hs_shape", None)
+            if hs_shape is not None:
+                env_out.hs = torch.zeros((1, batch_size, *hs_shape), dtype=torch.float32, device=self.device)
         if isinstance(step_status, torch.Tensor):
             env_out.step_status = step_status.view(1, -1)
         else:
@@ -297,7 +317,16 @@ class ThinkerPolicyAdapter:
         prev_actions: Optional[torch.Tensor] = None,
         record_history: bool = False,
     ):
-        device = self.device
+        if self._use_cenv_backend:
+            return self._rollout_cenv(
+                obs,
+                initial_action,
+                requires_grad,
+                sequence_starts=sequence_starts,
+                prev_actions=prev_actions,
+                record_history=record_history,
+            )
+        device = self.device  # actor/device for final supervised loss
         obs_float = obs.to(device).float()
         batch_size = obs_float.shape[0]
     
@@ -773,6 +802,144 @@ class ThinkerPolicyAdapter:
     
         self._last_tree_q = q_values
         self._last_tree_reps = tree_reps.detach()
+        return actor_out
+
+    def _rollout_cenv(
+        self,
+        obs: torch.Tensor,
+        initial_action: Optional[torch.Tensor],
+        requires_grad: bool,
+        *,
+        sequence_starts: Optional[torch.Tensor] = None,
+        prev_actions: Optional[torch.Tensor] = None,
+        record_history: bool = False,
+    ):
+        device = self.device
+        obs_float = obs.to(device).float()
+        batch_size = obs_float.shape[0]
+
+        # Prepare uint8/float input for model and env
+        # Prepare observations on IcoPro planner device
+        if getattr(self.model_net, "state_dtype_n", 0) == 0:
+            obs_env = torch.clamp(obs_float * 255.0, 0, 255).to(torch.uint8)
+        else:
+            obs_env = obs_float
+        obs_np = obs_env.detach().cpu().numpy()  # BehaviorBatchEnv expects numpy
+
+        # Build fixed batch env and cenv wrapper
+        num_actions = self.num_actions
+        dataset_env = BehaviorBatchEnv(obs_np, num_actions=num_actions)
+        # Ensure model net is on IcoPro device
+        model_dev = self.icopro_device
+        self.model_net.to(model_dev)
+        core_env = cModelWrapper(env=dataset_env, env_n=batch_size, flags=self.flags, model_net=self.model_net, device=model_dev, timing=False)
+        states, info = core_env.reset(self.model_net)
+
+        # Initialize actor state
+        actor_core_state = self.actor_net.initial_state(batch_size=batch_size, device=device)
+        last_action = prev_actions.to(device=device, dtype=torch.long).view(batch_size) if prev_actions is not None else torch.zeros(batch_size, dtype=torch.long, device=device)
+        last_reset = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+        # Rec_t rollout with imagination + dummy real steps
+        for step in range(self.flags.rec_t):
+            env_out = self._make_env_out(
+                states["real_states"],
+                states["tree_reps"],
+                last_action,
+                last_reset,
+                1 if step < self.flags.rec_t - 1 else 0,
+                current_xs=states.get("xs"),
+                current_hs=states.get("hs"),
+            )
+            self._latent_buffer = None
+            # Move env_out tensors to actor device for the call
+            def _to_dev(x):
+                return x.to(device) if torch.is_tensor(x) else x
+            env_out.real_states = _to_dev(env_out.real_states)
+            env_out.tree_reps = _to_dev(env_out.tree_reps)
+            if getattr(env_out, "xs", None) is not None:
+                env_out.xs = _to_dev(env_out.xs)
+            if getattr(env_out, "hs", None) is not None:
+                env_out.hs = _to_dev(env_out.hs)
+            env_out.done = _to_dev(env_out.done)
+            env_out.real_done = _to_dev(env_out.real_done)
+            env_out.truncated_done = _to_dev(env_out.truncated_done)
+            env_out.last_pri = _to_dev(env_out.last_pri)
+            env_out.last_reset = _to_dev(env_out.last_reset)
+            env_out.reward = _to_dev(env_out.reward)
+            env_out.step_status = _to_dev(env_out.step_status)
+            # Always run rollout steps without autograd; only the final pass computes loss
+            with torch.no_grad():
+                actor_out, actor_core_state = self.actor_net(env_out, core_state=actor_core_state)
+            # Detach core state to prevent graph retention between steps
+            actor_core_state = tuple(
+                (t.detach() if torch.is_tensor(t) else t) for t in actor_core_state
+            )
+            logits = actor_out.pri_param
+            if logits.dim() == 4:
+                logits = logits[0, :, 0, :]
+            elif logits.dim() == 3:
+                logits = logits[0]
+            next_action = torch.argmax(logits, dim=-1)
+            # Reset handling
+            if getattr(actor_out, "reset", None) is not None and actor_out.reset is not None:
+                rst = actor_out.reset[-1] if actor_out.reset.dim() > 1 else actor_out.reset
+            elif getattr(actor_out, "reset_logits", None) is not None and actor_out.reset_logits is not None:
+                rl = actor_out.reset_logits
+                if rl.dim() == 4:
+                    rl = rl[0, :, 0, :]
+                elif rl.dim() == 3:
+                    rl = rl[-1]
+                rst = torch.argmax(rl, dim=-1).long()
+            else:
+                rst = torch.zeros_like(next_action)
+
+            # Step wrapper; env ignores actions for real step
+            states, reward, done, truncated, info = core_env.step((next_action.detach().cpu().numpy(), rst.detach().cpu().numpy()), self.model_net)
+            last_action = next_action.view(batch_size)
+            last_reset = rst.view(batch_size)
+
+        # Compute q-values from root tree reps (mean rollout value per action)
+        tree_reps = states["tree_reps"].detach()
+        dec = util.decode_tree_reps(tree_reps, self.num_actions, getattr(self.actor_net, "dim_actions", 1), self.flags.rec_t, self.flags.critic_enc_type, self.flags.critic_enc_f_type)
+        root_qs_mean = dec.get("root_qs_mean")
+        if torch.is_tensor(root_qs_mean):
+            q_values = root_qs_mean.float().to(device)
+        else:
+            q_values = torch.tensor(root_qs_mean, dtype=torch.float32, device=device)
+
+        # Final actor forward with loss computation hooks
+        final_reset = torch.zeros_like(last_reset)
+        # Final visuals are the input observations on the actor device
+        final_visual = obs_float
+        xs_final = states.get("xs")
+        if isinstance(xs_final, torch.Tensor):
+            xs_final = xs_final.to(device)
+        tree_reps = tree_reps.to(device)
+        env_out_final = self._make_env_out(
+            final_visual,
+            tree_reps,
+            last_action,
+            final_reset,
+            0,
+            current_xs=xs_final,
+            current_hs=None,
+        )
+        self._latent_buffer = None
+        if requires_grad:
+            actor_out, _ = self.actor_net(env_out_final, core_state=actor_core_state, compute_loss=True)
+        else:
+            with torch.no_grad():
+                actor_out, _ = self.actor_net(env_out_final, core_state=actor_core_state, compute_loss=True)
+
+        self._last_real_actions = torch.argmax(getattr(actor_out, "pri_param", self._squeeze_policy_tensor(actor_out.action_prob)), dim=-1)
+        self._last_tree_q = q_values
+        self._last_tree_reps = tree_reps
+        # Best-effort cleanup of Cython wrapper
+        try:
+            core_env.close()
+        except Exception:
+            pass
         return actor_out
     def forward(
         self,

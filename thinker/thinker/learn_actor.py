@@ -274,13 +274,24 @@ class SActorLearner:
             self.bc_enabled = False
             return
         model_obs_space = spaces.Box(low=0, high=255, shape=real_state_shape, dtype=np.uint8)
+        icopro_dev = getattr(self.flags, "icopro_device", "cpu")
+        icopro_device = torch.device(icopro_dev if isinstance(icopro_dev, str) else "cpu")
         try:
-            self.bc_model_net = ModelNet(obs_space=model_obs_space, action_space=pri_action_space, flags=self.flags).to(self.device)
+            # Attempt to place IcoPro model on requested device (default CPU)
+            self.bc_model_net = ModelNet(obs_space=model_obs_space, action_space=pri_action_space, flags=self.flags).to(icopro_device)
         except Exception as exc:
-            self._logger.warning(f"Failed to initialise IcoPro model net: {exc}")
-            self.bc_model_net = None
-            self.bc_enabled = False
-            return
+            self._logger.warning(
+                f"Failed to initialise IcoPro model net on device '{icopro_dev}': {exc}. Falling back to CPU."
+            )
+            try:
+                self.bc_model_net = ModelNet(obs_space=model_obs_space, action_space=pri_action_space, flags=self.flags).to("cpu")
+                icopro_device = torch.device("cpu")
+                setattr(self.flags, "icopro_device", "cpu")
+            except Exception as exc2:
+                self._logger.warning(f"Unable to create IcoPro model net on CPU: {exc2}; disabling supervised loss.")
+                self.bc_model_net = None
+                self.bc_enabled = False
+                return
         self.bc_model_net.eval()
         for param in self.bc_model_net.parameters():
             param.requires_grad = False
