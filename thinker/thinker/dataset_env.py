@@ -223,7 +223,7 @@ class BehaviorBatchEnv:
     """
     def __init__(self, obs_batch: np.ndarray, num_actions: int):
         assert obs_batch.ndim == 4, f"obs_batch must be (B,C,H,W), got {obs_batch.shape}"
-        self._obs = obs_batch.astype(np.uint8 if obs_batch.dtype == np.uint8 else np.float32)
+        self._update_internal_obs(obs_batch)
         self.env_n = obs_batch.shape[0]
         self.observation_space = spaces.Box(
             low=0,
@@ -234,6 +234,17 @@ class BehaviorBatchEnv:
         self.action_space = spaces.Tuple((spaces.Discrete(int(num_actions)),) * self.env_n)
         self.reward_range = (-np.inf, np.inf)
         self.metadata = {}
+
+    def _update_internal_obs(self, obs_batch: np.ndarray) -> None:
+        dtype = np.uint8 if obs_batch.dtype == np.uint8 else np.float32
+        self._obs = obs_batch.astype(dtype, copy=True)
+
+    def update_batch(self, obs_batch: np.ndarray) -> None:
+        """Replace the stored batch while keeping the same env instance."""
+        assert obs_batch.ndim == 4, f"obs_batch must be (B,C,H,W), got {obs_batch.shape}"
+        if obs_batch.shape[0] != self.env_n:
+            raise ValueError(f"Batch size changed from {self.env_n} to {obs_batch.shape[0]}; rebuild env.")
+        self._update_internal_obs(obs_batch)
 
     def reset(self, *, reset_stat: bool = False, seed=None):
         info = {

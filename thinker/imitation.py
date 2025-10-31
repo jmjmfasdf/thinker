@@ -119,6 +119,10 @@ class ThinkerPolicyAdapter:
         except Exception:
             icopro_dev = "cpu"
         self.icopro_device = torch.device(icopro_dev if isinstance(icopro_dev, str) else "cpu")
+        self._cenv_dataset_env: Optional[BehaviorBatchEnv] = None
+        self._cenv_wrapper: Optional[cModelWrapper] = None
+        self._cenv_model_device: Optional[torch.device] = None
+        self._cenv_batch_size: int = 0
 
     def train(self, mode: bool = True):
         self.training = bool(mode)
@@ -138,6 +142,15 @@ class ThinkerPolicyAdapter:
         self._last_real_actions = None
         self._last_rollout_history = None
         self._last_imagined_actions = None
+        if self._cenv_wrapper is not None and hasattr(self._cenv_wrapper, "close"):
+            try:
+                self._cenv_wrapper.close()
+            except Exception:
+                pass
+        self._cenv_wrapper = None
+        self._cenv_dataset_env = None
+        self._cenv_model_device = None
+        self._cenv_batch_size = 0
 
     def _capture_latent(self, _module, inputs):
         if not inputs:
@@ -202,6 +215,53 @@ class ThinkerPolicyAdapter:
         if tensor.dim() == 2:
             return tensor
         raise ValueError(f"Unsupported policy tensor shape: {tuple(tensor.shape)}")
+
+    def _ensure_cenv_runner(self, obs_batch: np.ndarray, batch_size: int, model_device: torch.device) -> cModelWrapper:
+        rebuild = (
+            self._cenv_wrapper is None
+            or self._cenv_dataset_env is None
+            or self._cenv_batch_size != batch_size
+            or self._cenv_model_device != model_device
+        )
+        if rebuild:
+            if self._cenv_wrapper is not None and hasattr(self._cenv_wrapper, "close"):
+                try:
+                    self._cenv_wrapper.close()
+                except Exception:
+                    pass
+            self._cenv_dataset_env = BehaviorBatchEnv(obs_batch, num_actions=self.num_actions)
+            self._cenv_wrapper = cModelWrapper(
+                env=self._cenv_dataset_env,
+                env_n=batch_size,
+                flags=self.flags,
+                model_net=self.model_net,
+                device=model_device,
+                timing=False,
+            )
+            self._cenv_model_device = model_device
+            self._cenv_batch_size = batch_size
+        else:
+            try:
+                self._cenv_dataset_env.update_batch(obs_batch)
+            except ValueError:
+                # Batch size changed unexpectedly; rebuild from scratch.
+                if self._cenv_wrapper is not None and hasattr(self._cenv_wrapper, "close"):
+                    try:
+                        self._cenv_wrapper.close()
+                    except Exception:
+                        pass
+                self._cenv_dataset_env = BehaviorBatchEnv(obs_batch, num_actions=self.num_actions)
+                self._cenv_wrapper = cModelWrapper(
+                    env=self._cenv_dataset_env,
+                    env_n=batch_size,
+                    flags=self.flags,
+                    model_net=self.model_net,
+                    device=model_device,
+                    timing=False,
+                )
+                self._cenv_model_device = model_device
+                self._cenv_batch_size = batch_size
+        return self._cenv_wrapper
 
     def _make_env_out(
         self,
@@ -826,13 +886,16 @@ class ThinkerPolicyAdapter:
             obs_env = obs_float
         obs_np = obs_env.detach().cpu().numpy()  # BehaviorBatchEnv expects numpy
 
-        # Build fixed batch env and cenv wrapper
-        num_actions = self.num_actions
-        dataset_env = BehaviorBatchEnv(obs_np, num_actions=num_actions)
-        # Ensure model net is on IcoPro device
         model_dev = self.icopro_device
-        self.model_net.to(model_dev)
-        core_env = cModelWrapper(env=dataset_env, env_n=batch_size, flags=self.flags, model_net=self.model_net, device=model_dev, timing=False)
+        try:
+            original_device = next(self.model_net.parameters()).device
+        except StopIteration:
+            original_device = model_dev
+        if original_device != model_dev:
+            self.model_net.to(model_dev)
+        model_train_mode = self.model_net.training
+        self.model_net.eval()
+        core_env = self._ensure_cenv_runner(obs_np, batch_size, model_dev)
         states, info = core_env.reset(self.model_net)
 
         # Initialize actor state
@@ -935,11 +998,9 @@ class ThinkerPolicyAdapter:
         self._last_real_actions = torch.argmax(getattr(actor_out, "pri_param", self._squeeze_policy_tensor(actor_out.action_prob)), dim=-1)
         self._last_tree_q = q_values
         self._last_tree_reps = tree_reps
-        # Best-effort cleanup of Cython wrapper
-        try:
-            core_env.close()
-        except Exception:
-            pass
+        if original_device != model_dev:
+            self.model_net.to(original_device)
+        self.model_net.train(model_train_mode)
         return actor_out
     def forward(
         self,

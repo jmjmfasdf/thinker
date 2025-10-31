@@ -74,6 +74,11 @@ class SActorLearner:
                 self.device = torch.device("cuda")
             else:           
                 self.device = torch.device("cpu")
+            if self.actor_param_buffer is not None:
+                try:
+                    self.actor_param_buffer.set_data.remote("actor_net_init_params", actor_param)
+                except Exception as exc:
+                    self._logger.warning(f"Failed to store actor init params: {exc}")
         else:
             assert actor_net is not None, "actor_net is required for non-parallel mode"
             assert device is not None, "device is required for non-parallel mode"
@@ -214,55 +219,7 @@ class SActorLearner:
         self.bc_optimizer = None
         self.bc_enabled = False
         self.bc_step = 0
-
-        self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
-        self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
-        self.bc_ce_coef = float(getattr(self.flags, "icopro_ce_coef", 1.0))
-        self.bc_actor_kl_coef = float(getattr(self.flags, "icopro_actor_kl_coef", 0.0))
-        self.bc_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
-        self.bc_tree_coef = float(getattr(self.flags, "icopro_tree_coef", 0.0))
-        self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
-        self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
-
-        data_path = getattr(self.flags, "icopro_data_path", "")
-        if not data_path:
-            return
-        data_path = os.path.abspath(data_path)
-        subjects_raw = str(getattr(self.flags, "icopro_subjects", ""))
-        try:
-            subjects = [int(s.strip()) for s in subjects_raw.split(",") if s.strip()]
-        except ValueError:
-            self._logger.warning(f"Invalid icopro_subjects '{subjects_raw}'; disabling supervised loss.")
-            return
-        if not subjects:
-            self._logger.warning("No valid icopro_subjects provided; disabling supervised loss.")
-            return
-        game_id = int(getattr(self.flags, "icopro_game_id", 0))
-        try:
-            self.bc_loader = FrameStackedBehavioralDataLoader(
-                base_path=data_path,
-                subjects=subjects,
-                game_id=game_id,
-                frame_stack_n=self.flags.frame_stack_n,
-                target_size=(84, 84),
-                grayscale=self.flags.grayscale,
-                normalize=True,
-            )
-        except Exception as exc:
-            self._logger.warning(f"Failed to initialise IcoPro data loader: {exc}")
-            self.bc_loader = None
-            return
-        if len(self.bc_loader.data_files) == 0:
-            self._logger.warning("IcoPro data loader found no files; disabling supervised loss.")
-            self.bc_loader = None
-            return
-        lr = float(getattr(self.flags, "icopro_actor_lr", 0.0))
-        if lr <= 0:
-            self._logger.warning("icopro_actor_lr <= 0; supervised actor updates disabled.")
-            return
-        self.bc_optimizer = torch.optim.Adam(self.actor_net.parameters(), lr=lr)
-        self.bc_enabled = True
-        self._logger.info(f"IcoPro data loader initialised with {len(self.bc_loader.data_files)} files (subjects={subjects}, game_id={game_id}).")
+        self._logger.info("IcoPro actor updates handled in model learner; skipping actor-learner BC setup.")
 
     def _ensure_bc_adapter(self):
         if not self.bc_enabled or self.bc_policy_adapter is not None:
@@ -587,6 +544,14 @@ class SActorLearner:
         train_actor_out, initial_actor_state = data
         actor_id = train_actor_out.id
         T, B = train_actor_out.done.shape
+
+        if self.actor_param_buffer is not None:
+            try:
+                weights = ray.get(self.actor_param_buffer.get_data.remote("actor_net"))
+            except Exception:
+                weights = None
+            if weights is not None:
+                self.actor_net.set_weights(weights)
 
         # compute losses
         out = self.compute_losses(
