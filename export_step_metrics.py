@@ -3,11 +3,169 @@
 import argparse
 import glob
 import os
-from typing import Dict
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 import fig_pong
+
+
+CHUNK_PATTERN = re.compile(r"^(?P<root>.+\.npz)_chunk(?P<chunk>\d+)_", re.IGNORECASE)
+
+
+def _extract_chunk_metadata(file_path: str) -> Optional[Tuple[str, int]]:
+    """Return (synthetic_root_path, chunk_index) when file matches chunk pattern."""
+    basename = os.path.basename(file_path)
+    match = CHUNK_PATTERN.match(basename)
+    if not match:
+        return None
+    root_name = match.group("root")
+    try:
+        chunk_idx = int(match.group("chunk"))
+    except ValueError:
+        chunk_idx = 0
+    synthetic_root = os.path.join(os.path.dirname(file_path), root_name)
+    return synthetic_root, chunk_idx
+
+
+def _chunk_sort_key(file_path: str) -> Tuple[int, str]:
+    """Provide a deterministic ordering key for chunked npz files."""
+    meta = _extract_chunk_metadata(file_path)
+    if meta:
+        return meta[1], file_path
+    return 0, file_path
+
+
+def _stack_chunk_arrays(chunks: Sequence[np.ndarray]) -> np.ndarray:
+    """Safely concatenate chunked arrays along axis 0."""
+    if not chunks:
+        return np.array([])
+    if len(chunks) == 1:
+        return chunks[0]
+
+    first = chunks[0]
+    if isinstance(first, np.ndarray):
+        if first.ndim == 0:
+            return first
+        try:
+            return np.concatenate(chunks, axis=0)
+        except Exception:
+            flattened: List[Any] = []
+            for chunk in chunks:
+                if isinstance(chunk, np.ndarray):
+                    flattened.extend(list(chunk))
+                else:
+                    flattened.append(chunk)
+            return np.asarray(flattened, dtype=object)
+
+    return np.asarray(chunks, dtype=object)
+
+
+def _rehydrate_tree_reps(flat_data: Dict[str, Any]) -> None:
+    """Reconstruct nested tree_reps dictionary from flattened keys when needed."""
+    existing = flat_data.get("tree_reps")
+    if isinstance(existing, dict):
+        return
+
+    prefix = "tree_reps_"
+    tree_keys = [key for key in list(flat_data.keys()) if key.startswith(prefix)]
+    if not tree_keys:
+        return
+
+    tree_dict: Dict[str, Any] = {}
+    for key in tree_keys:
+        tree_dict[key[len(prefix) :]] = flat_data.pop(key)
+    flat_data["tree_reps"] = tree_dict
+
+
+def _provide_vector_aliases(data: Dict[str, Any]) -> None:
+    """Populate expected vector keys when only image tensors are available."""
+    if "real_vectors" not in data and "real_imgs" in data:
+        data["real_vectors"] = data["real_imgs"]
+    if "im_vectors" not in data and "im_imgs" in data:
+        data["im_vectors"] = data["im_imgs"]
+    if "tree_reps" not in data or not isinstance(data["tree_reps"], dict):
+        data["tree_reps"] = dict(data.get("tree_reps", {}))
+
+
+def _load_npy_dict(file_path: str) -> Optional[Dict[str, Any]]:
+    """Load dictionary-like data from a .npy file."""
+    obj = np.load(file_path, allow_pickle=True)
+    if isinstance(obj, np.ndarray) and obj.shape == ():
+        obj = obj.item()
+    elif hasattr(obj, "item") and not isinstance(obj, dict):
+        try:
+            obj = obj.item()
+        except Exception:
+            pass
+    if isinstance(obj, dict):
+        result = dict(obj)
+        _provide_vector_aliases(result)
+        return result
+    return None
+
+
+def _combine_npz_files(file_paths: Sequence[str]) -> Dict[str, Any]:
+    """Merge one or more .npz files into a single rollout dictionary."""
+    aggregated: Dict[str, List[np.ndarray]] = {}
+    for path in file_paths:
+        with np.load(path, allow_pickle=True) as npz_file:
+            for key in npz_file.files:
+                aggregated.setdefault(key, []).append(npz_file[key])
+
+    combined: Dict[str, Any] = {}
+    for key, chunks in aggregated.items():
+        combined[key] = _stack_chunk_arrays(chunks)
+
+    _rehydrate_tree_reps(combined)
+    _provide_vector_aliases(combined)
+    return combined
+
+
+def _load_rollout_group(file_paths: Sequence[str]) -> Optional[Dict[str, Any]]:
+    """Convert a logical rollout (single file or chunked) into a dictionary."""
+    if not file_paths:
+        return None
+
+    first = file_paths[0]
+    ext = os.path.splitext(first)[1].lower()
+
+    if len(file_paths) == 1 and ext == ".npy":
+        return _load_npy_dict(first)
+
+    if ext == ".npz" or any(os.path.splitext(path)[1].lower() == ".npz" for path in file_paths):
+        return _combine_npz_files(file_paths)
+
+    return None
+
+
+def _discover_rollout_groups(folder: str) -> List[Tuple[str, List[str]]]:
+    """Identify logical rollout units, grouping chunked npz parts together."""
+    npy_paths = glob.glob(os.path.join(folder, "*.npy"))
+    npz_paths = glob.glob(os.path.join(folder, "*.npz"))
+
+    chunk_groups: Dict[str, List[str]] = {}
+    singles: List[str] = []
+
+    for path in sorted(npy_paths + npz_paths):
+        meta = _extract_chunk_metadata(path)
+        if meta is None:
+            singles.append(path)
+            continue
+        root_path, _ = meta
+        chunk_groups.setdefault(root_path, []).append(path)
+
+    groups: List[Tuple[str, List[str]]] = []
+
+    for path in singles:
+        groups.append((path, [path]))
+
+    for root, paths in chunk_groups.items():
+        paths.sort(key=_chunk_sort_key)
+        groups.append((root, paths))
+
+    return sorted(groups, key=lambda item: item[0])
 
 
 def _ensure_1d_status(status: np.ndarray) -> np.ndarray:
@@ -133,21 +291,29 @@ def save_metrics(metrics: Dict[str, np.ndarray], out_path: str, fmt: str) -> Non
 def process_folder(folder: str, outdir: str, fmt: str) -> None:
     """Walk through every rollout file in folder and write metrics summary."""
     os.makedirs(outdir, exist_ok=True)
-    npy_files = sorted(glob.glob(os.path.join(folder, "*.npy")))
+    rollout_groups = _discover_rollout_groups(folder)
 
-    if not npy_files:
-        print(f"No .npy files found under {folder}.")
+    if not rollout_groups:
+        print(f"No .npy or .npz files found under {folder}.")
         return
 
-    for file_path in npy_files:
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
+    for logical_path, file_paths in rollout_groups:
+        base_name = os.path.splitext(os.path.basename(logical_path))[0]
         out_name = base_name + (".npy" if fmt == "npy" else ".npz")
         out_path = os.path.join(outdir, out_name)
 
         try:
-            data = np.load(file_path, allow_pickle=True).item()
+            data = _load_rollout_group(file_paths)
         except Exception as exc:
-            print(f"Skipping {file_path}: failed to load ({exc}).")
+            print(f"Skipping {logical_path}: failed to load ({exc}).")
+            continue
+
+        if not isinstance(data, dict):
+            print(f"Skipping {logical_path}: unsupported data format.")
+            continue
+
+        if "status" not in data:
+            print(f"Skipping {logical_path}: missing 'status' key after loading.")
             continue
 
         metrics = extract_step_metrics(data)

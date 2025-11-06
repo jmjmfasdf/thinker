@@ -255,7 +255,7 @@ def aa_calculate_internal_vector_diversity(srn_vectors):
     if len(srn_vectors) < 2:
         return 0.0
 
-    vectors = np.array(srn_vectors)
+    vectors = np.asarray(srn_vectors, dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms = np.where(norms < 1e-10, 1.0, norms)
     normalized_vectors = vectors / norms
@@ -274,7 +274,7 @@ def aa_calculate_internal_vector_diversity(srn_vectors):
         cosine_similarities = similarity_matrix[indices]
         cosine_distances = (1 - cosine_similarities).tolist()
 
-    variance = np.var(cosine_distances) if cosine_distances else 0.0
+    variance = float(np.var(np.asarray(cosine_distances, dtype=np.float32))) if cosine_distances else 0.0
     normalized_variance = variance / 4.0
     
     return min(normalized_variance, 1.0)
@@ -294,8 +294,8 @@ def aa_calculate_inter_fragment_vector_diversity(fragment_vectors_list):
     if len(all_vectors) < 3:
         return 0.0
     
-    all_vectors = np.array(all_vectors)
-    fragment_labels = np.array(fragment_labels)
+    all_vectors = np.asarray(all_vectors, dtype=np.float32)
+    fragment_labels = np.asarray(fragment_labels)
     norms = np.linalg.norm(all_vectors, axis=1, keepdims=True)
     norms = np.where(norms < 1e-10, 1.0, norms)
     normalized_vectors = all_vectors / norms
