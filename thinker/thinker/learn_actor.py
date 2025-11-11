@@ -558,7 +558,8 @@ class SActorLearner:
             train_actor_out, initial_actor_state, first_iter, last_iter
         )
         losses, train_actor_out = out
-        total_loss = losses["total_loss"]
+        rl_coef = getattr(self.flags, "rl_loss_coef", 0.5)
+        total_loss = rl_coef * losses["total_loss"]
         if timing is not None:
             timing.time("compute loss")
 
