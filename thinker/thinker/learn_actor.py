@@ -20,7 +20,7 @@ from thinker.buffer import RetBuffer
 from gymnasium import spaces
 from thinker.bc_loader import FrameStackedBehavioralDataLoader
 from thinker.model_net import ModelNet
-from imitation import ThinkerPolicyAdapter, dqfd_margin_loss
+from imitation import ThinkerPolicyAdapter
 
 def compute_baseline_loss(
     baseline,
@@ -210,7 +210,6 @@ class SActorLearner:
         self.dbg_adv = collections.deque(maxlen=100)
         self.dbg_start_time = self.timer()
         self._init_bc_components()
-        self.latest_icopro_actor_stats = None
 
     def _init_bc_components(self):
         self.bc_loader = None
@@ -311,7 +310,14 @@ class SActorLearner:
             "action_probs": action_probs,
         }
 
-    def _compute_bc_loss(self):
+    def collect_bc_rollout(self, requires_grad: bool = False):
+        """
+        Sample a batch of human demonstrations and run the Thinker policy adapter without computing losses.
+
+        Returns:
+            Dictionary containing the raw batch, policy outputs, and rollout metadata, or None if the
+            behaviour dataset/adapter is unavailable.
+        """
         if not self.bc_enabled or self.bc_loader is None:
             return None
         self._ensure_bc_adapter()
@@ -322,86 +328,32 @@ class SActorLearner:
         batch = self._sample_bc_batch()
         if batch is None:
             return None
-        obs = batch["obs"]
-        human_actions = batch["actions"]
-        human_action_probs = batch["action_probs"]
-        prev_actions = batch["prev_actions"]
-        sequence_starts = batch["sequence_starts"]
-        policy = self.bc_policy_adapter.forward(
-            obs,
+        forward_kwargs = dict(
+            obs=batch["obs"],
             actions=None,
-            requires_grad=True,
+            requires_grad=requires_grad,
             real_rewards=batch["rewards"],
             real_dones=batch["dones"],
-            prev_actions=prev_actions,
-            sequence_starts=sequence_starts,
+            prev_actions=batch["prev_actions"],
+            sequence_starts=batch["sequence_starts"],
         )
-        logits = policy.logits
-        log_probs = policy.log_probs
+        if requires_grad:
+            policy = self.bc_policy_adapter.forward(**forward_kwargs)
+        else:
+            with torch.no_grad():
+                policy = self.bc_policy_adapter.forward(**forward_kwargs)
         tree_q = self.bc_policy_adapter.last_tree_q
         if tree_q is not None and self.bc_tree_coef != 0.0:
-            q_values = logits + self.bc_tree_coef * tree_q
+            q_values = policy.logits + self.bc_tree_coef * tree_q
         else:
-            q_values = logits
-        margin_tensor = torch.full((human_actions.shape[0],), self.bc_margin, dtype=torch.float32, device=self.device)
-        margin_loss = dqfd_margin_loss(q_values, human_actions, margin_tensor)
-        if self.bc_ce_coef > 0.0:
-            ce_loss = F.cross_entropy(logits, human_actions)
-        else:
-            ce_loss = torch.zeros((), device=self.device)
-        kl_loss = F.kl_div(log_probs, human_action_probs, reduction="batchmean")
-        if self.bc_pvp_coef > 0.0:
-            agent_actions = torch.argmax(logits.detach(), dim=-1)
-            q_human = q_values.gather(1, human_actions.unsqueeze(1)).squeeze(1)
-            q_agent = q_values.gather(1, agent_actions.unsqueeze(1)).squeeze(1)
-            pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
-            diff = (agent_actions != human_actions).float()
-            if diff.sum() > 0:
-                pvp_neg = F.mse_loss(diff * q_agent, diff * (-torch.ones_like(q_agent)))
-            else:
-                pvp_neg = torch.zeros_like(pvp_pos)
-            pvp_loss = pvp_pos + pvp_neg
-        else:
-            pvp_loss = torch.zeros((), device=self.device)
-        total_loss = (
-            self.bc_margin_coef * margin_loss
-            + self.bc_ce_coef * ce_loss
-            + self.bc_pvp_coef * pvp_loss
-            + self.bc_actor_kl_coef * kl_loss
-        )
-        accuracy = float((torch.argmax(logits.detach(), dim=-1) == human_actions).float().mean().item())
+            q_values = policy.logits
         return {
-            "total_loss": total_loss,
-            "margin_loss": margin_loss,
-            "ce_loss": ce_loss,
-            "pvp_loss": pvp_loss,
-            "kl_loss": kl_loss,
-            "accuracy": accuracy,
-        }
-
-    def _maybe_run_bc_update(self):
-        if not self.bc_enabled or self.bc_loader is None or self.bc_optimizer is None:
-            return None
-        self.bc_step += 1
-        if self.bc_step % self.bc_supervised_freq != 0:
-            return None
-        metrics = self._compute_bc_loss()
-        if metrics is None:
-            return None
-        total_loss = metrics["total_loss"]
-        self.bc_optimizer.zero_grad()
-        total_loss.backward()
-        if self.flags.actor_grad_norm_clipping > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.actor_net.parameters(), self.flags.actor_grad_norm_clipping
-            )
-        self.bc_optimizer.step()
-        return {
-            "total_loss": total_loss.detach().cpu().item(),
-            "margin_loss": metrics["margin_loss"].detach().cpu().item(),
-            "ce_loss": metrics["ce_loss"].detach().cpu().item(),
-            "pvp_loss": metrics["pvp_loss"].detach().cpu().item(),
-            "accuracy": metrics["accuracy"],
+            "batch": batch,
+            "policy": policy,
+            "q_values": q_values,
+            "tree_q": tree_q,
+            "rollout_history": self.bc_policy_adapter.last_rollout_history,
+            "imagined_actions": self.bc_policy_adapter.last_imagined_actions,
         }
 
     def learn_data(self):
@@ -599,28 +551,16 @@ class SActorLearner:
         self.scheduler.step()
         self.anneal_c = max(1 - self.real_step / self.flags.total_steps, 0)
 
-        icopro_stats = self._maybe_run_bc_update()
-        if icopro_stats is not None:
-            self.latest_icopro_actor_stats = icopro_stats
-
         if not self.ppo_enable or first_iter:
             # statistic output
             for k in losses:
-                if not k.startswith('icopro_'):
-                    losses[k] = losses[k] / T / B
+                losses[k] = losses[k] / T / B
             total_norm = total_norm / T / B
             stats = self.compute_stat(train_actor_out, losses, total_norm, actor_id)
             stats["sps"] = self.sps
-            if self.latest_icopro_actor_stats:
-                stats["icopro/actor/total_loss"] = self.latest_icopro_actor_stats["total_loss"]
-                stats["icopro/actor/margin_loss"] = self.latest_icopro_actor_stats["margin_loss"]
-                stats["icopro/actor/ce_loss"] = self.latest_icopro_actor_stats["ce_loss"]
-                stats["icopro/actor/pvp_loss"] = self.latest_icopro_actor_stats["pvp_loss"]
-                stats["icopro/actor/accuracy"] = self.latest_icopro_actor_stats["accuracy"]
 
             # write to log file
             self.plogger.log(stats)
-            self.latest_icopro_actor_stats = None
 
             # print statistics
             if self.timer() - self.start_time > 5:
