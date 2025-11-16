@@ -106,6 +106,8 @@ class ThinkerPolicyAdapter:
         self._last_tree_reps: Optional[torch.Tensor] = None
         self._last_rollout_history: Optional[List[List[Dict[str, Any]]]] = None
         self._last_imagined_actions: Optional[torch.Tensor] = None
+        self._last_sr_features: Optional[torch.Tensor] = None
+        self._last_vp_features: Optional[torch.Tensor] = None
         self._pending_force_reset: Optional[torch.Tensor] = None
         if not hasattr(self.actor_net, "policy"):
             raise AttributeError("Actor network must expose a 'policy' layer for imitation training")
@@ -142,6 +144,8 @@ class ThinkerPolicyAdapter:
         self._last_real_actions = None
         self._last_rollout_history = None
         self._last_imagined_actions = None
+        self._last_sr_features = None
+        self._last_vp_features = None
         if self._cenv_wrapper is not None and hasattr(self._cenv_wrapper, "close"):
             try:
                 self._cenv_wrapper.close()
@@ -998,6 +1002,8 @@ class ThinkerPolicyAdapter:
         self._last_real_actions = torch.argmax(getattr(actor_out, "pri_param", self._squeeze_policy_tensor(actor_out.action_prob)), dim=-1)
         self._last_tree_q = q_values
         self._last_tree_reps = tree_reps
+        self._last_sr_features = self._flatten_feature(states.get("xs"))
+        self._last_vp_features = self._flatten_feature(states.get("hs"))
         if original_device != model_dev:
             self.model_net.to(original_device)
         self.model_net.train(model_train_mode)
@@ -1052,6 +1058,18 @@ class ThinkerPolicyAdapter:
             probs = probs.detach()
         return PolicyBatch(logits=logits, log_probs=log_probs, probs=probs, features=latent)
 
+    def _flatten_feature(self, tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if tensor is None:
+            return None
+        feat = tensor.to(self.device)
+        if feat.dim() == 1:
+            feat = feat.unsqueeze(0)
+        elif feat.dim() > 2:
+            feat = feat.view(feat.shape[0], -1)
+        else:
+            feat = feat.view(feat.shape[0], -1)
+        return feat.detach()
+
     @property
     def last_tree_q(self) -> Optional[torch.Tensor]:
         return self._last_tree_q
@@ -1059,6 +1077,14 @@ class ThinkerPolicyAdapter:
     @property
     def last_tree_reps(self) -> Optional[torch.Tensor]:
         return self._last_tree_reps
+
+    @property
+    def last_sr_features(self) -> Optional[torch.Tensor]:
+        return self._last_sr_features
+
+    @property
+    def last_vp_features(self) -> Optional[torch.Tensor]:
+        return self._last_vp_features
 
     @property
     def last_rollout_history(self) -> Optional[List[List[Dict[str, Any]]]]:

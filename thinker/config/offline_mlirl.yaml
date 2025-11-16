@@ -1,0 +1,32 @@
+behavior:
+  base_path: ../behavioral_data_block
+  subjects: [1]
+  game_id: 2
+  frame_stack_n: 4
+  sequence_length: 15
+  batch_size: 128
+  target_size: [84, 84]
+  grayscale: true
+
+optim:
+  gamma: 0.99
+  entropy_coef: 0.01
+  penalty_scale: 1.5
+  penalty_clamp: 3.0
+  actor_lr: 1.0e-5
+  reward_lr: 3.0e-5
+  actor_grad_clip: 2.0
+  reward_grad_clip: 2.0
+  feature_norm_momentum: 0.05
+  replay_size: 512
+  warmup_batches: 128
+  replay_batches_per_step: 32
+  actor_ckp_interval: 2
+  max_steps: 40
+  log_interval: 1
+  policy_updates_per_step: 1
+  reward_updates_per_step: 1
+
+thinker:
+  reward_feature_source: vp
+  device: auto

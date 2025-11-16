@@ -503,3 +503,34 @@ class FrameStackedBehavioralDataLoader:
         self.current_pos = 0
         self.current_data = None
         self._load_current_file()
+
+    def sample_root_batch(
+        self,
+        batch_size: int = 32,
+        sequence_length: int = 40,
+        gamma: float = 0.99,
+    ) -> Optional[Dict[str, np.ndarray]]:
+        """Convenience helper that returns root observations plus discounted returns."""
+        sample = self.get_sequence_batch(batch_size=batch_size, sequence_length=sequence_length)
+        if sample is None:
+            return None
+        images = sample["images"]
+        actions = sample["actions"]
+        rewards = sample["rewards"]
+        obs = images[:, 0].astype(np.float32)
+        action_idx = self._to_action_index(actions[:, 0])
+        discounts = np.power(gamma, np.arange(rewards.shape[1], dtype=np.float32))
+        returns = np.einsum("bt,t->b", rewards, discounts).astype(np.float32)
+        return {
+            "obs": obs,
+            "actions": action_idx,
+            "returns": returns,
+        }
+
+    @staticmethod
+    def _to_action_index(action_slice: np.ndarray) -> np.ndarray:
+        if action_slice.ndim == 1:
+            return action_slice.astype(np.int64)
+        if action_slice.ndim == 2:
+            return np.argmax(action_slice, axis=-1).astype(np.int64)
+        raise ValueError(f"Unsupported action slice with shape {action_slice.shape}")
