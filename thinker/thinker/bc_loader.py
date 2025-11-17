@@ -2,7 +2,7 @@ import os
 import numpy as np
 import torch
 import random
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 from pathlib import Path
 import cv2
 
@@ -15,7 +15,9 @@ class FrameStackedBehavioralDataLoader:
                  frame_stack_n: int = 4,
                  target_size: Tuple[int, int] = (84, 84),
                  grayscale: bool = True,
-                 normalize: bool = True):
+                 normalize: bool = True,
+                 balance_action_idx: Optional[int] = 0,
+                 balance_target_ratio: float = 0.5):
         """
         Behavioral cloning data loader with frame stacking
         
@@ -27,6 +29,8 @@ class FrameStackedBehavioralDataLoader:
             target_size: Target image size (H, W)
             grayscale: Whether to convert to grayscale
             normalize: Whether to normalize pixel values to [0, 1]
+            balance_action_idx: Target action index to balance (None disables balancing)
+            balance_target_ratio: Desired ratio of samples with ``balance_action_idx`` when BC batches are drawn
         """
         self.base_path = Path(base_path)
         self.subjects = subjects
@@ -35,6 +39,9 @@ class FrameStackedBehavioralDataLoader:
         self.target_size = target_size
         self.grayscale = grayscale
         self.normalize = normalize
+        self.balance_action_idx = balance_action_idx
+        self.balance_target_ratio = float(np.clip(balance_target_ratio, 0.0, 1.0))
+        self.balance_samples_per_file = 16
         
         # Load all data files
         self.data_files = self._load_data_files()
@@ -181,36 +188,43 @@ class FrameStackedBehavioralDataLoader:
         rewards = self.current_data['reward']
         is_first = self.current_data['is_first']
         is_terminal = self.current_data['is_terminal']
-        
+        action_indices_full = self._actions_to_indices(actions)
+
         T = images.shape[0]
-        
+
         # Find valid sequence start positions
         valid_starts = []
+        starts_by_action = {idx: [] for idx in range(self.num_actions)}
         for i in range(self.frame_stack_n - 1, T - sequence_length + 1):
             # Check if sequence doesn't cross episode boundaries
             if not np.any(is_first[i:i+sequence_length]) and not np.any(is_terminal[i:i+sequence_length]):
                 valid_starts.append(i)
-        
+                action_idx = int(action_indices_full[i])
+                if 0 <= action_idx < self.num_actions:
+                    starts_by_action[action_idx].append(i)
+
         if len(valid_starts) < batch_size:
             return None
-        
+
         # Sample batch_size sequences
-        selected_starts = np.random.choice(valid_starts, size=batch_size, replace=False)
-        
+        selected_starts = self._select_starts_by_prior(valid_starts, starts_by_action, batch_size)
+
         # Create batch
         batch_images = []
         batch_actions = []
         batch_rewards = []
         batch_is_first = []
         batch_is_terminal = []
-        
+        batch_prev_actions = []
+
         for start_idx in selected_starts:
             sequence_images = []
             sequence_actions = []
             sequence_rewards = []
             sequence_is_first = []
             sequence_is_terminal = []
-            
+            sequence_prev_actions = []
+
             for t in range(sequence_length):
                 # Create frame stack for this timestep
                 stacked_image = self._create_frame_stack(images, start_idx + t)
@@ -221,26 +235,36 @@ class FrameStackedBehavioralDataLoader:
                 sequence_rewards.append(rewards[start_idx + t])
                 sequence_is_first.append(is_first[start_idx + t])
                 sequence_is_terminal.append(is_terminal[start_idx + t])
-            
+                global_idx = start_idx + t
+                prev_idx = global_idx - 1
+                if prev_idx < 0 or bool(is_terminal[prev_idx]) or bool(is_first[global_idx]):
+                    prev_action_idx = action_indices_full[global_idx]
+                else:
+                    prev_action_idx = action_indices_full[prev_idx]
+                sequence_prev_actions.append(prev_action_idx)
+
             batch_images.append(np.stack(sequence_images, axis=0))
             batch_actions.append(np.stack(sequence_actions, axis=0))
             batch_rewards.append(np.stack(sequence_rewards, axis=0))
             batch_is_first.append(np.stack(sequence_is_first, axis=0))
             batch_is_terminal.append(np.stack(sequence_is_terminal, axis=0))
-        
+            batch_prev_actions.append(np.stack(sequence_prev_actions, axis=0))
+
         # Stack sequences
         batch_images = np.stack(batch_images, axis=0)
         batch_actions = np.stack(batch_actions, axis=0)
         batch_rewards = np.stack(batch_rewards, axis=0)
         batch_is_first = np.stack(batch_is_first, axis=0)
         batch_is_terminal = np.stack(batch_is_terminal, axis=0)
-        
+        batch_prev_actions = np.stack(batch_prev_actions, axis=0)
+
         return {
             'images': batch_images,      # (B, T, C*stack_n, H, W) = (1, 40, 4, 84, 84)
             'actions': batch_actions,    # (B, T, 6)
             'rewards': batch_rewards,    # (B, T)
             'is_first': batch_is_first,  # (B, T)
-            'is_terminal': batch_is_terminal  # (B, T)
+            'is_terminal': batch_is_terminal,  # (B, T)
+            'prev_actions': batch_prev_actions,  # (B, T)
         }
     
     def _load_current_file(self):
@@ -277,8 +301,16 @@ class FrameStackedBehavioralDataLoader:
             - 'actions': Actions taken [B, action_dim]
             - 'rewards': Rewards [B]
         """
+        if self.balance_action_idx is not None:
+            balanced = self._sample_balanced_pairs(batch_size)
+            if balanced is not None:
+                return balanced
+            print(
+                "[bc_loader] Warning: Failed to satisfy action balance target; "
+                "falling back to unbalanced sampling."
+            )
         return self._get_diverse_batch(batch_size)
-    
+
     def _get_diverse_batch(self, batch_size: int) -> Optional[Dict[str, np.ndarray]]:
         """
         Improved batch sampling strategy for maximum diversity:
@@ -368,6 +400,93 @@ class FrameStackedBehavioralDataLoader:
         if batch_next_actions:
             batch['next_actions'] = np.stack(batch_next_actions, axis=0)
         return batch
+
+    def _iter_file_samples(self, file_samples: Dict[str, List[Any]]):
+        """Yield sample dictionaries from a file-level sample dict."""
+        total = len(file_samples.get('obs', []))
+        keys = list(file_samples.keys())
+        for idx in range(total):
+            sample = {key: file_samples[key][idx] for key in keys}
+            yield sample
+
+    def _assemble_batch_from_samples(self, samples: List[Dict[str, Any]]) -> Optional[Dict[str, np.ndarray]]:
+        """Convert a list of sample dicts into the batch structure used by BC."""
+        if not samples:
+            return None
+
+        next_action_idx = np.stack(
+            [
+                sample.get('next_action_idx', sample.get('actions'))
+                for sample in samples
+            ],
+            axis=0,
+        )
+        batch = {
+            'obs': np.stack([sample['obs'] for sample in samples], axis=0),
+            'next_obs': np.stack([sample['next_obs'] for sample in samples], axis=0),
+            'actions': next_action_idx.copy(),
+            'rewards': np.asarray([sample['rewards'] for sample in samples], dtype=np.float32),
+            'curr_rewards': np.asarray([sample['curr_rewards'] for sample in samples], dtype=np.float32),
+            'next_rewards': np.asarray([sample['next_rewards'] for sample in samples], dtype=np.float32),
+            'curr_dones': np.asarray([sample['curr_dones'] for sample in samples], dtype=np.float32),
+            'next_dones': np.asarray([sample['next_dones'] for sample in samples], dtype=np.float32),
+            'curr_action_onehot': np.stack([sample['curr_action_onehot'] for sample in samples], axis=0).astype(np.float32),
+            'next_action_onehot': np.stack([sample['next_action_onehot'] for sample in samples], axis=0).astype(np.float32),
+            'prev_actions': np.asarray([sample['prev_actions'] for sample in samples], dtype=np.int64),
+            'sequence_starts': np.asarray([sample['sequence_starts'] for sample in samples], dtype=np.bool_),
+            'next_action_idx': next_action_idx,
+        }
+        if all('dones' in sample for sample in samples):
+            batch['dones'] = np.stack([sample['dones'] for sample in samples], axis=0)
+        if all('next_actions' in sample for sample in samples):
+            batch['next_actions'] = np.stack([sample['next_actions'] for sample in samples], axis=0)
+        return batch
+
+    def _sample_balanced_pairs(self, batch_size: int) -> Optional[Dict[str, np.ndarray]]:
+        """Sample BC pairs while keeping the target action close to the desired ratio."""
+        if batch_size <= 0 or len(self.data_files) == 0:
+            return None
+        target_ratio = float(np.clip(self.balance_target_ratio, 0.0, 1.0))
+        target_action = min(batch_size, max(0, int(round(batch_size * target_ratio))))
+        other_action = batch_size - target_action
+        selected_target: List[Dict[str, Any]] = []
+        selected_other: List[Dict[str, Any]] = []
+
+        max_attempts = max(5 * batch_size, 200)
+        attempts = 0
+        per_file_samples = max(2, min(self.balance_samples_per_file, batch_size))
+
+        while (len(selected_target) < target_action or len(selected_other) < other_action) and attempts < max_attempts:
+            file_idx = random.randrange(len(self.data_files))
+            file_samples = self._sample_from_file(file_idx, per_file_samples)
+            attempts += 1
+            if not file_samples:
+                continue
+
+            for sample in self._iter_file_samples(file_samples):
+                action_val = sample.get('next_actions')
+                if action_val is None:
+                    action_val = sample.get('next_action_idx')
+                if action_val is None:
+                    action_val = sample.get('actions')
+                if action_val is None:
+                    continue
+                action_idx = int(action_val)
+                if action_idx == self.balance_action_idx:
+                    if len(selected_target) < target_action:
+                        selected_target.append(sample)
+                else:
+                    if len(selected_other) < other_action:
+                        selected_other.append(sample)
+                if len(selected_target) >= target_action and len(selected_other) >= other_action:
+                    break
+
+        if len(selected_target) < target_action or len(selected_other) < other_action:
+            return None
+
+        combined = selected_target + selected_other
+        random.shuffle(combined)
+        return self._assemble_batch_from_samples(combined[:batch_size])
 
     def _sample_from_file(self, file_idx: int, num_samples: int) -> Optional[Dict[str, list]]:
         """
@@ -527,6 +646,40 @@ class FrameStackedBehavioralDataLoader:
             "returns": returns,
         }
 
+    def _select_starts_by_prior(
+        self,
+        valid_starts: List[int],
+        starts_by_action: Dict[int, List[int]],
+        batch_size: int,
+    ) -> np.ndarray:
+        """Sample start indices so batch action mix matches the human prior."""
+        if len(valid_starts) <= batch_size:
+            rng = np.random.default_rng()
+            return rng.choice(valid_starts, size=batch_size, replace=False)
+        prior = self.action_distribution / np.sum(self.action_distribution)
+        target_counts = np.random.multinomial(batch_size, prior)
+        selected: List[int] = []
+        remaining = set(valid_starts)
+        rng = np.random.default_rng()
+        for action_idx, target in enumerate(target_counts):
+            pool = starts_by_action.get(action_idx, [])
+            if not pool or target <= 0:
+                continue
+            take = min(target, len(pool))
+            if take <= 0:
+                continue
+            chosen = rng.choice(pool, size=take, replace=False)
+            for idx in chosen:
+                remaining.discard(int(idx))
+            selected.extend([int(idx) for idx in chosen])
+        if len(selected) < batch_size and remaining:
+            needed = batch_size - len(selected)
+            extra = rng.choice(sorted(remaining), size=min(needed, len(remaining)), replace=False)
+            selected.extend([int(idx) for idx in extra])
+        if len(selected) > batch_size:
+            selected = rng.choice(selected, size=batch_size, replace=False).tolist()
+        return np.array(selected, dtype=np.int64)
+
     @staticmethod
     def _to_action_index(action_slice: np.ndarray) -> np.ndarray:
         if action_slice.ndim == 1:
@@ -534,3 +687,13 @@ class FrameStackedBehavioralDataLoader:
         if action_slice.ndim == 2:
             return np.argmax(action_slice, axis=-1).astype(np.int64)
         raise ValueError(f"Unsupported action slice with shape {action_slice.shape}")
+
+    def _actions_to_indices(self, actions: np.ndarray) -> np.ndarray:
+        """Convert raw action tensors to index form."""
+        if actions.ndim == 1:
+            return actions.astype(np.int64)
+        if actions.ndim == 2 and actions.shape[-1] == self.num_actions:
+            return np.argmax(actions, axis=-1).astype(np.int64)
+        if actions.ndim == 2 and actions.shape[-1] == 1:
+            return actions.reshape(-1).astype(np.int64)
+        raise ValueError(f"Unsupported actions tensor shape {actions.shape}")

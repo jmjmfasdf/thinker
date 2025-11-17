@@ -41,20 +41,20 @@ class DemonstrationReplay:
         rewards = batch.rewards.astype(np.float32)
         is_first = batch.is_first
         actions = batch.actions
+        prev_actions = batch.prev_actions
         B, T = rewards.shape
         for b in range(B):
-            prev_action = 0
             for t in range(T):
                 action = int(actions[b, t])
+                prev_action = int(prev_actions[b, t]) if prev_actions is not None else action
                 entry = {
                     "obs": images[b, t],
                     "action": action,
                     "prev_action": prev_action,
                     "reward": rewards[b, t],
-                    "sequence_start": bool(is_first[b, t]),
+                    "sequence_start": bool(is_first[b, t]) or t == 0,
                 }
                 self.buffer.append(entry)
-                prev_action = action
 
     def sample_batch(self, batch_size: int) -> Dict[str, np.ndarray]:
         samples = random.sample(self.buffer, batch_size)

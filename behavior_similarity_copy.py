@@ -191,7 +191,9 @@ def _load_human_metrics(subject: int, game_number: int, human_dir: Path) -> Huma
 
 def _load_thinker_file_metrics(thinker_dir: Path) -> Dict[str, List[ThinkerFileMetric]]:
     per_step: Dict[str, List[ThinkerFileMetric]] = {}
-    for path in sorted(thinker_dir.glob("*.npy")):
+    metric_paths = sorted(thinker_dir.glob("*.npz")) or sorted(thinker_dir.glob("*.npy"))
+
+    for path in metric_paths:
         stem = path.stem  # e.g. spaceinvaders_1e6_0
         parts = stem.split("_")
         if len(parts) < 3:
@@ -200,20 +202,37 @@ def _load_thinker_file_metrics(thinker_dir: Path) -> Dict[str, List[ThinkerFileM
         step_token = parts[-2]
         step_key = f"{game_token}_{step_token}"
 
-        data = np.load(path, allow_pickle=True).item()
-        status = np.asarray(data.get("status", []), dtype=int)
-        tree_reps = data.get("tree_reps", {})
-        raw_actions = tree_reps.get("cur_action")
-        if raw_actions is None:
-            continue
-        action_indices = _argmax_actions(np.asarray(raw_actions))
-        filtered = action_indices[status == 0]
-        if filtered.size == 0:
-            continue
-        noop_ratio = float(np.mean(filtered == 0))
+        if path.suffix == ".npz":
+            try:
+                with np.load(path, allow_pickle=True) as data:
+                    actions = data.get("action")
+                    if actions is None:
+                        continue
+                    action_indices = np.asarray(actions).reshape(-1)
+            except Exception:
+                continue
+
+            finite_actions = action_indices[np.isfinite(action_indices)]
+            if finite_actions.size == 0:
+                continue
+            noop_ratio = float(np.mean(finite_actions == 0))
+        else:
+            data = np.load(path, allow_pickle=True).item()
+            status = np.asarray(data.get("status", []), dtype=int)
+            tree_reps = data.get("tree_reps", {})
+            raw_actions = tree_reps.get("cur_action")
+            if raw_actions is None:
+                continue
+            action_indices = _argmax_actions(np.asarray(raw_actions))
+            filtered = action_indices[status == 0]
+            if filtered.size == 0:
+                continue
+            noop_ratio = float(np.mean(filtered == 0))
+
         score = float(THINKER_SCORE_PLACEHOLDER.get(stem, math.nan))
         metric = ThinkerFileMetric(path=path, noop_ratio=noop_ratio, score=score)
         per_step.setdefault(step_key, []).append(metric)
+
     return per_step
 
 
@@ -284,21 +303,21 @@ def _plot_metrics(step_metrics: List[StepMetrics],
 
     step_metrics = sorted(step_metrics, key=lambda sm: _step_sort_key(sm.step_token))
     steps = [sm.step_token for sm in step_metrics]
-    noop_diffs = [sm.human_mean_noop - sm.thinker_mean_noop for sm in step_metrics]
-    score_diffs = [sm.human_mean_score - sm.thinker_mean_score for sm in step_metrics]
+    noop_diffs = [sm.thinker_mean_noop - sm.human_mean_noop for sm in step_metrics]
+    score_diffs = [sm.thinker_mean_score - sm.human_mean_score for sm in step_metrics]
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
 
     axes[0].plot(steps, noop_diffs, marker="o", linestyle="-", color="#1f77b4")
     axes[0].axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
-    axes[0].set_ylabel("Mean noop diff")
-    axes[0].set_title("Human vs Thinker noop difference")
+    axes[0].set_ylabel("Noop freq difference (model - human)")
+    axes[0].set_title("Noop freq difference")
 
     axes[1].plot(steps, score_diffs, marker="s", linestyle="-", color="#d62728")
     axes[1].axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
-    axes[1].set_ylabel("Mean score diff")
+    axes[1].set_ylabel("Score diff (model - human)")
     axes[1].set_xlabel("Thinker step token")
-    axes[1].set_title("Human vs Thinker score difference")
+    axes[1].set_title("Score diff")
 
     fig.suptitle(f"Subject {subject} / Game {game_number}")
     fig.tight_layout(rect=[0, 0.03, 1, 0.97])

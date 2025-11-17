@@ -1,1 +1,0 @@
-from gym_sokoban.envs.psokoban import SokobanEnv

@@ -106,4 +106,65 @@ The first term encourages the planner-adjusted value of the human action to sit 
   \item Targets $\pm 1$: fixed constants that define the desired separation between human and agent values inside PvP.
 \end{itemize}
 
+\section{Config Usage (설정 사용 방식)}
+\subsection{설정 기반 실행 흐름}
+\noindent 아래와 같이 \texttt{train.py}를 실행하면, 모든 플래그의 기본값이 먼저 지정된 \texttt{config\_c.yaml}에서 불러와지고, 그 위에 커맨드라인 인자가 덮어쓴다.
+\begin{verbatim}
+python train.py \
+  --config logs/thinker/spaceinvaders_4e6/config_c.yaml \
+  --name SpaceInvaders-v5 \
+  --reward_clip 1 \
+  --model_size_nn 2 \
+  --discounting 0.99 \
+  --envpool True \
+  --preload ../logs/thinker/spaceinvaders_4e6 \
+  --dataset_base_path ../behavioral_data_block \
+  --dataset_subjects "1" \
+  --dataset_game_id 2 \
+  ...
+\end{verbatim}
+\noindent 로드 순서는 \texttt{thinker/thinker/util.py} 203–333라인에 정의되어 있다.
+\begin{itemize}
+  \item \textbf{\texttt{--config} 지정 시}: YAML의 대부분의 하이퍼파라미터가 로드되고, 이후 CLI 인자가 해당 값들을 override한다.
+  \item \textbf{\texttt{--config} 미지정 시}: \texttt{train.py} 11–78라인의 \texttt{\_sync\_flags\_with\_pretrained}가 프레임 스택, 그레이스케일, \texttt{env\_n}처럼 제한된 필드만 체크포인트에서 동기화한다. 나머지 값은 디폴트로 남아 이전 실행과 불일치할 수 있으므로 주의가 필요하다.
+\end{itemize}
+
+\section{Offline ML-IRL + Thinker (앙상블 없음)}
+\subsection{World-Model 기반 롤아웃}
+\begin{itemize}
+  \item \texttt{--preload} 경로에서 기존 \texttt{ModelNet} 가중치를 재사용한다.
+  \item 인간 데몬스트레이션 prefix마다 Thinker 알고리즘(Algorithm~1)에 따라 $K-1$개의 상상 스텝을 삽입하고, 마지막 스텝만 실제 데이터셋 전이와 정렬시킨다.
+  \item 이렇게 하면 보상 그래디언트가 augmented MDP 구조(상상+현실 단계)를 그대로 따르며, 계획 능력을 유지한 채 보상 추정이 가능하다.
+\end{itemize}
+
+\subsection{불확실성 패널티 $U(s,a)$}
+\begin{itemize}
+  \item 앙상블이 없어도 단일 모델의 epistemic proxy가 필요하다. 예측 residual, latent 분산 스케일링 등을 사용해 \texttt{imagine} 단계에서 OOD 위험을 추정한다.
+  \item $U(s,a)$는 로그우도 항을 압도하지 않도록 클램프하거나 학습 단계에 따라 anneal한다.
+  \item 패널티는 정책 개선 단계의 보상에 직접 추가하여, 전문가 분포 밖으로 나가지 않도록 한다.
+\end{itemize}
+
+\subsection{Bi-level 최적화 구조}
+\begin{enumerate}
+  \item \textbf{상위 레벨(보상 적합)}: 현재 정책 분포 아래에서 $\sum_t \log \pi_{\theta}(a_t|s_t)$를 최대화하며, Thinker feature를 입력받는 reward head를 역전파한다.
+  \item \textbf{하위 레벨(정책 개선)}: \texttt{learn\_actor.py}의 PPO/V-trace 업데이트를 재사용하되, 리턴을 $r_{\theta}(s,a)+U(s,a)+\alpha H(\pi(\cdot|s))$로 수정한다.
+  \item 두 단계를 reward가 수렴하거나 validation likelihood가 멈출 때까지 번갈아 수행한다.
+\end{enumerate}
+
+\section{Hidden-State Tap Points}
+\begin{itemize}
+  \item \textbf{SR branch}: \texttt{SRNetOut.hs}는 다음 관찰·보상 예측과 밀접하게 연결되어 있어, 인간 데몬스트레이션 정렬형 보상에 적합하다.
+  \item \textbf{VP branch}: \texttt{VPNetOut.vs} 및 \texttt{VPNetOut.policy}는 가치/정책 품질과 정렬된 신호를 제공하여 value-consistent shaping에 유리하다.
+  \item \texttt{ThinkerPolicyAdapter}를 통해 상상 스텝마다 필요한 branch를 선택하며, 설정 파일에 \texttt{reward\_feature\_source}(\texttt{sr} 또는 \texttt{vp}) 옵션을 둔다.
+\end{itemize}
+
+\section{Implementation Roadmap (5–9 단계 세부)}
+\begin{enumerate}
+  \item \textbf{Policy Improvement Wrapper}: \texttt{policy\_updater.py}에서 오프라인 배치를 \texttt{ActorNet} 입력 형태로 변환하고, \texttt{ThinkerPolicyAdapter.forward} 결과의 리워드 텐서를 $r_{\theta}+U$로 대체한다. 엔트로피 및 패널티 스칼라는 V-trace 이전 단계에 주입한다.
+  \item \textbf{Offline ML-IRL Trainer}: \texttt{offline\_mlirl\_trainer.py}가 $\tau_E$ 샘플링, 로그우도 그라디언트 계산, 정책 업데이트 호출(한 번의 보상 업데이트당 $K_{\text{policy}}$회)을 관리하고, 매 반복마다 likelihood와 트리 통계를 로깅한다.
+  \item \textbf{CLI Entry Point}: \texttt{run\_offline\_mlirl.py}에서 \texttt{thinker/config/offline\_mlirl.yaml}을 파싱하고, \texttt{--stage joint} / \texttt{--stage reward\_only} 모드를 제공하며, 실행 전 preload·데이터 일치 여부를 검증한다.
+  \item \textbf{보조 수정}: \texttt{bc\_loader.py}에 \texttt{as\_demo\_batch} helper를 추가하고, \texttt{ThinkerPolicyAdapter}가 SR/VP activation을 캐시에서 노출하도록 확장한다. \texttt{learn\_model.py}에는 에폭별 멀티 스냅샷 export 옵션을 추가한다.
+  \item \textbf{문서화}: \texttt{README.md}와 본 \texttt{main.tex}에 Offline ML-IRL 파이프라인 사용법, 필수 경로, 모니터링 포인트를 정리한다.
+\end{enumerate}
+
 \end{document}

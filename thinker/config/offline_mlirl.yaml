@@ -10,8 +10,8 @@ behavior:
 
 optim:
   gamma: 0.99
-  entropy_coef: 0.01
-  penalty_scale: 1.5
+  entropy_coef: 0.03
+  penalty_scale: 0.2
   penalty_clamp: 3.0
   actor_lr: 1.0e-5
   reward_lr: 3.0e-5
