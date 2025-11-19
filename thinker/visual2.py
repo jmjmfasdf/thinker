@@ -185,6 +185,66 @@ def plot_qn_sa(q_s_a, n_s_a, action_meanings, max_q_s_a=None, ax=None):
     ax.set_title("q_s_a and n_s_a")
 
 
+def _extract_cur_reward(info):
+    if info is None or "cur_reward" not in info or info["cur_reward"] is None:
+        return np.nan
+
+    value = info["cur_reward"]
+    if torch.is_tensor(value):
+        value = value.detach().cpu().reshape(-1)
+        return value[0].item() if value.numel() > 0 else np.nan
+
+    value = np.asarray(value)
+    if value.size == 0:
+        return np.nan
+    return float(value.reshape(-1)[0])
+
+def _collect_encoder_vectors(env, env_out, device):
+    real_vectors = None
+    im_vectors = None
+    im_vp_vectors = None
+    im_vectors_from_real = False
+
+    if not hasattr(env, "model_net"):
+        return real_vectors, im_vectors, im_vp_vectors, im_vectors_from_real
+
+    sr_net = getattr(env.model_net, "sr_net", None)
+    if sr_net is not None and env_out.real_states is not None:
+        with torch.no_grad():
+            real_state_input = env_out.real_states[0, 0, :].unsqueeze(0).unsqueeze(0)
+            real_state_norm = env.model_net.normalize(real_state_input)
+            dummy_action = torch.zeros(
+                1, 1, sr_net.dim_rep_actions, device=device
+            )
+            dummy_done = torch.zeros(1, 1, dtype=torch.bool, device=device)
+            real_vectors, _ = sr_net.encoder(
+                real_state_norm, dummy_done, dummy_action, {}, flatten=True
+            )
+            real_vectors = real_vectors.cpu().numpy()
+            if hasattr(sr_net, "state") and isinstance(sr_net.state, dict) and "sr_h" in sr_net.state:
+                im_vectors = sr_net.state["sr_h"]
+                if torch.is_tensor(im_vectors):
+                    im_vectors = im_vectors.detach().cpu().numpy()
+            if im_vectors is None:
+                im_vectors = real_vectors
+                im_vectors_from_real = True
+
+    vp_net = getattr(env.model_net, "vp_net", None)
+    if vp_net is not None and hasattr(vp_net, "state") and isinstance(vp_net.state, dict) and "vp_h" in vp_net.state:
+        im_vp_vectors = vp_net.state["vp_h"]
+        if torch.is_tensor(im_vp_vectors):
+            im_vp_vectors = im_vp_vectors.detach().cpu().numpy()
+
+    return real_vectors, im_vectors, im_vp_vectors, im_vectors_from_real
+
+def _append_encoder_vectors(video_stats, real_vectors, im_vectors, im_vp_vectors, status_value, shared_source):
+    if status_value == 0 and shared_source:
+        real_vectors = None
+    video_stats["real_vectors"].append(real_vectors)
+    video_stats["im_vectors"].append(im_vectors)
+    video_stats["im_vp_vectors"].append(im_vp_vectors)
+
+
 def gen_video(video_stats, file_path):
     import cv2
 
@@ -347,7 +407,7 @@ def visualize(
     seed=-1,
     max_frames=-1,
     use_gpu=True,  # GPU 사용 여부 추가
-    save_encoder_vectors=False,  # encoder 벡터 저장 옵션 추가
+    save_encoder_vectors=True,  # encoder 벡터 저장 옵션 추가
 ):        
     savedir = savedir.replace("__project__", __project__)
     ckpdir = os.path.join(savedir, xpid)      
@@ -462,9 +522,9 @@ def visualize(
     im_done = False
 
     # video_stats 초기화 - 기존 이미지와 encoder 벡터 모두 저장
-    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": []}
+    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "cur_rewards": []}
     if save_encoder_vectors:
-        video_stats.update({"real_vectors": [], "im_vectors": []})
+        video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
         print("Saving both images and encoder vectors")
     
     # 메모리 효율성을 위한 최대 저장 프레임 수 제한 (전체 프레임 저장을 위해 충분히 큰 값 설정)
@@ -487,36 +547,22 @@ def visualize(
     
         # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
     if save_encoder_vectors:
-        with torch.no_grad():
-            if hasattr(env, 'model_net') and hasattr(env.model_net, 'sr_net'):
-                # real_imgs와 im_imgs를 저장하는 것과 동일한 로직
-                # 항상 real_vectors와 im_vectors를 모두 계산
-                # real state의 latent output
-                real_state_input = env_out.real_states[0, 0, :].unsqueeze(0).unsqueeze(0)  # (1, 1, 12, 84, 84)
-                real_state_norm = env.model_net.normalize(real_state_input)
-                dummy_action = torch.zeros(1, 1, env.model_net.sr_net.dim_rep_actions, device=device)
-                dummy_done = torch.zeros(1, 1, dtype=torch.bool, device=device)
-                real_vectors, _ = env.model_net.sr_net.encoder(
-                    real_state_norm, dummy_done, dummy_action, {}, flatten=True
-                )
-                real_vectors = real_vectors.cpu().numpy()
-                
-                # imaginary state의 latent output (xs는 이미 decoder 출력이므로 원본 latent state 사용)
-                # SRN의 현재 latent state를 사용
-                if hasattr(env.model_net.sr_net, 'state') and 'sr_h' in env.model_net.sr_net.state:
-                    im_vectors = env.model_net.sr_net.state['sr_h'].cpu().numpy()
-                else:
-                    # fallback: real state와 동일하게 처리
-                    im_vectors = real_vectors
-            else:
-                real_vectors = None
-                im_vectors = None
-        
-        video_stats["real_vectors"].append(real_vectors)
-        video_stats["im_vectors"].append(im_vectors)
-    
+        status_value = 0
+        real_vectors, im_vectors, im_vp_vectors, vectors_from_real = _collect_encoder_vectors(
+            env, env_out, device
+        )
+        _append_encoder_vectors(
+            video_stats,
+            real_vectors,
+            im_vectors,
+            im_vp_vectors,
+            status_value,
+            vectors_from_real,
+        )
+
     video_stats["status"].append(0)  # 0 for real step, 1 for reset, 2 for normal
     video_stats["tree_reps"].append({k: v.cpu().numpy() for k, v in tree_reps.items()})
+    video_stats["cur_rewards"].append(_extract_cur_reward(info))
 
     # 메모리 관리를 위한 배치 크기 설정
     batch_size = 5  # 한 번에 처리할 프레임 수 제한 (더 작게 설정)
@@ -609,31 +655,16 @@ def visualize(
 
                 # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
         if save_encoder_vectors:
-            with torch.no_grad():
-                if hasattr(env, 'model_net') and hasattr(env.model_net, 'sr_net'):
-                    # real_imgs와 im_imgs를 저장하는 것과 동일한 로직
-                    # 항상 real_vectors와 im_vectors를 모두 계산
-                    # real state의 latent output
-                    real_state_input = env_out.real_states[0, 0, :].unsqueeze(0).unsqueeze(0)  # (1, 1, 12, 84, 84)
-                    real_state_norm = env.model_net.normalize(real_state_input)
-                    dummy_action = torch.zeros(1, 1, env.model_net.sr_net.dim_rep_actions, device=device)
-                    dummy_done = torch.zeros(1, 1, dtype=torch.bool, device=device)
-                    real_vectors, _ = env.model_net.sr_net.encoder(
-                        real_state_norm, dummy_done, dummy_action, {}, flatten=True
-                    )
-                    real_vectors = real_vectors.cpu().numpy()
-                    
-                    # imaginary state의 latent output (xs는 이미 decoder 출력이므로 원본 latent state 사용)
-                    # SRN의 현재 latent state를 사용
-                    if hasattr(env.model_net.sr_net, 'state') and 'sr_h' in env.model_net.sr_net.state:
-                        im_vectors = env.model_net.sr_net.state['sr_h'].cpu().numpy()
-                    else:
-                        # fallback: real state와 동일하게 처리
-                        im_vectors = real_vectors
-                else:
-                    # SRN이 없는 경우
-                    real_vectors = None
-                    im_vectors = None
+            real_vectors, im_vectors, im_vp_vectors, vectors_from_real = _collect_encoder_vectors(
+                env, env_out, device
+            )
+        else:
+            real_vectors = None
+            im_vectors = None
+            im_vp_vectors = None
+            vectors_from_real = False
+
+        cur_reward_value = _extract_cur_reward(info)
 
         # record data for generating video (전체 프레임 저장)
         if len(video_stats["real_imgs"]) < max_video_frames:
@@ -641,33 +672,49 @@ def visualize(
                 root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy() 
                 root_xs = xs
                 # real action            
-                video_stats["status"].append(0)
+                status_value = 0
             else:
                 # imagainary action
-                video_stats["status"].append(2)
+                status_value = 2
+            video_stats["status"].append(status_value)
             video_stats["real_imgs"].append(root_real_states)
             video_stats["im_imgs"].append(xs)
             
             # SRN encoder 벡터 저장
             if save_encoder_vectors:
-                video_stats["real_vectors"].append(real_vectors)
-                video_stats["im_vectors"].append(im_vectors)
+                _append_encoder_vectors(
+                    video_stats,
+                    real_vectors,
+                    im_vectors,
+                    im_vp_vectors,
+                    status_value,
+                    vectors_from_real,
+                )
             
             video_stats["tree_reps"].append(
                 {k: v.cpu().numpy() for k, v in tree_reps.items()}
             )
+            video_stats["cur_rewards"].append(cur_reward_value)
 
             if im_dict["cur_reset"][-1] in [1, 3]:
                 # reset / force reset
                 video_stats["real_imgs"].append(root_real_states)
                 video_stats["im_imgs"].append(root_xs)
+                reset_status = im_dict["cur_reset"][-1].item()
                 if save_encoder_vectors:
-                    video_stats["real_vectors"].append(real_vectors)
-                    video_stats["im_vectors"].append(im_vectors)
-                video_stats["status"].append(im_dict["cur_reset"][-1].item())
+                    _append_encoder_vectors(
+                        video_stats,
+                        real_vectors,
+                        im_vectors,
+                        im_vp_vectors,
+                        reset_status,
+                        vectors_from_real,
+                    )
+                video_stats["status"].append(reset_status)
                 video_stats["tree_reps"].append(
                     {k: v.cpu().numpy() for k, v in tree_reps.items()}
                 )
+                video_stats["cur_rewards"].append(cur_reward_value)
 
         # visualize when a real step is made
         if (saveimg or plot) and last_real_step:
@@ -784,6 +831,7 @@ def visualize(
             k: np.concatenate([v[k] for v in video_stats["tree_reps"]], axis=0)
             for k in video_stats["tree_reps"][0].keys()
         }
+        video_stats["cur_rewards"] = np.array(video_stats["cur_rewards"], dtype=np.float32)
         # gen_video(video_stats, outdir)
         np.save(os.path.join(outdir, "video_stat.npy"), video_stats)
 
