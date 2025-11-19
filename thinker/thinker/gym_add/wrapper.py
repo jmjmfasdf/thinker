@@ -8,7 +8,6 @@ from gymnasium.vector.utils import batch_space
 from gymnasium.utils.step_api_compatibility import (
     convert_to_terminated_truncated_step_api,
 )
-import gym_gvgai
 import torch
 
 def create_envpool(name, flags, env_n=1):
@@ -26,9 +25,6 @@ def create_env_fn(name, flags):
         import gym_sokoban
         fn = gym.make
         args = {"id": name, "dan_num": flags.detect_dan_num}
-    elif "gvgai" in name:
-        fn = gym.make
-        args = {"id": name}
     elif "vgdl" in name or "fmri" in name:
         from vgdl.interfaces.gym import VGDLEnv
         import os
@@ -64,10 +60,6 @@ def create_env_fn(name, flags):
     def pre_wrap(env, name, flags):
         if "Sokoban" in name:
             return TransposeWrap(env)
-        elif "gvgai" in name:
-            env = GVGAISaveLoad(env)
-            env = TransposeWrap(env)
-            return env
         elif "atari" in name:
             return atari_wrap(env, flags.grayscale, flags.frame_stack_n)
         elif "vgdl" in name or "fmri" in name:
@@ -118,50 +110,6 @@ class ResizeAndPadWrapper(gym.ObservationWrapper):
 
         return resized_obs
 
-
-class GVGAIPreprocessing(gym.ObservationWrapper):
-    def __init__(self, env, screen_size=84, grayscale=False):
-        super().__init__(env)
-        self.screen_size = screen_size
-        self.grayscale = grayscale
-        if grayscale:
-            self.observation_space = spaces.Box(
-                low=0, high=255, shape=(screen_size, screen_size, 1), dtype=np.uint8
-            )
-        else:
-            self.observation_space = spaces.Box(
-                low=0, high=255, shape=(screen_size, screen_size, 3), dtype=np.uint8
-            )
-    
-    def observation(self, obs):
-        import cv2
-        obs = cv2.resize(obs, (self.screen_size, self.screen_size), interpolation=cv2.INTER_AREA)
-        if self.grayscale:
-            obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-            obs = np.expand_dims(obs, axis=-1)  # (H, W, 1)
-        return obs
-    
-class GVGAISaveLoad(gym.Wrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        self.saved_state = None
-        self.frame_stack_n = 1  # 기본값으로 1 설정, 필요시 변경
-
-    def quick_save(self):
-        self.saved_state = {
-            'img': self.env.img.copy() if hasattr(self.env, 'img') else None,
-        }
-
-    def quick_load(self):
-        """
-        저장된 환경 상태를 복원합니다.
-        """
-        if self.saved_state is not None:
-
-            if hasattr(self.env, 'img') and self.saved_state['img'] is not None:
-                self.env.img = self.saved_state['img'].copy()
-        else:
-            raise RuntimeError("quick_load called before quick_save")
        
 def atari_wrap(env, grayscale=True, frame_stack_n=4, expose_ram=False):    
     env = AtariSaveLoad(env, expose_ram=expose_ram)
@@ -691,39 +639,3 @@ class DummyWrapper(gym.Wrapper):
     
 def dict_map(x, f):
     return {k:f(v) if v is not None else None for (k, v) in x.items()}    
-
-
-class GVGAILevelProgression(gym.Wrapper):
-    """
-    GVGAI 환경에서 레벨 진행을 관리하는 래퍼
-    - 레벨 성공 시 다음 레벨로 진행
-    - 레벨 실패 시 같은 레벨 재시도
-    - 최고 레벨 클리어 시 게임 종료
-    """
-    def __init__(self, env, game_name, max_level=4):
-        super().__init__(env)
-        self.game_name = game_name
-        self.current_level = 0
-        self.max_level = max_level
-        self.game_completed = False
-        
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        
-        if terminated and not self.game_completed:
-            # 게임 종료 시 승리/패배 확인
-            if self._check_win_condition(info):
-                # 레벨 성공 시
-                if self.current_level < self.max_level:
-                    self.current_level += 1
-                    self._change_level(self.current_level)
-                    terminated = False  # 다음 레벨로 계속 진행
-                else:
-                    # 최고 레벨 클리어 시 게임 종료
-                    self.game_completed = True
-            else:
-                # 레벨 실패 시 같은 레벨 재시도
-                self._reload_level()
-                terminated = False
-                
-        return obs, reward, terminated, truncated, info

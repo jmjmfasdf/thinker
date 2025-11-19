@@ -216,16 +216,6 @@ def create_env_fn(name, flags):
         import gym_sokoban
         fn = gym.make
         args = {"id": name}
-    elif "gvgai" in name:
-        import sys
-        import os
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        gvgai_path = os.path.join(dir_path, "gvgai_master")
-        if gvgai_path not in sys.path:
-            sys.path.insert(0, gvgai_path)
-        import gym_gvgai
-        fn = gym.make
-        args = {"id": name}
     elif "vgdl" in name or "fmri" in name:
         from gymnasium.envs.registration import register
         import os
