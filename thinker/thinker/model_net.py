@@ -736,6 +736,8 @@ class SRNet(nn.Module):
             state=new_state,
             noise_loss=noise_loss,
         )
+        # keep latest recurrent state for inspection (e.g., visualization)
+        self.state = new_state
 
     def forward_single(self, action, state, one_hot=False, future_x=None):
         """
@@ -778,6 +780,8 @@ class SRNet(nn.Module):
             state=new_state,
             noise_loss=None,
         )
+        # keep latest recurrent state for inspection (e.g., visualization)
+        self.state = new_state
         
     def compute_noise(self, h, action, future_enc = None):   
         b = h.shape[0]   
@@ -997,6 +1001,8 @@ class VPNet(nn.Module):
             pred_zs=pred_zs,
             state=new_state,
         )
+        # keep latest recurrent state for inspection (e.g., visualization)
+        self.state = new_state
 
     def forward_single(self, action, state, x=None, one_hot=False):
         """
@@ -1035,6 +1041,8 @@ class VPNet(nn.Module):
             pred_zs=util.safe_unsqueeze(pred_z, 0),
             state=new_state,
         )
+        # keep latest recurrent state for inspection (e.g., visualization)
+        self.state = new_state
     
     def compute_z0(self, env_state_norm, done, action, state):
         b, *_ = action.shape
@@ -1146,6 +1154,10 @@ class ModelNet(BaseNet):
 
         vp_net_out = self.vp_net(env_state_norm, x0, xs, done, actions, state)
         new_state.update(vp_net_out.state)
+        # expose latest recurrent states on submodules for inspection
+        if self.dual_net:
+            self.sr_net.state = sr_net_out.state
+        self.vp_net.state = vp_net_out.state
 
         if not training and self.dual_net:
             acc_done = torch.zeros(b, dtype=torch.bool, device=actions.device)
@@ -1183,6 +1195,9 @@ class ModelNet(BaseNet):
             action=action, state=state, x=x,
         )
         state_.update(vp_net_out.state)
+        if self.dual_net:
+            self.sr_net.state = sr_net_out.state
+        self.vp_net.state = vp_net_out.state
 
         if not training and self.dual_net:
             acc_done = state["acc_done"]

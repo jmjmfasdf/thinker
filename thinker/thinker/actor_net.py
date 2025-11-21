@@ -631,6 +631,7 @@ class ActorNetSingle(ActorBaseNet):
             rnn_done = torch.zeros_like(env_out.done)
 
         final_out = []
+        tree_rep_latent = None
         
         last_pri = torch.flatten(env_out.last_pri, 0, 1)
         if not self.tuple_action: last_pri = last_pri.unsqueeze(-1)
@@ -670,6 +671,7 @@ class ActorNetSingle(ActorBaseNet):
             else:
                 encoded_tree_rep = self.tree_rep_encoder(tree_rep)
             final_out.append(encoded_tree_rep)
+            tree_rep_latent = encoded_tree_rep.view(T, B, -1).detach()
         
         if self.see_h:
             hs = torch.flatten(env_out.hs, 0, 1)
@@ -712,6 +714,8 @@ class ActorNetSingle(ActorBaseNet):
             final_out = self.final_mlp(final_out)     
 
         misc = {}
+        if tree_rep_latent is not None:
+            misc["tree_rep_enc"] = tree_rep_latent
         if self.actor:
             # compute logits
             pri_logits = self.policy(final_out)    

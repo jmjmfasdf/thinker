@@ -24,7 +24,7 @@ _fields = ("real_states", "tree_reps", "xs", "hs")
 _fields += ("reward", "episode_return", "episode_step")
 _fields += ("done", "real_done", "truncated_done")
 _fields += ("max_rollout_depth", "step_status")
-_fields += ("last_pri", "last_reset", "cur_gate")
+_fields += ("last_pri", "last_reset", "cur_gate", "step_times")
 EnvOut = namedtuple("EnvOut", _fields)   
 
 def init_env_out(state, info, flags, dim_actions, tuple_action):
@@ -44,6 +44,7 @@ def init_env_out(state, info, flags, dim_actions, tuple_action):
                             dtype=torch.float, device=device),
         "done": torch.zeros(env_n, dtype=torch.bool, device=device),
         "truncated_done": torch.zeros(env_n, dtype=torch.long, device=device),
+        "step_times": None,
     }
 
     for field in EnvOut._fields:    
@@ -85,7 +86,8 @@ def create_env_out(action, state, reward, done, truncated_done, info, flags):
         "reward": aug_reward, 
         "episode_return": aug_epsoide_return,
         "done": done,
-        "truncated_done": truncated_done,           
+        "truncated_done": truncated_done,
+        "step_times": info.get("step_times", None) if info is not None else None,
     }
     if not flags.wrapper_type == 1:    
         out["last_pri"] = action[0]
