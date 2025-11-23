@@ -199,6 +199,141 @@ def _extract_cur_reward(info):
         return np.nan
     return float(value.reshape(-1)[0])
 
+def _extract_real_reward(reward):
+    if reward is None:
+        return 0.0
+    if torch.is_tensor(reward):
+        reward = reward.detach().cpu().reshape(-1)
+        return reward[0].item() if reward.numel() > 0 else 0.0
+    reward = np.asarray(reward)
+    if reward.size == 0:
+        return 0.0
+    return float(reward.reshape(-1)[0])
+
+def _extract_last_reward(reward):
+    if reward is None:
+        return None
+    if torch.is_tensor(reward):
+        rew = reward.clone()
+    else:
+        rew = torch.tensor(reward)
+    # match actor input: replace nan with 0 then clamp
+    rew[torch.isnan(rew)] = 0.0
+    rew = torch.clamp(rew, -1, +1)
+    if rew.dim() >= 3:
+        rew = rew.reshape(-1, rew.shape[-1])
+    else:
+        rew = rew.reshape(-1)
+    if rew.dim() == 1:
+        return rew.detach().cpu().numpy()
+    return rew[0].detach().cpu().numpy()
+
+def _extract_episode_return(episode_return):
+    if episode_return is None:
+        return 0.0
+    if torch.is_tensor(episode_return):
+        er = episode_return.detach().cpu()
+    else:
+        er = torch.tensor(episode_return)
+    if er.dim() >= 3:
+        val = er[0, 0, 0]
+    elif er.dim() == 2:
+        val = er[0, 0]
+    elif er.dim() == 1:
+        val = er[0]
+    else:
+        return 0.0
+    return float(val.item())
+
+def _extract_episode_return_vec(episode_return):
+    if episode_return is None:
+        return None
+    if torch.is_tensor(episode_return):
+        er = episode_return.detach().cpu()
+    else:
+        er = torch.tensor(episode_return)
+    if er.dim() == 1:
+        er = er.unsqueeze(0)
+    elif er.dim() >= 3:
+        er = er[0]
+    return er.numpy()
+def _extract_step_times(env_out):
+    step_times = getattr(env_out, "step_times", None)
+    if step_times is None:
+        return None
+    if torch.is_tensor(step_times):
+        st = step_times.detach()
+    else:
+        st = torch.tensor(step_times)
+    if st.dim() == 3:
+        st = st[0]
+    if st.dim() == 2:
+        st = st[0]
+    return st.cpu().numpy()
+
+def _extract_tree_rep_vector(actor_out):
+    if actor_out is None:
+        return None
+    misc = getattr(actor_out, "misc", None)
+    if not isinstance(misc, dict):
+        return None
+    tree_vec = misc.get("tree_rep_enc", None)
+    if tree_vec is None:
+        return None
+    if torch.is_tensor(tree_vec):
+        tensor = tree_vec.detach()
+    else:
+        tensor = torch.tensor(tree_vec)
+    if tensor.dim() < 3:
+        return None
+    vec = tensor[-1, 0]
+    return vec.cpu().numpy()
+
+def _collect_encoder_vectors(env, env_out, device):
+    real_vectors = None
+    im_vectors = None
+    im_vp_vectors = None
+    im_vectors_from_real = False
+
+    if not hasattr(env, "model_net"):
+        return real_vectors, im_vectors, im_vp_vectors, im_vectors_from_real
+
+    sr_net = getattr(env.model_net, "sr_net", None)
+    if sr_net is not None and env_out.real_states is not None:
+        with torch.no_grad():
+            real_state_input = env_out.real_states[0, 0, :].unsqueeze(0).unsqueeze(0)
+            real_state_norm = env.model_net.normalize(real_state_input)
+            dummy_action = torch.zeros(
+                1, 1, sr_net.dim_rep_actions, device=device
+            )
+            dummy_done = torch.zeros(1, 1, dtype=torch.bool, device=device)
+            real_vectors, _ = sr_net.encoder(
+                real_state_norm, dummy_done, dummy_action, {}, flatten=True
+            )
+            real_vectors = real_vectors.cpu().numpy()
+            if hasattr(sr_net, "state") and isinstance(sr_net.state, dict) and "sr_h" in sr_net.state:
+                im_vectors = sr_net.state["sr_h"]
+                if torch.is_tensor(im_vectors):
+                    im_vectors = im_vectors.detach().cpu().numpy()
+            if im_vectors is None:
+                im_vectors = real_vectors
+                im_vectors_from_real = True
+
+    vp_net = getattr(env.model_net, "vp_net", None)
+    if vp_net is not None and hasattr(vp_net, "state") and isinstance(vp_net.state, dict) and "vp_h" in vp_net.state:
+        im_vp_vectors = vp_net.state["vp_h"]
+        if torch.is_tensor(im_vp_vectors):
+            im_vp_vectors = im_vp_vectors.detach().cpu().numpy()
+
+    return real_vectors, im_vectors, im_vp_vectors, im_vectors_from_real
+
+def _append_encoder_vectors(video_stats, real_vectors, im_vectors, im_vp_vectors, status_value, shared_source):
+    if status_value == 0 and shared_source:
+        real_vectors = None
+    video_stats["real_vectors"].append(real_vectors)
+    video_stats["im_vectors"].append(im_vectors)
+    video_stats["im_vp_vectors"].append(im_vp_vectors)
+
 
 def gen_video(video_stats, file_path):
     import cv2
@@ -362,7 +497,7 @@ def visualize(
     seed=-1,
     max_frames=-1,
     use_gpu=True,  # GPU 사용 여부 추가
-    save_encoder_vectors=False,  # encoder 벡터 저장 옵션 추가
+    save_encoder_vectors=True,  # encoder 벡터 저장 옵션 추가
 ):        
     savedir = savedir.replace("__project__", __project__)
     ckpdir = os.path.join(savedir, xpid)      
@@ -395,6 +530,7 @@ def visualize(
         xpid=xpid,
         ckp=True,
         return_x=True,
+        timing=True,
         )
     
     render = "Safexp" in flags.name
@@ -450,13 +586,14 @@ def visualize(
     # GPU로 데이터 이동
     if use_gpu:
         env_out = env_out._replace(
-            xs=env_out.xs.to(device),
+            xs=env_out.xs.to(device) if env_out.xs is not None else None,
             real_states=env_out.real_states.to(device),
             tree_reps=env_out.tree_reps.to(device),
-            episode_return=env_out.episode_return.to(device),
+            episode_return=env_out.episode_return.to(device) if env_out.episode_return is not None else None,
             done=env_out.done.to(device),
             real_done=env_out.real_done.to(device),
-            step_status=env_out.step_status.to(device)
+            step_status=env_out.step_status.to(device),
+            step_times=env_out.step_times.to(device) if env_out.step_times is not None else None,
         )
     
     # some initial setting
@@ -472,14 +609,16 @@ def visualize(
         [],
         [],
     )
+    total_logged_reward = 0.0
+    prev_episode_return = _extract_episode_return(env_out.episode_return)
     im_list = ["pri_logits", "reset_logits", "pri", "cur_reset"]
     im_dict = {k: [] for k in im_list}
     im_done = False
 
     # video_stats 초기화 - 기존 이미지와 encoder 벡터 모두 저장
-    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "cur_rewards": []}
+    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": []}
     if save_encoder_vectors:
-        video_stats.update({"real_vectors": [], "im_vectors": []})
+        video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
         print("Saving both images and encoder vectors")
     
     # 메모리 효율성을 위한 최대 저장 프레임 수 제한 (전체 프레임 저장을 위해 충분히 큰 값 설정)
@@ -490,6 +629,8 @@ def visualize(
     else:
         copy_n = 3
 
+    current_step_times = _extract_step_times(env_out)
+
     if not render:
         root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy() 
         last_root_real_states = root_real_states
@@ -499,40 +640,32 @@ def visualize(
     
     video_stats["real_imgs"].append(root_real_states)
     video_stats["im_imgs"].append(root_xs)
+    video_stats["step_times"].append(current_step_times)
+    video_stats["tree_reps_vector"].append(None)
     
         # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
     if save_encoder_vectors:
-        with torch.no_grad():
-            if hasattr(env, 'model_net') and hasattr(env.model_net, 'sr_net'):
-                # real_imgs와 im_imgs를 저장하는 것과 동일한 로직
-                # 항상 real_vectors와 im_vectors를 모두 계산
-                # real state의 latent output
-                real_state_input = env_out.real_states[0, 0, :].unsqueeze(0).unsqueeze(0)  # (1, 1, 12, 84, 84)
-                real_state_norm = env.model_net.normalize(real_state_input)
-                dummy_action = torch.zeros(1, 1, env.model_net.sr_net.dim_rep_actions, device=device)
-                dummy_done = torch.zeros(1, 1, dtype=torch.bool, device=device)
-                real_vectors, _ = env.model_net.sr_net.encoder(
-                    real_state_norm, dummy_done, dummy_action, {}, flatten=True
-                )
-                real_vectors = real_vectors.cpu().numpy()
-                
-                # imaginary state의 latent output (xs는 이미 decoder 출력이므로 원본 latent state 사용)
-                # SRN의 현재 latent state를 사용
-                if hasattr(env.model_net.sr_net, 'state') and 'sr_h' in env.model_net.sr_net.state:
-                    im_vectors = env.model_net.sr_net.state['sr_h'].cpu().numpy()
-                else:
-                    # fallback: real state와 동일하게 처리
-                    im_vectors = real_vectors
-            else:
-                real_vectors = None
-                im_vectors = None
-        
-        video_stats["real_vectors"].append(real_vectors)
-        video_stats["im_vectors"].append(im_vectors)
-    
+        status_value = 0
+        real_vectors, im_vectors, im_vp_vectors, vectors_from_real = _collect_encoder_vectors(
+            env, env_out, device
+        )
+        _append_encoder_vectors(
+            video_stats,
+            real_vectors,
+            im_vectors,
+            im_vp_vectors,
+            status_value,
+            vectors_from_real,
+        )
+
     video_stats["status"].append(0)  # 0 for real step, 1 for reset, 2 for normal
     video_stats["tree_reps"].append({k: v.cpu().numpy() for k, v in tree_reps.items()})
-    video_stats["cur_rewards"].append(_extract_cur_reward(info))
+    last_reward_to_log = _extract_last_reward(env_out.reward)
+    if last_reward_to_log is None:
+        num_rewards = env_out.reward.shape[-1] if env_out.reward is not None and env_out.reward.dim() >= 3 else 1
+        last_reward_to_log = np.zeros(num_rewards, dtype=np.float32)
+    video_stats["env_return"].append(0.0)
+    video_stats["cur_rewards"].append(last_reward_to_log)
 
     # 메모리 관리를 위한 배치 크기 설정
     batch_size = 5  # 한 번에 처리할 프레임 수 제한 (더 작게 설정)
@@ -553,6 +686,7 @@ def visualize(
         
         actor_out, actor_state = actor_net(env_out, actor_state)        
         action = actor_out.action
+        tree_rep_vector = _extract_tree_rep_vector(actor_out)
 
         last_real_step = (env_out.step_status == 0) | (env_out.step_status == 3)
 
@@ -570,6 +704,7 @@ def visualize(
 
         state, reward, done, truncated_done, info = env.step(action[0], action[1])
         last_real_step = (info["step_status"] == 0) | (info["step_status"] == 3)
+        last_real_step_flag = bool(last_real_step.reshape(-1)[0].item())
         next_real_step = (info["step_status"] == 2) | (info["step_status"] == 3)
 
         if render:
@@ -586,16 +721,27 @@ def visualize(
         # GPU로 데이터 이동
         if use_gpu:
             env_out = env_out._replace(
-                xs=env_out.xs.to(device),
+                xs=env_out.xs.to(device) if env_out.xs is not None else None,
                 real_states=env_out.real_states.to(device),
                 tree_reps=env_out.tree_reps.to(device),
-                episode_return=env_out.episode_return.to(device),
+                episode_return=env_out.episode_return.to(device) if env_out.episode_return is not None else None,
                 done=env_out.done.to(device),
                 real_done=env_out.real_done.to(device),
-                step_status=env_out.step_status.to(device)
+                step_status=env_out.step_status.to(device),
+                step_times=env_out.step_times.to(device) if env_out.step_times is not None else None,
             )
 
         tree_reps = env.decode_tree_reps(env_out.tree_reps)
+        cur_episode_return = _extract_episode_return(env_out.episode_return)
+        real_reward_value = (
+            cur_episode_return - prev_episode_return if last_real_step_flag else 0.0
+        )
+        prev_episode_return = cur_episode_return
+        last_reward_to_log = _extract_last_reward(env_out.reward)
+        if last_reward_to_log is None:
+            num_rewards = env_out.reward.shape[-1] if env_out.reward is not None and env_out.reward.dim() >= 3 else 1
+            last_reward_to_log = np.zeros(num_rewards, dtype=np.float32)
+        step_times = _extract_step_times(env_out)
         if (
             len(im_dict["cur_reset"]) > 0
             and tree_reps["cur_reset"]
@@ -625,72 +771,82 @@ def visualize(
 
                 # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
         if save_encoder_vectors:
-            with torch.no_grad():
-                if hasattr(env, 'model_net') and hasattr(env.model_net, 'sr_net'):
-                    # real_imgs와 im_imgs를 저장하는 것과 동일한 로직
-                    # 항상 real_vectors와 im_vectors를 모두 계산
-                    # real state의 latent output
-                    real_state_input = env_out.real_states[0, 0, :].unsqueeze(0).unsqueeze(0)  # (1, 1, 12, 84, 84)
-                    real_state_norm = env.model_net.normalize(real_state_input)
-                    dummy_action = torch.zeros(1, 1, env.model_net.sr_net.dim_rep_actions, device=device)
-                    dummy_done = torch.zeros(1, 1, dtype=torch.bool, device=device)
-                    real_vectors, _ = env.model_net.sr_net.encoder(
-                        real_state_norm, dummy_done, dummy_action, {}, flatten=True
-                    )
-                    real_vectors = real_vectors.cpu().numpy()
-                    
-                    # imaginary state의 latent output (xs는 이미 decoder 출력이므로 원본 latent state 사용)
-                    # SRN의 현재 latent state를 사용
-                    if hasattr(env.model_net.sr_net, 'state') and 'sr_h' in env.model_net.sr_net.state:
-                        im_vectors = env.model_net.sr_net.state['sr_h'].cpu().numpy()
-                    else:
-                        # fallback: real state와 동일하게 처리
-                        im_vectors = real_vectors
-                else:
-                    # SRN이 없는 경우
-                    real_vectors = None
-                    im_vectors = None
-
-        cur_reward_value = _extract_cur_reward(info)
+            real_vectors, im_vectors, im_vp_vectors, vectors_from_real = _collect_encoder_vectors(
+                env, env_out, device
+            )
+        else:
+            real_vectors = None
+            im_vectors = None
+            im_vp_vectors = None
+            vectors_from_real = False
 
         # record data for generating video (전체 프레임 저장)
         if len(video_stats["real_imgs"]) < max_video_frames:
-            if last_real_step:
+            if last_real_step_flag:
                 root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy() 
                 root_xs = xs
                 # real action            
-                video_stats["status"].append(0)
+                status_value = 0
+                reward_to_log = real_reward_value
+                total_logged_reward += reward_to_log
             else:
                 # imagainary action
-                video_stats["status"].append(2)
+                status_value = 2
+                reward_to_log = 0.0
+            video_stats["status"].append(status_value)
             video_stats["real_imgs"].append(root_real_states)
             video_stats["im_imgs"].append(xs)
+            video_stats["step_times"].append(step_times)
+            video_stats["tree_reps_vector"].append(tree_rep_vector)
             
             # SRN encoder 벡터 저장
             if save_encoder_vectors:
-                video_stats["real_vectors"].append(real_vectors)
-                video_stats["im_vectors"].append(im_vectors)
+                _append_encoder_vectors(
+                    video_stats,
+                    real_vectors,
+                    im_vectors,
+                    im_vp_vectors,
+                    status_value,
+                    vectors_from_real,
+                )
             
             video_stats["tree_reps"].append(
                 {k: v.cpu().numpy() for k, v in tree_reps.items()}
             )
-            video_stats["cur_rewards"].append(cur_reward_value)
+            video_stats["env_return"].append(reward_to_log)
+            video_stats["cur_rewards"].append(last_reward_to_log)
+            if status_value == 0:
+                ep_ret_vec = _extract_episode_return_vec(env_out.episode_return)
+                step_return = (
+                    ep_ret_vec[0, 0] if ep_ret_vec is not None and ep_ret_vec.size > 0 else float("nan")
+                )
+                print(f"[cur_reward log] step {step} real_reward {reward_to_log:.4f} cum_logged {total_logged_reward:.4f} env_episode_return {step_return:.4f}")
 
             if im_dict["cur_reset"][-1] in [1, 3]:
                 # reset / force reset
                 video_stats["real_imgs"].append(root_real_states)
                 video_stats["im_imgs"].append(root_xs)
+                video_stats["step_times"].append(step_times)
+                video_stats["tree_reps_vector"].append(tree_rep_vector)
+                reset_status = im_dict["cur_reset"][-1].item()
                 if save_encoder_vectors:
-                    video_stats["real_vectors"].append(real_vectors)
-                    video_stats["im_vectors"].append(im_vectors)
-                video_stats["status"].append(im_dict["cur_reset"][-1].item())
+                    _append_encoder_vectors(
+                        video_stats,
+                        real_vectors,
+                        im_vectors,
+                        im_vp_vectors,
+                        reset_status,
+                        vectors_from_real,
+                    )
+                video_stats["status"].append(reset_status)
                 video_stats["tree_reps"].append(
                     {k: v.cpu().numpy() for k, v in tree_reps.items()}
                 )
-                video_stats["cur_rewards"].append(cur_reward_value)
+                video_stats["env_return"].append(0.0)
+                video_stats["cur_rewards"].append(last_reward_to_log)
 
         # visualize when a real step is made
-        if (saveimg or plot) and last_real_step:
+        if (saveimg or plot) and last_real_step_flag:
             fig, axs = plt.subplots(1, 5, figsize=(50, 10))
             for k in im_list:
                 if im_dict[k][0] is not None:
@@ -745,11 +901,15 @@ def visualize(
                 plt.show()
             plt.close()
 
+            ep_ret_vec = _extract_episode_return_vec(env_out.episode_return)
+            ep_real = ep_ret_vec[0, 0] if ep_ret_vec is not None and ep_ret_vec.size > 0 else float("nan")
+            ep_im = ep_ret_vec[0, 1] if ep_ret_vec is not None and ep_ret_vec.shape[-1] > 1 else 0
+
             log_str = "Step:%d (%d); return %.4f(%.4f) done %s real_done %s" % (
                 real_step,
                 step,
-                env_out.episode_return[0, 0, 0],
-                env_out.episode_return[0, 0, 1] if flags.im_cost > 0.0 else 0,
+                ep_real,
+                ep_im if flags.im_cost > 0.0 else 0,
                 "True" if env_out.done[0, 0] else "False",
                 "True" if env_out.real_done[0, 0] else "False",
             )
@@ -785,8 +945,13 @@ def visualize(
 
         if torch.any(env_out.real_done):
             step = 0
-            new_rets = env_out.episode_return[env_out.real_done][:, 0].cpu().numpy()
-            returns.extend(new_rets)
+            ep_ret_vec = _extract_episode_return_vec(env_out.episode_return)
+            if ep_ret_vec is not None:
+                real_done_mask = env_out.real_done.reshape(-1).cpu().numpy()
+                real_rets = ep_ret_vec[:, 0] if ep_ret_vec.ndim == 2 else ep_ret_vec
+                new_rets = real_rets[real_done_mask]
+                returns.extend(new_rets)
+            prev_episode_return = 0.0
             print(
                 "Finish %d episode: avg. return: %.2f (+-%.2f) "
                 % (
@@ -804,7 +969,35 @@ def visualize(
             k: np.concatenate([v[k] for v in video_stats["tree_reps"]], axis=0)
             for k in video_stats["tree_reps"][0].keys()
         }
-        video_stats["cur_rewards"] = np.array(video_stats["cur_rewards"], dtype=np.float32)
+        video_stats["env_return"] = np.array(video_stats["env_return"], dtype=np.float32)
+        if len(video_stats["cur_rewards"]) > 0 and video_stats["cur_rewards"][0] is not None:
+            video_stats["cur_rewards"] = np.stack(video_stats["cur_rewards"], axis=0).astype(np.float32)
+        else:
+            video_stats["cur_rewards"] = None
+        if len(video_stats["step_times"]) > 0:
+            valid_step = next((st for st in video_stats["step_times"] if st is not None), None)
+            if valid_step is not None:
+                fill = np.full_like(valid_step, np.nan, dtype=np.float32)
+                video_stats["step_times"] = np.stack(
+                    [st.astype(np.float32) if st is not None else fill for st in video_stats["step_times"]],
+                    axis=0,
+                )
+            else:
+                video_stats["step_times"] = None
+        else:
+            video_stats["step_times"] = None
+        if len(video_stats["tree_reps_vector"]) > 0:
+            valid_tree = next((tv for tv in video_stats["tree_reps_vector"] if tv is not None), None)
+            if valid_tree is not None:
+                fill_tree = np.full_like(valid_tree, np.nan, dtype=np.float32)
+                video_stats["tree_reps_vector"] = np.stack(
+                    [tv.astype(np.float32) if tv is not None else fill_tree for tv in video_stats["tree_reps_vector"]],
+                    axis=0,
+                )
+            else:
+                video_stats["tree_reps_vector"] = None
+        else:
+            video_stats["tree_reps_vector"] = None
         # gen_video(video_stats, outdir)
         np.save(os.path.join(outdir, "video_stat.npy"), video_stats)
 
