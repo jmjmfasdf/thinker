@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import thinker.util as util
 
 import cython
+import timeit
 from libcpp cimport bool
 from libcpp.vector cimport vector
 from cpython.ref cimport PyObject, Py_INCREF, Py_DECREF
@@ -317,6 +318,10 @@ cdef class cWrapper():
     cdef int[:] total_step  
     cdef int[:] step_from_done  
     cdef int internal_counter
+    cdef float[:, :] step_time_log
+    cdef int[:] step_time_idx
+    cdef object _step_time_np
+    cdef object _step_time_idx_np
     
 
     def __init__(self, env, env_n, flags, model_net, device=None, timing=False):        
@@ -423,6 +428,10 @@ cdef class cWrapper():
         self.step_status = np.zeros(self.env_n, dtype=np.intc)  
         self.step_from_done = np.zeros(self.env_n, dtype=np.intc)  
         self.internal_counter = 0
+        self._step_time_np = np.zeros((self.env_n, self.rec_t), dtype=np.float32)
+        self.step_time_log = self._step_time_np
+        self._step_time_idx_np = np.zeros(self.env_n, dtype=np.intc)
+        self.step_time_idx = self._step_time_idx_np
     
     cdef float[:, :] compute_tree_reps(self, int[:]& reset, int[:]& status):
         cdef int i, j
@@ -554,6 +563,12 @@ cdef class cWrapper():
                 "real_states_np": self.real_states_np,          
             }
         )
+        if self.time:
+            return_info["step_times"] = torch.tensor(
+                np.array(self._step_time_np, copy=True), dtype=torch.float, device=self.device
+            )
+        else:
+            return_info["step_times"] = None
         if not perfect:
             return_info["initial_per_state"] = self.initial_per_state
         if self.im_enable:
@@ -706,6 +721,7 @@ cdef class cModelWrapper(cWrapper):
         cdef vector[int] pass_idx_reset_
         cdef vector[int] pass_action
         cdef vector[int] pass_model_action
+        cdef vector[int] pass_model_idx
 
         cdef float[:] vs_1
         cdef float[:,:] logits_1
@@ -714,9 +730,12 @@ cdef class cModelWrapper(cWrapper):
         cdef float[:] vs_4
         cdef float[:,:] logits_4
 
-        cdef str md        
+        cdef str md
+        cdef double iter_start, iter_duration, block_start, block_time        
 
         if self.time: self.timings.reset()
+        if self.time:
+            self._step_time_np.fill(0.)
 
         assert type(action) is tuple and len(action) == 2, \
             "action should be a tuple of size 2, containing augmented action and reset"        
@@ -748,7 +767,13 @@ cdef class cModelWrapper(cWrapper):
         pass_raw_action, pass_model_raw_action = [], []
         for i in range(self.env_n):            
             # compute the mask of real / imagination step                             
-            self.max_rollout_depth_[i] = self.max_rollout_depth[i]            
+            self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+            if self.time:
+                iter_start = timeit.default_timer()
+                if self.cur_t[i] < self.rec_t:
+                    self.step_time_idx[i] = self.cur_t[i]
+                else:
+                    self.step_time_idx[i] = self.rec_t - 1            
             if self.cur_t[i] < self.rec_t - 1: # imagaination step
                 self.cur_t[i] += 1
                 self.rollout_depth[i] += 1
@@ -770,6 +795,7 @@ cdef class cModelWrapper(cWrapper):
                     encoded = <dict> self.cur_nodes[i][0].encoded
                     pass_model_states.append(tuple(encoded["model_states"]))
                     pass_model_action.push_back(im_action[i])
+                    pass_model_idx.push_back(i)
                     self.status[i] = 4  
             else: # real step
                 self.cur_t[i] = 0
@@ -783,7 +809,10 @@ cdef class cModelWrapper(cWrapper):
                 pass_idx_restore.push_back(i)
                 pass_action.push_back(re_action[i])                                  
                 pass_idx_step.push_back(i)
-                self.status[i] = 1        
+                self.status[i] = 1
+            if self.time:
+                iter_duration = timeit.default_timer() - iter_start
+                self.step_time_log[i, self.step_time_idx[i]] += iter_duration        
         if self.time: self.timings.time("misc_1")
         # one step of env
         if pass_idx_step.size() > 0:
@@ -810,6 +839,8 @@ cdef class cModelWrapper(cWrapper):
 
         # use model for status 1 transition (real transition)
         if pass_idx_step.size() > 0:
+            if self.time:
+                block_start = timeit.default_timer()
             with torch.no_grad():
                 obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
                 pass_action_py = torch.tensor(pass_action, dtype=torch.long, device=self.device).unsqueeze(0).unsqueeze(-1)
@@ -829,10 +860,18 @@ cdef class cModelWrapper(cWrapper):
             logits_1_ = model_net_out_1.policy[-1].float()
             logits_1_ = logits_1_.squeeze(-2)
             logits_1 = logits_1_.cpu().numpy()
+            if self.time:
+                block_time = timeit.default_timer() - block_start
+                share = block_time / pass_idx_step.size()
+                for k in range(pass_idx_step.size()):
+                    idx = pass_idx_step[k]
+                    self.step_time_log[idx, self.rec_t - 1] += share
 
         if self.time: self.timings.time("misc_2")
         # use model for status 4 transition (imagination transition)
         if pass_model_action.size() > 0:
+            if self.time:
+                block_start = timeit.default_timer()
             with torch.no_grad():
                 pass_model_states = dict({md: torch.stack([ms[i] for ms in pass_model_states], dim=0)
                         for i, md in enumerate(self.model_states_keys)})
@@ -848,6 +887,13 @@ cdef class cModelWrapper(cWrapper):
             logits_4 = logits_4_.cpu().numpy()
             if self.pred_done:
                 done_4 = model_net_out_4.dones[-1].bool().cpu().numpy()
+            if self.time and pass_model_idx.size() > 0:
+                block_time = timeit.default_timer() - block_start
+                share = block_time / pass_model_idx.size()
+                for k in range(pass_model_idx.size()):
+                    idx = pass_model_idx[k]
+                    self.step_time_log[idx, self.step_time_idx[idx]] += share
+            pass_model_idx.clear()
 
         if self.time: self.timings.time("model_unroll_4")
 
@@ -1081,7 +1127,11 @@ cdef class cPerfectWrapper(cWrapper):
         cdef float[:] vs
         cdef float[:,:] logits
 
-        if self.time: self.timings.reset()        
+        cdef double iter_start, iter_duration, block_start, block_time
+
+        if self.time: self.timings.reset()
+        if self.time:
+            self._step_time_np.fill(0.)        
 
         assert type(action) is tuple and len(action) == 2, \
             "action should be a tuple of size 2, containing augmented action and reset"        
@@ -1112,6 +1162,12 @@ cdef class cPerfectWrapper(cWrapper):
         for i in range(self.env_n):            
             # compute the mask of real / imagination step                             
             self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+            if self.time:
+                iter_start = timeit.default_timer()
+                if self.cur_t[i] < self.rec_t:
+                    self.step_time_idx[i] = self.cur_t[i]
+                else:
+                    self.step_time_idx[i] = self.rec_t - 1
             if self.cur_t[i] < self.rec_t - 1: # imagaination step
                 self.cur_t[i] += 1
                 self.rollout_depth[i] += 1
@@ -1148,7 +1204,10 @@ cdef class cPerfectWrapper(cWrapper):
                 pass_idx_restore.push_back(i)
                 pass_action.push_back(re_action[i])
                 pass_idx_step.push_back(i)
-                self.status[i] = 1                            
+                self.status[i] = 1
+            if self.time:
+                iter_duration = timeit.default_timer() - iter_start
+                self.step_time_log[i, self.step_time_idx[i]] += iter_duration                            
         if self.time: self.timings.time("misc_1")
 
         # restore env      
@@ -1157,9 +1216,17 @@ cdef class cPerfectWrapper(cWrapper):
 
         # one step of env
         if pass_idx_step.size() > 0:
+            if self.time:
+                block_start = timeit.default_timer()
             obs, reward, done, truncated_done, info = self.env.step(np.array(pass_action), env_id=pass_idx_step) 
         else:
             info = None
+        if self.time and pass_idx_step.size() > 0:
+            block_time = timeit.default_timer() - block_start
+            share = block_time / pass_idx_step.size()
+            for k in range(pass_idx_step.size()):
+                idx = pass_idx_step[k]
+                self.step_time_log[idx, self.step_time_idx[idx]] += share
         if self.time: self.timings.time("step_state")
 
         # env reset needed?
@@ -1181,6 +1248,8 @@ cdef class cPerfectWrapper(cWrapper):
 
         # use model
         if pass_idx_step.size() > 0:
+            if self.time:
+                block_start = timeit.default_timer()
             with torch.no_grad():
                 obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
                 pass_action_py = torch.tensor(pass_action, dtype=long, device=self.device).unsqueeze(-1).unsqueeze(0)
@@ -1193,6 +1262,12 @@ cdef class cPerfectWrapper(cWrapper):
             logits_ = model_net_out.policy[-1].float()
             logits_ = logits_.squeeze(-2)
             logits = logits_.cpu().numpy()
+            if self.time:
+                block_time = timeit.default_timer() - block_start
+                share = block_time / pass_idx_step.size()
+                for k in range(pass_idx_step.size()):
+                    idx = pass_idx_step[k]
+                    self.step_time_log[idx, self.step_time_idx[idx]] += share
             if self.time: self.timings.time("model")
             self.env.quick_save(env_id=pass_idx_step)   
             if self.time: self.timings.time("quick_save")        

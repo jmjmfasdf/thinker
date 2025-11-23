@@ -98,7 +98,7 @@ preload: '' # path for the folder that consists ckp_model.tar, which is used to 
 savedir: 'logs' # base log directory
 checkpoint_interval: 50000 # frequency in real steps to save checkpoints (set to 0 to disable)
 # misc
-profile: false # whether to output all the time statistics of the run
+profile: true # whether to output all the time statistics of the run
 parallel: false # whether to use a parallel ray actor for training the model
 float16: false # whether to use mixed precision
 base_seed: 1 # base seed for the gym environment

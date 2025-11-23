@@ -94,7 +94,7 @@ wandb_ckp_freq: 0 # frequency in real steps to upload all files in the run
 policy_vis_freq: -1 # frequency in real steps to visualize the run
 policy_vis_length: 20 # length of the video visualization
 # misc
-profile: false # whether to output all the time statistics of the run
+profile: true # whether to output all the time statistics of the run
 parallel_actor: true # whether to use a parallel ray actor for training the actor
 float16: true # whether to use mixed precision
 # icopro supervised integration
