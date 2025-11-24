@@ -111,6 +111,7 @@ icopro_actor_lr: 0.0001
 icopro_model_lr: 0.0001
 icopro_supervised_freq: 1
 icopro_device: cpu
+batch_length: 1 # number of sequential stacked observations to fetch per imitation batch (non-overlapping stacks)
 
 # ray resources
 auto_res: True # whether to auto allocate gpu

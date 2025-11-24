@@ -604,11 +604,13 @@ class ThinkerPolicyAdapter:
         with torch.no_grad():
             actor_out, actor_core_state = self.actor_net(env_out_root, core_state=actor_core_state)
         root_actor_action = self._extract_action(actor_out).long()
-    
+
         last_action = prev_actions.clone()
         if sequence_starts.any():
-            last_action = torch.where(sequence_starts, root_actor_action, last_action)
-    
+            # In imitation/sequential mode, keep provided previous (human) action on the first real step.
+            if prev_actions is None or prev_actions.numel() == 0:
+                last_action = torch.where(sequence_starts, root_actor_action, last_action)
+
         rollout_steps = max(0, int(getattr(self.flags, "rec_t", 1)) - 1)
         current_t = 0
 

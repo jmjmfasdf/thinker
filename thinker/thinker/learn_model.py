@@ -349,6 +349,7 @@ class SModelLearner:
         self.bc_actor_kl_coef = float(getattr(self.flags, "icopro_actor_kl_coef", 0.0))
         self.bc_actor_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
         self.bc_actor_tree_coef = float(getattr(self.flags, "icopro_tree_coef", 0.0))
+        self.bc_actor_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
 
         if self.bc_loader is None:
             return
@@ -521,6 +522,29 @@ class SModelLearner:
     def _sample_actor_bc_batch(self):
         if self.bc_loader is None:
             return None
+        if self.bc_actor_seq_len > 1 and hasattr(self.bc_loader, "get_sequence_batch"):
+            seq_batch = self.bc_loader.get_sequence_batch(
+                batch_size=self.bc_actor_batch_size,
+                sequence_length=self.bc_actor_seq_len,
+            )
+            if seq_batch is not None and "obs_seq" in seq_batch:
+                device = self.icopro_device
+                obs_seq = torch.from_numpy(seq_batch["obs_seq"]).float().to(device)
+                actions_seq = torch.from_numpy(
+                    np.asarray(seq_batch["actions_seq"], dtype=np.int64)
+                ).long().to(device)
+                rewards_seq = torch.from_numpy(
+                    np.asarray(seq_batch.get("rewards_seq", np.zeros_like(seq_batch["actions_seq"], dtype=np.float32)), dtype=np.float32)
+                ).to(device)
+                sequence_starts = torch.from_numpy(
+                    np.asarray(seq_batch.get("sequence_starts", np.ones(actions_seq.shape[0], dtype=np.bool_)), dtype=np.bool_)
+                ).to(device)
+                return {
+                    "obs_seq": obs_seq,
+                    "actions_seq": actions_seq,
+                    "rewards_seq": rewards_seq,
+                    "sequence_starts": sequence_starts,
+                }
         batch = self.bc_loader.get_paired_batch(batch_size=self.bc_actor_batch_size)
         if batch is None:
             return None
@@ -583,12 +607,121 @@ class SModelLearner:
             out["done_loss"] = metrics["done_loss"].detach().cpu().item()
         return out
 
+    def _compute_actor_bc_seq_loss(self, batch):
+        """Sequential imitation loss over length-L non-overlapping stacks."""
+        obs_seq = batch["obs_seq"]
+        actions_seq = batch["actions_seq"]
+        rewards_seq = batch.get("rewards_seq")
+        sequence_starts = batch.get(
+            "sequence_starts",
+            torch.ones(actions_seq.shape[0], dtype=torch.bool, device=self.icopro_device),
+        )
+        batch_size, seq_len = actions_seq.shape
+        device = self.icopro_device
+
+        prev_actions = torch.zeros(batch_size, dtype=torch.long, device=device)
+        seq_start_flags = sequence_starts.view(batch_size)
+
+        margin_losses = []
+        ce_losses = []
+        pvp_losses = []
+        kl_losses = []
+        pred_actions_all = []
+        human_actions_all = []
+
+        for t in range(seq_len):
+            policy = self.bc_actor_policy_adapter.forward(
+                obs_seq[:, t],
+                actions=None,
+                requires_grad=True,
+                real_rewards=rewards_seq[:, t] if rewards_seq is not None else None,
+                prev_actions=prev_actions,
+                sequence_starts=seq_start_flags,
+            )
+            logits = policy.logits
+            log_probs = policy.log_probs
+            tree_q = self.bc_actor_policy_adapter.last_tree_q
+            if tree_q is not None and self.bc_actor_tree_coef != 0.0:
+                q_values = logits + self.bc_actor_tree_coef * tree_q
+            else:
+                q_values = logits
+            human_actions = actions_seq[:, t]
+            if t == 0:
+                prev_actions = human_actions
+                seq_start_flags = torch.zeros_like(seq_start_flags, dtype=torch.bool)
+                continue
+
+            margin_tensor = torch.full(
+                (human_actions.shape[0],),
+                self.bc_actor_margin,
+                dtype=torch.float32,
+                device=device,
+            )
+            margin_losses.append(dqfd_margin_loss(q_values, human_actions, margin_tensor))
+
+            if self.bc_actor_ce_coef > 0.0:
+                ce_losses.append(F.cross_entropy(logits, human_actions))
+            if self.bc_actor_kl_coef > 0.0:
+                target_probs = F.one_hot(
+                    human_actions, num_classes=q_values.shape[-1]
+                ).float()
+                kl_losses.append(F.kl_div(log_probs, target_probs, reduction="batchmean"))
+            if self.bc_actor_pvp_coef > 0.0:
+                agent_actions = torch.argmax(logits.detach(), dim=-1)
+                q_human = q_values.gather(1, human_actions.unsqueeze(1)).squeeze(1)
+                q_agent = q_values.gather(1, agent_actions.unsqueeze(1)).squeeze(1)
+                pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
+                diff = (agent_actions != human_actions).float()
+                if diff.sum() > 0:
+                    pvp_neg = F.mse_loss(diff * q_agent, diff * (-torch.ones_like(q_agent)))
+                else:
+                    pvp_neg = torch.zeros_like(pvp_pos)
+                pvp_losses.append(pvp_pos + pvp_neg)
+                pred_actions_all.append(agent_actions)
+            else:
+                pred_actions_all.append(torch.argmax(logits.detach(), dim=-1))
+            human_actions_all.append(human_actions)
+
+            prev_actions = human_actions
+            seq_start_flags = torch.zeros_like(seq_start_flags, dtype=torch.bool)
+
+        margin_loss = (
+            torch.stack(margin_losses).mean() if margin_losses else torch.zeros((), device=device)
+        )
+        ce_loss = torch.stack(ce_losses).mean() if ce_losses else torch.zeros((), device=device)
+        pvp_loss = torch.stack(pvp_losses).mean() if pvp_losses else torch.zeros((), device=device)
+        kl_loss = torch.stack(kl_losses).mean() if kl_losses else torch.zeros((), device=device)
+        total_loss = (
+            self.bc_actor_margin_coef * margin_loss
+            + self.bc_actor_ce_coef * ce_loss
+            + self.bc_actor_pvp_coef * pvp_loss
+            + self.bc_actor_kl_coef * kl_loss
+        )
+
+        if pred_actions_all and human_actions_all:
+            pred_cat = torch.cat(pred_actions_all, dim=0)
+            human_cat = torch.cat(human_actions_all, dim=0)
+            accuracy = float((pred_cat == human_cat).float().mean().item())
+        else:
+            accuracy = 0.0
+
+        return {
+            "total_loss": total_loss,
+            "margin_loss": margin_loss,
+            "ce_loss": ce_loss,
+            "pvp_loss": pvp_loss,
+            "kl_loss": kl_loss,
+            "accuracy": accuracy,
+        }
+
     def _compute_actor_bc_loss(self):
         if not self.bc_actor_enabled or self.bc_loader is None:
             return None
         batch = self._sample_actor_bc_batch()
         if batch is None:
             return None
+        if "obs_seq" in batch:
+            return self._compute_actor_bc_seq_loss(batch)
         obs = batch["obs"]
         rewards = batch["rewards"]
         dones = batch["dones"]

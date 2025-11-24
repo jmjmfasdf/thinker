@@ -124,6 +124,39 @@ class FrameStackedBehavioralDataLoader:
             image = np.transpose(image, (2, 0, 1))
         
         return image
+
+    def _action_index(self, action_entry) -> int:
+        """Extract discrete action index from raw action entry (supports one-hot)."""
+        if hasattr(action_entry, "shape") and len(action_entry.shape) > 0 and action_entry.shape[-1] == self.num_actions:
+            return int(np.argmax(action_entry))
+        return int(action_entry)
+
+    def _create_forward_stack(self, images: np.ndarray, start_idx: int) -> np.ndarray:
+        """Create a non-overlapping frame stack starting at start_idx (frames start_idx ... start_idx+frame_stack_n-1)."""
+        frames = []
+        for offset in range(self.frame_stack_n):
+            frame_idx = start_idx + offset
+            if frame_idx >= len(images):
+                # Should not happen when caller validates indices
+                break
+            frames.append(self._preprocess_image(images[frame_idx]))
+        return np.concatenate(frames, axis=0)
+
+    def _enumerate_episode_spans(self, is_first: np.ndarray, is_terminal: np.ndarray) -> List[Tuple[int, int]]:
+        """Return (start, end) indices (inclusive) for each episode."""
+        spans: List[Tuple[int, int]] = []
+        start_idx = 0
+        T = len(is_first)
+        for idx in range(T):
+            if idx > start_idx and is_first[idx]:
+                spans.append((start_idx, idx - 1))
+                start_idx = idx
+            if is_terminal[idx]:
+                spans.append((start_idx, idx))
+                start_idx = idx + 1
+        if start_idx < T:
+            spans.append((start_idx, T - 1))
+        return spans
     
     def _create_frame_stack(self, images: np.ndarray, start_idx: int) -> np.ndarray:
         """Create a frame stack starting from start_idx"""
@@ -150,97 +183,64 @@ class FrameStackedBehavioralDataLoader:
         stacked = np.concatenate(stacked_frames, axis=0)
         return stacked
     
-    def get_sequence_batch(self, batch_size: int = 1, sequence_length: int = 40) -> Optional[Dict[str, np.ndarray]]:
+    def get_sequence_batch(self, batch_size: int = 1, sequence_length: int = 2) -> Optional[Dict[str, np.ndarray]]:
         """
-        Get a batch of sequences for BC training
-        
+        Get a batch of non-overlapping frame-stack sequences for imitation learning.
+        Each observation stack uses consecutive frames with stride=frame_stack_n
+        and the human action is taken from the first frame of each stack.
+
         Args:
-            batch_size: Number of sequences to return (default: 1)
-            sequence_length: Length of each sequence (default: 40 for rec_t)
-            
+            batch_size: number of sequences to return
+            sequence_length: number of stacked observations (L); requires frame_stack_n * L frames
+
         Returns:
-            Dictionary with keys: 'images', 'actions', 'rewards', 'is_first', 'is_terminal'
-            Images shape: (B, T, C*stack_n, H, W) = (1, 40, 4, 84, 84)
-            Actions shape: (B, T, 6)
-            Rewards shape: (B, T)
-            is_first shape: (B, T)
-            is_terminal shape: (B, T)
+            Dict with keys:
+            - 'obs_seq': (B, L, C*stack_n, H, W) stacked observations (float/normalized)
+            - 'actions_seq': (B, L) discrete human actions (first frame of each stack)
+            - 'rewards_seq': (B, L) summed rewards per stack
+            - 'sequence_starts': (B,) bool flags (all True; each sample is a fresh sequence)
         """
         if len(self.data_files) == 0:
             return None
-        
-        # Load current file if needed
-        if not hasattr(self, 'current_data') or self.current_data is None:
-            self._load_current_file()
-        
-        if self.current_data is None:
+
+        num_files = len(self.data_files)
+        if batch_size <= num_files:
+            file_indices = random.sample(range(num_files), batch_size)
+            samples_per_file = [1] * batch_size
+        else:
+            base = batch_size // num_files
+            extra = batch_size % num_files
+            samples_per_file = [base] * num_files
+            for idx in random.sample(range(num_files), extra):
+                samples_per_file[idx] += 1
+            file_indices = list(range(num_files))
+
+        sequences = []
+        for file_idx, num_samples in zip(file_indices, samples_per_file):
+            seqs = self._sample_nonoverlap_sequences_from_file(
+                file_idx=file_idx,
+                num_samples=num_samples,
+                sequence_length=sequence_length,
+            )
+            if seqs:
+                sequences.extend(seqs)
+
+        if len(sequences) == 0:
             return None
-        
-        images = self.current_data['image']
-        actions = self.current_data['action']
-        rewards = self.current_data['reward']
-        is_first = self.current_data['is_first']
-        is_terminal = self.current_data['is_terminal']
-        
-        T = images.shape[0]
-        
-        # Find valid sequence start positions
-        valid_starts = []
-        for i in range(self.frame_stack_n - 1, T - sequence_length + 1):
-            # Check if sequence doesn't cross episode boundaries
-            if not np.any(is_first[i:i+sequence_length]) and not np.any(is_terminal[i:i+sequence_length]):
-                valid_starts.append(i)
-        
-        if len(valid_starts) < batch_size:
-            return None
-        
-        # Sample batch_size sequences
-        selected_starts = np.random.choice(valid_starts, size=batch_size, replace=False)
-        
-        # Create batch
-        batch_images = []
-        batch_actions = []
-        batch_rewards = []
-        batch_is_first = []
-        batch_is_terminal = []
-        
-        for start_idx in selected_starts:
-            sequence_images = []
-            sequence_actions = []
-            sequence_rewards = []
-            sequence_is_first = []
-            sequence_is_terminal = []
-            
-            for t in range(sequence_length):
-                # Create frame stack for this timestep
-                stacked_image = self._create_frame_stack(images, start_idx + t)
-                sequence_images.append(stacked_image)
-                
-                # Get corresponding data
-                sequence_actions.append(actions[start_idx + t])
-                sequence_rewards.append(rewards[start_idx + t])
-                sequence_is_first.append(is_first[start_idx + t])
-                sequence_is_terminal.append(is_terminal[start_idx + t])
-            
-            batch_images.append(np.stack(sequence_images, axis=0))
-            batch_actions.append(np.stack(sequence_actions, axis=0))
-            batch_rewards.append(np.stack(sequence_rewards, axis=0))
-            batch_is_first.append(np.stack(sequence_is_first, axis=0))
-            batch_is_terminal.append(np.stack(sequence_is_terminal, axis=0))
-        
-        # Stack sequences
-        batch_images = np.stack(batch_images, axis=0)
-        batch_actions = np.stack(batch_actions, axis=0)
-        batch_rewards = np.stack(batch_rewards, axis=0)
-        batch_is_first = np.stack(batch_is_first, axis=0)
-        batch_is_terminal = np.stack(batch_is_terminal, axis=0)
-        
+
+        if len(sequences) > batch_size:
+            sequences = sequences[:batch_size]
+
+        obs_seq = np.stack([s["obs_seq"] for s in sequences], axis=0)
+        actions_seq = np.stack([s["actions_seq"] for s in sequences], axis=0)
+        rewards_seq = np.stack([s["rewards_seq"] for s in sequences], axis=0)
+        sequence_starts = np.ones((len(sequences),), dtype=np.bool_)
+
         return {
-            'images': batch_images,      # (B, T, C*stack_n, H, W) = (1, 40, 4, 84, 84)
-            'actions': batch_actions,    # (B, T, 6)
-            'rewards': batch_rewards,    # (B, T)
-            'is_first': batch_is_first,  # (B, T)
-            'is_terminal': batch_is_terminal  # (B, T)
+            "obs_seq": obs_seq,
+            "actions_seq": actions_seq,
+            "rewards_seq": rewards_seq,
+            "sequence_starts": sequence_starts,
         }
     
     def _load_current_file(self):
@@ -257,6 +257,62 @@ class FrameStackedBehavioralDataLoader:
         except Exception as e:
             print(f"Error loading file {file_path}: {e}")
             self.current_data = None
+
+    def _sample_nonoverlap_sequences_from_file(
+        self, file_idx: int, num_samples: int, sequence_length: int
+    ) -> Optional[List[Dict[str, np.ndarray]]]:
+        """Sample non-overlapping stacked sequences from a single file."""
+        if file_idx >= len(self.data_files):
+            return None
+        try:
+            data = np.load(self.data_files[file_idx])
+            images = data["image"]
+            actions = data["action"]
+            rewards = data.get("reward", np.zeros(len(images), dtype=np.float32))
+            is_first = data["is_first"]
+            is_terminal = data["is_terminal"]
+        except Exception as e:
+            print(f"[WARNING] Failed to load file {self.data_files[file_idx]}: {e}")
+            return None
+
+        frames_per_seq = self.frame_stack_n * sequence_length
+        candidates: List[int] = []
+        for start, end in self._enumerate_episode_spans(is_first, is_terminal):
+            max_start = end - frames_per_seq + 1
+            if max_start < start:
+                continue
+            # Align stacks so each uses fresh frames (stride = frame_stack_n)
+            s = start
+            while s <= max_start:
+                window_end = s + frames_per_seq
+                if window_end <= len(images) and not np.any(is_terminal[s:window_end]):
+                    candidates.append(s)
+                s += self.frame_stack_n
+
+        if not candidates:
+            return None
+
+        sampled = random.sample(candidates, min(num_samples, len(candidates)))
+        sequences: List[Dict[str, np.ndarray]] = []
+        for start_idx in sampled:
+            obs_seq = []
+            actions_seq = []
+            rewards_seq = []
+            for t in range(sequence_length):
+                stack_start = start_idx + t * self.frame_stack_n
+                obs_seq.append(self._create_forward_stack(images, stack_start))
+                actions_seq.append(self._action_index(actions[stack_start]))
+                rewards_seq.append(
+                    float(np.sum(rewards[stack_start : stack_start + self.frame_stack_n]))
+                )
+            sequences.append(
+                {
+                    "obs_seq": np.stack(obs_seq, axis=0),
+                    "actions_seq": np.array(actions_seq, dtype=np.int64),
+                    "rewards_seq": np.array(rewards_seq, dtype=np.float32),
+                }
+            )
+        return sequences
     
     def next_file(self):
         """Move to next data file"""
