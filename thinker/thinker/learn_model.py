@@ -1,4 +1,5 @@
 import os
+import collections
 import numpy as np
 import time
 import timeit
@@ -350,6 +351,7 @@ class SModelLearner:
         self.bc_actor_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
         self.bc_actor_tree_coef = float(getattr(self.flags, "icopro_tree_coef", 0.0))
         self.bc_actor_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
+        self.bc_noop_window = collections.deque(maxlen=150)
 
         if self.bc_loader is None:
             return
@@ -525,7 +527,7 @@ class SModelLearner:
         if self.bc_actor_seq_len > 1 and hasattr(self.bc_loader, "get_sequence_batch"):
             seq_batch = self.bc_loader.get_sequence_batch(
                 batch_size=self.bc_actor_batch_size,
-                sequence_length=self.bc_actor_seq_len,
+                sequence_length=self.bc_actor_seq_len + 1,  # extra step for prev_action
             )
             if seq_batch is not None and "obs_seq" in seq_batch:
                 device = self.icopro_device
@@ -608,26 +610,33 @@ class SModelLearner:
         return out
 
     def _compute_actor_bc_seq_loss(self, batch):
-        """Sequential imitation loss over length-L non-overlapping stacks."""
-        obs_seq = batch["obs_seq"]
-        actions_seq = batch["actions_seq"]
-        rewards_seq = batch.get("rewards_seq")
+        """Sequential imitation loss over length-L non-overlapping stacks.
+
+        Uses human action at t-1 as prev_action, then predicts actions for obs t..t+L-1.
+        """
+        obs_seq_full = batch["obs_seq"]
+        actions_seq_full = batch["actions_seq"]
+        rewards_seq_full = batch.get("rewards_seq")
         sequence_starts = batch.get(
             "sequence_starts",
-            torch.ones(actions_seq.shape[0], dtype=torch.bool, device=self.icopro_device),
+            torch.ones(actions_seq_full.shape[0], dtype=torch.bool, device=self.icopro_device),
         )
-        batch_size, seq_len = actions_seq.shape
+        # shift: first action only used as prev, predict on the remaining L steps
+        prev_actions = actions_seq_full[:, 0]
+        obs_seq = obs_seq_full[:, 1:]
+        human_actions_seq = actions_seq_full[:, 1:]
+        rewards_seq = rewards_seq_full[:, 1:] if rewards_seq_full is not None else None
+        batch_size, seq_len = human_actions_seq.shape
         device = self.icopro_device
 
-        prev_actions = torch.zeros(batch_size, dtype=torch.long, device=device)
         seq_start_flags = sequence_starts.view(batch_size)
 
         margin_losses = []
         ce_losses = []
         pvp_losses = []
         kl_losses = []
-        pred_actions_all = []
-        human_actions_all = []
+        pred_actions_all_steps = []
+        human_actions_all_steps = []
 
         for t in range(seq_len):
             policy = self.bc_actor_policy_adapter.forward(
@@ -645,11 +654,10 @@ class SModelLearner:
                 q_values = logits + self.bc_actor_tree_coef * tree_q
             else:
                 q_values = logits
-            human_actions = actions_seq[:, t]
-            if t == 0:
-                prev_actions = human_actions
-                seq_start_flags = torch.zeros_like(seq_start_flags, dtype=torch.bool)
-                continue
+            human_actions = human_actions_seq[:, t]
+            predicted_actions = torch.argmax(logits.detach(), dim=-1)
+            pred_actions_all_steps.append(predicted_actions)
+            human_actions_all_steps.append(human_actions)
 
             margin_tensor = torch.full(
                 (human_actions.shape[0],),
@@ -667,22 +675,17 @@ class SModelLearner:
                 ).float()
                 kl_losses.append(F.kl_div(log_probs, target_probs, reduction="batchmean"))
             if self.bc_actor_pvp_coef > 0.0:
-                agent_actions = torch.argmax(logits.detach(), dim=-1)
                 q_human = q_values.gather(1, human_actions.unsqueeze(1)).squeeze(1)
-                q_agent = q_values.gather(1, agent_actions.unsqueeze(1)).squeeze(1)
+                q_agent = q_values.gather(1, predicted_actions.unsqueeze(1)).squeeze(1)
                 pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
-                diff = (agent_actions != human_actions).float()
+                diff = (predicted_actions != human_actions).float()
                 if diff.sum() > 0:
                     pvp_neg = F.mse_loss(diff * q_agent, diff * (-torch.ones_like(q_agent)))
                 else:
                     pvp_neg = torch.zeros_like(pvp_pos)
                 pvp_losses.append(pvp_pos + pvp_neg)
-                pred_actions_all.append(agent_actions)
-            else:
-                pred_actions_all.append(torch.argmax(logits.detach(), dim=-1))
-            human_actions_all.append(human_actions)
 
-            prev_actions = human_actions
+            prev_actions = predicted_actions
             seq_start_flags = torch.zeros_like(seq_start_flags, dtype=torch.bool)
 
         margin_loss = (
@@ -698,12 +701,17 @@ class SModelLearner:
             + self.bc_actor_kl_coef * kl_loss
         )
 
-        if pred_actions_all and human_actions_all:
-            pred_cat = torch.cat(pred_actions_all, dim=0)
-            human_cat = torch.cat(human_actions_all, dim=0)
+        if pred_actions_all_steps and human_actions_all_steps:
+            pred_cat = torch.cat(pred_actions_all_steps, dim=0)
+            human_cat = torch.cat(human_actions_all_steps, dim=0)
             accuracy = float((pred_cat == human_cat).float().mean().item())
+            self.bc_noop_window.extend(pred_cat.tolist())
         else:
             accuracy = 0.0
+
+        noop_freq = 0.0
+        if len(self.bc_noop_window) > 0:
+            noop_freq = sum(1 for a in self.bc_noop_window if a == 0) / len(self.bc_noop_window)
 
         return {
             "total_loss": total_loss,
@@ -712,6 +720,7 @@ class SModelLearner:
             "pvp_loss": pvp_loss,
             "kl_loss": kl_loss,
             "accuracy": accuracy,
+            "noop_freq": noop_freq,
         }
 
     def _compute_actor_bc_loss(self):
@@ -817,6 +826,10 @@ class SModelLearner:
                 )
             except Exception as exc:
                 self._logger.warning(f"Failed to push actor weights after IcoPro update: {exc}")
+        if "noop_freq" in metrics:
+            self._logger.info(
+                f"IcoPro actor BC seq accuracy={metrics.get('accuracy', 0.0):.3f} noop_freq_150={metrics.get('noop_freq', 0.0):.3f}"
+            )
         return {
             "total_loss": total_loss.detach().cpu().item(),
             "margin_loss": metrics["margin_loss"].detach().cpu().item(),
@@ -824,6 +837,7 @@ class SModelLearner:
             "pvp_loss": metrics["pvp_loss"].detach().cpu().item(),
             "kl_loss": metrics["kl_loss"].detach().cpu().item(),
             "accuracy": metrics["accuracy"],
+            "noop_freq": metrics.get("noop_freq", 0.0),
         }
 
     def consume_data(self, data, model_buffer=None):
@@ -963,6 +977,8 @@ class SModelLearner:
                 stats["icopro/actor/pvp_loss"] = self.latest_icopro_actor_stats["pvp_loss"]
                 stats["icopro/actor/kl_loss"] = self.latest_icopro_actor_stats["kl_loss"]
                 stats["icopro/actor/accuracy"] = self.latest_icopro_actor_stats["accuracy"]
+                if "noop_freq" in self.latest_icopro_actor_stats:
+                    stats["icopro/actor/noop_freq_150"] = self.latest_icopro_actor_stats["noop_freq"]
             self.plogger.log(stats)
             self.latest_icopro_model_stats = None
             self.latest_icopro_actor_stats = None

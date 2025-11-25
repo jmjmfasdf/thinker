@@ -646,8 +646,17 @@ cdef class cModelWrapper(cWrapper):
         cdef Node* root_node
         cdef Node* cur_node
         cdef float[:,:] model_out       
+        cdef size_t _old_root_n
 
         with torch.no_grad():
+            # Free any previously allocated trees to avoid leaking GPU memory
+            _old_root_n = self.root_nodes.size()
+            if _old_root_n > 0:
+                for i in range(_old_root_n):
+                    node_del(self.root_nodes[i], except_idx=-1)
+                self.root_nodes.clear()
+            if self.cur_nodes.size() > 0:
+                self.cur_nodes.clear()
             # some init.
             self.root_nodes_qmax = np.zeros(self.env_n, dtype=np.float32)
             self.root_nodes_qmax_ = np.zeros(self.env_n, dtype=np.float32)
