@@ -82,19 +82,22 @@ def compute_stack_step_metadata(
     valid_mask: np.ndarray,
     is_first: np.ndarray,
     frame_stack: int,
-) -> tuple[list[int], list[int], list[bool]]:
+) -> tuple[list[int], list[int], list[bool], list[tuple[int, int]]]:
     """Identify frame indices that correspond to complete stacked observations."""
     is_first_bool = np.asarray(is_first, dtype=bool)
     logical_indices: list[int] = []
     prev_indices: list[int] = []
     seq_flags: list[bool] = []
+    reward_ranges: list[tuple[int, int]] = []
 
     frames_since_reset = 0
+    ep_start_ptr = -1
     total_frames = len(valid_mask)
     for idx in range(total_frames):
         new_episode = idx == 0 or is_first_bool[idx]
         if new_episode:
             frames_since_reset = 1
+            ep_start_ptr = idx
         else:
             frames_since_reset += 1
 
@@ -106,8 +109,10 @@ def compute_stack_step_metadata(
             logical_indices.append(idx)
             prev_indices.append(prev_idx)
             seq_flags.append(prev_idx < 0)
+            start = max(ep_start_ptr, idx - frame_stack + 1)
+            reward_ranges.append((start, idx + 1))
 
-    return logical_indices, prev_indices, seq_flags
+    return logical_indices, prev_indices, seq_flags, reward_ranges
 
 
 def convert_obs(obs_stack, model_net, device):
@@ -332,6 +337,11 @@ def main():
         "tree_reps": [],
         "real_vectors": [],
         "im_vectors": [],
+        "im_vp_vectors": [],
+        "env_return": [],
+        "cur_rewards": [],
+        "step_times": [],
+        "tree_reps_vector": [],
         "human_action": [],
         "imagined_real_action": [],
     }
@@ -339,7 +349,7 @@ def main():
     episode_ids = compute_episode_ids(is_first)
     human_actions, valid_mask = extract_human_actions(actions)
 
-    stack_indices, prev_indices, seq_flags = compute_stack_step_metadata(
+    stack_indices, prev_indices, seq_flags, reward_ranges = compute_stack_step_metadata(
         valid_mask=valid_mask,
         is_first=is_first,
         frame_stack=frame_stack,
@@ -359,6 +369,11 @@ def main():
         next_idx = stack_indices[step_idx]
         prev_idx = prev_indices[step_idx]
         sequence_start_flag = seq_flags[step_idx]
+        reward_start, reward_end = reward_ranges[step_idx]
+        reward_slice = rewards[reward_start:reward_end]
+        reward_sum = float(np.sum(reward_slice)) if reward_slice.size > 0 else 0.0
+        clipped_reward = float(np.clip(reward_sum, -1.0, 1.0))
+        cur_reward_vec = np.array([clipped_reward], dtype=np.float32)
 
         stack_input = build_stack_for_index(
             images,
@@ -395,15 +410,40 @@ def main():
         entries = history[0]
         imagined_actions = []
 
-        for entry in entries:
+        for entry_idx, entry in enumerate(entries):
             tree_rep_tensor = torch.from_numpy(entry["tree_reps"]).float()
             decoded_tree = decode_tree_reps_tensor(tree_rep_tensor, num_actions, dim_actions, flags.rec_t, flags)
+            # status alignment with visual2: 0 real, 2 imagination, 1 reset, 3 force reset
+            status_val = int(entry["status"])
+            cur_reset_val = decoded_tree.get("cur_reset", None)
+            if cur_reset_val is not None:
+                cur_reset_scalar = int(np.asarray(cur_reset_val).reshape(-1)[0])
+                if cur_reset_scalar == 1:
+                    status_val = 1
+                elif cur_reset_scalar == 3:
+                    status_val = 3
+            if entry_idx == 0:
+                status_val_out = 0
+            else:
+                if status_val in (0, 3):
+                    status_val_out = 0 if status_val == 0 else 3
+                elif status_val in (1, 2):
+                    status_val_out = 2
+                else:
+                    status_val_out = status_val
+            env_ret_val = reward_sum if status_val_out == 0 else 0.0
+            cur_reward_val = cur_reward_vec if status_val_out == 0 else np.zeros_like(cur_reward_vec)
             video_stats["real_imgs"].append(entry["real_img"].astype(np.uint8))
             video_stats["im_imgs"].append(entry["im_img"].astype(np.float32))
-            video_stats["status"].append(int(entry["status"]))
+            video_stats["status"].append(status_val_out)
             video_stats["tree_reps"].append(decoded_tree)
             video_stats["real_vectors"].append(entry["real_vectors"] if entry["real_vectors"] is not None else None)
             video_stats["im_vectors"].append(entry["im_vectors"] if entry["im_vectors"] is not None else None)
+            video_stats["im_vp_vectors"].append(entry["im_vp_vectors"] if entry.get("im_vp_vectors") is not None else None)
+            video_stats["env_return"].append(env_ret_val)
+            video_stats["cur_rewards"].append(cur_reward_val)
+            video_stats["step_times"].append(entry.get("step_times"))
+            video_stats["tree_reps_vector"].append(entry.get("tree_reps_vector"))
             video_stats["human_action"].append(int(entry["human_action"]))
             imagined_actions.append(entry["imagined_action"] if entry["imagined_action"] is not None else -1)
 
@@ -422,9 +462,45 @@ def main():
     video_stats["real_imgs"] = np.stack(video_stats["real_imgs"], axis=0)
     video_stats["im_imgs"] = np.stack(video_stats["im_imgs"], axis=0)
     video_stats["status"] = np.array(video_stats["status"], dtype=np.int32)
+    video_stats["env_return"] = np.array(video_stats["env_return"], dtype=np.float32)
+    if len(video_stats["cur_rewards"]) > 0 and video_stats["cur_rewards"][0] is not None:
+        video_stats["cur_rewards"] = np.stack(video_stats["cur_rewards"], axis=0).astype(np.float32)
+    else:
+        video_stats["cur_rewards"] = None
+    if len(video_stats["step_times"]) > 0:
+        valid_step = next((st for st in video_stats["step_times"] if st is not None), None)
+        if valid_step is not None:
+            fill = np.full_like(np.asarray(valid_step, dtype=np.float32), np.nan, dtype=np.float32)
+            video_stats["step_times"] = np.stack(
+                [
+                    np.asarray(st, dtype=np.float32) if st is not None else fill
+                    for st in video_stats["step_times"]
+                ],
+                axis=0,
+            )
+        else:
+            video_stats["step_times"] = None
+    else:
+        video_stats["step_times"] = None
+    if len(video_stats["tree_reps_vector"]) > 0:
+        valid_tree = next((tv for tv in video_stats["tree_reps_vector"] if tv is not None), None)
+        if valid_tree is not None:
+            fill_tree = np.full_like(np.asarray(valid_tree, dtype=np.float32), np.nan, dtype=np.float32)
+            video_stats["tree_reps_vector"] = np.stack(
+                [
+                    np.asarray(tv, dtype=np.float32) if tv is not None else fill_tree
+                    for tv in video_stats["tree_reps_vector"]
+                ],
+                axis=0,
+            )
+        else:
+            video_stats["tree_reps_vector"] = None
+    else:
+        video_stats["tree_reps_vector"] = None
     video_stats["tree_reps"] = aggregate_tree_reps(video_stats["tree_reps"])
     video_stats["real_vectors"] = convert_vector_list(video_stats["real_vectors"])
     video_stats["im_vectors"] = convert_vector_list(video_stats["im_vectors"])
+    video_stats["im_vp_vectors"] = convert_vector_list(video_stats["im_vp_vectors"])
     video_stats["human_action"] = np.array(video_stats["human_action"], dtype=np.int32)
     video_stats["imagined_real_action"] = np.array(video_stats["imagined_real_action"], dtype=np.int32)
 
@@ -447,6 +523,11 @@ def main():
             "tree_reps": {k: v[start:end] for k, v in video_stats["tree_reps"].items()},
             "real_vectors": video_stats["real_vectors"][start:end],
             "im_vectors": video_stats["im_vectors"][start:end],
+            "im_vp_vectors": video_stats["im_vp_vectors"][start:end],
+            "env_return": video_stats["env_return"][start:end],
+            "cur_rewards": video_stats["cur_rewards"][start:end] if video_stats["cur_rewards"] is not None else None,
+            "step_times": video_stats["step_times"][start:end] if video_stats["step_times"] is not None else None,
+            "tree_reps_vector": video_stats["tree_reps_vector"][start:end] if video_stats["tree_reps_vector"] is not None else None,
             "human_action": video_stats["human_action"][start:end],
             "imagined_real_action": video_stats["imagined_real_action"][start:end],
         }

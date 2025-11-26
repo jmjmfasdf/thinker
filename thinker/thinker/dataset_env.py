@@ -57,8 +57,8 @@ class BehaviorDatasetVectorEnv:
             shape=(self._stack_ch, self.target_h, self.target_w),
             dtype=np.uint8,
         )
-        # Vector action space: Tuple of length env_n
-        self.action_space = spaces.Tuple((spaces.Discrete(self.num_actions),) * self.env_n)
+        # Action space: single Discrete (env_n=1) to match Thinker checkpoints expecting Discrete
+        self.action_space = spaces.Discrete(self.num_actions)
         self.reward_range = (-np.inf, np.inf)
         self.metadata: Dict[str, Any] = {}
 
@@ -66,6 +66,7 @@ class BehaviorDatasetVectorEnv:
         self._logical_indices, self._segment_reward_range, self._segment_actions_idx, self._episode_start_flags = self._prepare_logical_steps()
         self._num_steps = len(self._logical_indices)
         self._pos = 0
+        self._pos_stack: List[int] = []
 
     # ---------------------- Public helpers ----------------------
     def has_more(self) -> bool:
@@ -78,6 +79,10 @@ class BehaviorDatasetVectorEnv:
             idx = min(self._pos, self._num_steps - 1)
         return int(self._segment_actions_idx[idx])
 
+    def close(self):
+        # compatibility with gym VectorEnv interface
+        return None
+
     # ---------------------- Vector env API ----------------------
     def reset(self, *, reset_stat: bool = False, seed: Optional[int] = None):
         # Reset to the beginning if past end
@@ -85,9 +90,9 @@ class BehaviorDatasetVectorEnv:
             self._pos = 0
         obs = self._build_stack(self._logical_indices[self._pos])
         info = {
-            "real_done": np.array([False], dtype=bool),
-            "episode_return": np.array([0.0], dtype=np.float32),
-            "episode_step": np.array([0], dtype=np.int64),
+            "real_done": False,
+            "episode_return": 0.0,
+            "episode_step": 0,
         }
         return np.expand_dims(obs, axis=0), info
 
@@ -101,10 +106,10 @@ class BehaviorDatasetVectorEnv:
         if self._pos >= self._num_steps:
             # End of dataset: emit zeros and mark done
             obs = np.zeros((1,) + self.observation_space.shape, dtype=np.uint8)
-            reward = np.array([0.0], dtype=np.float32)
-            done = np.array([True], dtype=bool)
-            truncated = np.array([True], dtype=bool)
-            info = {"real_done": done.copy()}
+            reward = 0.0
+            done = True
+            truncated = True
+            info = {"real_done": True}
             return obs, reward, done, truncated, info
 
         idx = self._logical_indices[self._pos]
@@ -117,8 +122,8 @@ class BehaviorDatasetVectorEnv:
         # Determine termination at this step
         # Done if this logical index is terminal, or next step starts a new episode
         is_term = bool(self._is_terminal[idx])
-        done = np.array([is_term], dtype=bool)
-        truncated = np.array([False], dtype=bool)
+        done = bool(is_term)
+        truncated = False
 
         if is_term:
             # If terminal, jump to next episode's first logical step (if any)
@@ -127,8 +132,28 @@ class BehaviorDatasetVectorEnv:
                 self._pos = next_pos
                 obs = self._build_stack(self._logical_indices[self._pos])
         
-        info = {"real_done": done.copy()}
-        return np.expand_dims(obs, axis=0), np.array([reward_val], dtype=np.float32), done, truncated, info
+        info = {"real_done": bool(done)}
+        return np.expand_dims(obs, axis=0), reward_val, done, truncated, info
+
+    # ---------------------- Save/Load for imagination ----------------------
+    def quick_save(self, env_id: Optional[List[int]] = None):
+        # Save current cursor so rollout can restore later
+        self._pos_stack.append(self._pos)
+
+    def quick_load(self, env_id: Optional[List[int]] = None):
+        if not self._pos_stack:
+            raise ValueError("No saved state found. Call quick_save() before quick_load().")
+        self._pos = self._pos_stack.pop()
+
+    def save_ckp(self):
+        # Return lightweight state for checkpointing
+        return {"behavior_pos": np.array([self._pos], dtype=np.int64)}
+
+    def load_ckp(self, data):
+        # Restore cursor if present
+        if "behavior_pos" in data:
+            pos = int(np.array(data["behavior_pos"]).reshape(-1)[0])
+            self._pos = max(0, min(pos, self._num_steps - 1))
 
     # ---------------------- Internal helpers ----------------------
     def _preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
@@ -172,36 +197,35 @@ class BehaviorDatasetVectorEnv:
         return max(0, count)
 
     def _prepare_logical_steps(self):
+        """Generate logical steps with non-overlapping stacks (stride=frame_stack_n)."""
         logical_indices: List[int] = []
         reward_ranges: List[Tuple[int, int]] = []
         action_indices: List[int] = []
         episode_starts: List[bool] = []
 
-        # Derive valid human action indices if one-hot
+        # Derive action indices (supports one-hot or index)
         if self._raw_actions.ndim == 2:
             human_actions = np.argmax(self._raw_actions, axis=1).astype(np.int64)
-            valid_mask = self._raw_actions.sum(axis=1) > 0.0
         else:
             human_actions = self._raw_actions.astype(np.int64)
-            valid_mask = human_actions >= 0
 
+        ep_start_ptr = 0
         frames_since_reset = 0
-        ep_start_ptr = -1
         for idx in range(len(self._raw_images)):
             new_ep = idx == 0 or bool(self._is_first[idx])
             if new_ep:
-                frames_since_reset = 1
                 ep_start_ptr = idx
+                frames_since_reset = 1
             else:
                 frames_since_reset += 1
 
-            if not valid_mask[idx]:
-                continue
-            if frames_since_reset >= self.frame_stack_n and frames_since_reset % self.frame_stack_n == 0:
-                prev_idx = idx - self.frame_stack_n
+            # emit only every frame_stack_n frames (non-overlapping)
+            if frames_since_reset % self.frame_stack_n == 0:
+                start_idx = max(ep_start_ptr, idx - self.frame_stack_n + 1)
                 logical_indices.append(idx)
-                reward_ranges.append((max(ep_start_ptr, idx - self.frame_stack_n + 1), idx + 1))
-                action_indices.append(int(human_actions[prev_idx if prev_idx >= 0 else idx]))
+                reward_ranges.append((start_idx, idx + 1))
+                # action aligned with the latest frame in the block
+                action_indices.append(int(human_actions[idx]))
                 episode_starts.append(new_ep or len(logical_indices) == 1)
 
         return logical_indices, reward_ranges, action_indices, episode_starts

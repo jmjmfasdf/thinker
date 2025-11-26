@@ -197,7 +197,7 @@ class ThinkerPolicyAdapter:
                 flags=self.flags,
                 model_net=self.model_net,
                 device=model_device,
-                timing=False,
+                timing=True,
             )
             self._cenv_model_device = model_device
             self._cenv_batch_size = batch_size
@@ -218,7 +218,7 @@ class ThinkerPolicyAdapter:
                     flags=self.flags,
                     model_net=self.model_net,
                     device=model_device,
-                    timing=False,
+                    timing=True,
                 )
                 self._cenv_model_device = model_device
                 self._cenv_batch_size = batch_size
@@ -264,9 +264,9 @@ class ThinkerPolicyAdapter:
         env_out.reward = torch.zeros(1, batch_size, reward_dim, device=self.device)
         return env_out
 
-    def _compute_sr_vectors(self, real_state: torch.Tensor, model_state) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def _compute_sr_vectors(self, real_state: torch.Tensor, model_state) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         if not hasattr(self.model_net, "sr_net"):
-            return None, None
+            return None, None, None
         sr = self.model_net.sr_net
         with torch.no_grad():
             state = real_state.unsqueeze(0)
@@ -280,9 +280,34 @@ class ThinkerPolicyAdapter:
             im_vec = None
             if isinstance(model_state, dict) and "sr_h" in model_state:
                 im_vec = model_state["sr_h"].detach().cpu().numpy()
+            elif hasattr(sr, "state") and isinstance(sr.state, dict) and "sr_h" in sr.state:
+                im_vec = sr.state["sr_h"].detach().cpu().numpy()
         if im_vec is None and real_vec is not None:
             im_vec = np.copy(real_vec)
-        return real_vec, im_vec
+        im_vp_vec = None
+        vp = getattr(self.model_net, "vp_net", None)
+        if vp is not None:
+            if isinstance(model_state, dict) and "vp_h" in model_state:
+                im_vp_vec = model_state["vp_h"].detach().cpu().numpy()
+            elif hasattr(vp, "state") and isinstance(vp.state, dict) and "vp_h" in vp.state:
+                im_vp_vec = vp.state["vp_h"].detach().cpu().numpy()
+        return real_vec, im_vec, im_vp_vec
+
+    def _extract_tree_rep_vector(self, actor_out) -> Optional[np.ndarray]:
+        misc = getattr(actor_out, "misc", None)
+        if not isinstance(misc, dict):
+            return None
+        tree_vec = misc.get("tree_rep_enc")
+        if tree_vec is None:
+            return None
+        if torch.is_tensor(tree_vec):
+            tensor = tree_vec.detach()
+        else:
+            tensor = torch.tensor(tree_vec)
+        if tensor.dim() < 3:
+            return None
+        vec = tensor[-1, 0]
+        return vec.cpu().numpy()
     
     def _build_history_entry(
         self,
@@ -294,6 +319,11 @@ class ThinkerPolicyAdapter:
         human_action: Optional[int],
         imagined_action: Optional[int],
         forced_reset: bool = False,
+        im_vp_vectors: Optional[np.ndarray] = None,
+        tree_rep_vector: Optional[np.ndarray] = None,
+        step_times: Optional[np.ndarray] = None,
+        env_return: Optional[float] = None,
+        cur_rewards: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         real_img = torch.clamp(real_state, 0.0, 1.0).detach().cpu().numpy()
         real_img_uint8 = (real_img * 255.0).clip(0, 255).astype(np.uint8)
@@ -306,7 +336,9 @@ class ThinkerPolicyAdapter:
             im_img = np.zeros_like(real_img, dtype=np.float32)
     
         model_state = encoded.get("model_state")
-        real_vec, im_vec = self._compute_sr_vectors(real_state, model_state)
+        real_vec, im_vec, im_vp_vec = self._compute_sr_vectors(real_state, model_state)
+        if im_vp_vectors is not None:
+            im_vp_vec = im_vp_vectors
     
         if torch.is_tensor(tree_rep):
             tree_rep_np = tree_rep.detach().cpu().numpy()
@@ -320,6 +352,11 @@ class ThinkerPolicyAdapter:
             "tree_reps": tree_rep_np,
             "real_vectors": real_vec,
             "im_vectors": im_vec,
+            "im_vp_vectors": im_vp_vec,
+            "tree_reps_vector": tree_rep_vector,
+            "step_times": step_times,
+            "env_return": env_return,
+            "cur_rewards": cur_rewards,
             "human_action": int(human_action) if human_action is not None else -1,
             "imagined_action": int(imagined_action) if imagined_action is not None else None,
             "forced_reset": bool(forced_reset),
@@ -408,7 +445,7 @@ class ThinkerPolicyAdapter:
         last_reset = torch.zeros(batch_size, dtype=torch.long, device=device)
         history = [[] for _ in range(batch_size)] if record_history else None
 
-        def _record_history(states_snapshot, status_snapshot, imagined_action_tensor=None, forced_reset_tensor=None):
+        def _record_history(states_snapshot, status_snapshot, imagined_action_tensor=None, forced_reset_tensor=None, tree_rep_vector=None, step_times=None):
             if history is None:
                 return
             tree_reps_cpu = states_snapshot["tree_reps"].detach().cpu()
@@ -428,6 +465,12 @@ class ThinkerPolicyAdapter:
             imagined_tensor = imagined_action_tensor.detach() if torch.is_tensor(imagined_action_tensor) else imagined_action_tensor
             forced_tensor = forced_reset_tensor.detach() if torch.is_tensor(forced_reset_tensor) else forced_reset_tensor
             human_tensor = teacher_actions if teacher_actions is not None else last_action
+            step_times_tensor = step_times
+            if torch.is_tensor(step_times_tensor):
+                step_times_tensor = step_times_tensor.detach()
+            tree_rep_vector_tensor = tree_rep_vector
+            if torch.is_tensor(tree_rep_vector_tensor):
+                tree_rep_vector_tensor = tree_rep_vector_tensor.detach()
             for idx in range(batch_size):
                 real_state = real_states_tensor[idx]
                 if real_state.dtype == torch.uint8:
@@ -446,6 +489,23 @@ class ThinkerPolicyAdapter:
                     imagined_val = int(imagined_tensor[idx])
                 forced_val = bool(forced_tensor[idx].item()) if forced_tensor is not None else False
                 status_val = int(status_tensor[idx].item()) if torch.is_tensor(status_tensor) else int(status_tensor[idx])
+                trv = None
+                if tree_rep_vector_tensor is not None:
+                    if isinstance(tree_rep_vector_tensor, (list, tuple, np.ndarray)) or torch.is_tensor(tree_rep_vector_tensor):
+                        trv_elem = tree_rep_vector_tensor[idx]
+                    else:
+                        trv_elem = tree_rep_vector_tensor
+                    if torch.is_tensor(trv_elem):
+                        trv = trv_elem.detach().cpu().numpy()
+                    else:
+                        trv = np.asarray(trv_elem)
+                st_entry = None
+                if step_times_tensor is not None:
+                    st_elem = step_times_tensor[idx] if hasattr(step_times_tensor, "__len__") else step_times_tensor
+                    if torch.is_tensor(st_elem):
+                        st_entry = st_elem.detach().cpu().numpy().astype(np.float32)
+                    else:
+                        st_entry = np.asarray(st_elem, dtype=np.float32)
                 entry = self._build_history_entry(
                     real_state,
                     encoded,
@@ -454,11 +514,14 @@ class ThinkerPolicyAdapter:
                     human_action=human_val,
                     imagined_action=imagined_val,
                     forced_reset=forced_val,
+                    im_vp_vectors=None,
+                    tree_rep_vector=trv,
+                    step_times=st_entry,
                 )
                 history[idx].append(entry)
 
         status_tensor = info.get("step_status") if isinstance(info, dict) else None
-        _record_history(states, status_tensor, imagined_action_tensor=None, forced_reset_tensor=None)
+        _record_history(states, status_tensor, imagined_action_tensor=None, forced_reset_tensor=None, tree_rep_vector=None, step_times=info.get("step_times") if isinstance(info, dict) else None)
 
         # Rec_t rollout with imagination + dummy real steps
         for step in range(self.flags.rec_t):
@@ -515,7 +578,8 @@ class ThinkerPolicyAdapter:
             else:
                 rst = torch.zeros_like(next_action)
 
-            _record_history(states, status_tensor, imagined_action_tensor=next_action, forced_reset_tensor=None)
+            tree_vec = self._extract_tree_rep_vector(actor_out)
+            _record_history(states, status_tensor, imagined_action_tensor=next_action, forced_reset_tensor=None, tree_rep_vector=tree_vec, step_times=info.get("step_times") if isinstance(info, dict) else None)
 
             # Step wrapper; env ignores actions for real step
             states, reward, done, truncated, info = core_env.step((next_action.detach().cpu().numpy(), rst.detach().cpu().numpy()), self.model_net)
