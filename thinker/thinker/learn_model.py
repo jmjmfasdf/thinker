@@ -409,6 +409,41 @@ class SModelLearner:
         total_loss = self.bc_model_coef * reward_loss
         return {"total_loss": total_loss, "reward_loss": reward_loss}
 
+    def _maybe_run_bc_update(self):
+        """Optional supervised update of the model using behavioral data."""
+        if not self.bc_enabled or self.bc_loader is None or self.bc_optimizer is None:
+            return None
+        self.bc_step += 1
+        if self.bc_step % self.bc_supervised_freq != 0:
+            return None
+        metrics = self._compute_bc_loss()
+        if metrics is None:
+            return None
+
+        total_loss = metrics["total_loss"]
+        self.bc_optimizer.zero_grad()
+        total_loss.backward()
+
+        if getattr(self.flags, "model_grad_norm_clipping", 0.0) > 0.0:
+            torch.nn.utils.clip_grad_norm_(
+                self.model_net.vp_net.parameters(),
+                self.flags.model_grad_norm_clipping,
+            )
+
+        self.bc_optimizer.step()
+
+        out = {"total_loss": float(total_loss.detach().cpu().item())}
+        for k, v in metrics.items():
+            if k == "total_loss":
+                continue
+            if v is None:
+                continue
+            if torch.is_tensor(v):
+                out[k] = float(v.detach().cpu().item())
+            else:
+                out[k] = float(v)
+        return out
+
     # IcoPro actor BC moved to actor learner.
 
     def consume_data(self, data, model_buffer=None):

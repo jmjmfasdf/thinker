@@ -276,6 +276,45 @@ class BehaviorSequenceVectorEnv:
         self.reward_range = (-np.inf, np.inf)
         self.metadata: Dict[str, Any] = {}
 
+    # ------------- update helpers for planner reuse -------------
+    def update_sequences(
+        self,
+        obs_seq: np.ndarray,
+        rewards_seq: Optional[np.ndarray] = None,
+        actions_seq: Optional[np.ndarray] = None,
+    ) -> None:
+        """Update stored sequences in-place while keeping the same env instance.
+
+        This is used by IcoPro BC to reuse a single planner and avoid repeated
+        GPU allocations when building cModelWrapper.
+        """
+        assert obs_seq.ndim == 5, f"obs_seq must be (B,L,C,H,W), got {obs_seq.shape}"
+        if obs_seq.shape != self.obs_seq.shape:
+            raise ValueError(
+                f"Shape mismatch in update_sequences: {obs_seq.shape} vs {self.obs_seq.shape}"
+            )
+
+        # Replace backing arrays
+        self.obs_seq = obs_seq.astype(
+            np.uint8 if obs_seq.dtype == np.uint8 else np.float32, copy=True
+        )
+        if rewards_seq is not None:
+            assert rewards_seq.shape == self.rewards_seq.shape, (
+                f"rewards_seq shape {rewards_seq.shape} does not match "
+                f"{self.rewards_seq.shape}"
+            )
+            self.rewards_seq = rewards_seq.astype(np.float32, copy=True)
+        if actions_seq is not None:
+            assert actions_seq.shape == self.actions_seq.shape, (
+                f"actions_seq shape {actions_seq.shape} does not match "
+                f"{self.actions_seq.shape}"
+            )
+            self.actions_seq = actions_seq.astype(np.int64, copy=True)
+
+        # Reset cursors / stacks
+        self._pos[...] = 0
+        self._pos_stack.clear()
+
     # ------------- helpers -------------
     def _current_obs(self, env_id: np.ndarray) -> np.ndarray:
         return self.obs_seq[env_id, self._pos[env_id]]

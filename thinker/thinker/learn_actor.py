@@ -228,17 +228,30 @@ class SActorLearner:
         self.bc_optimizer = None
         self.bc_enabled = False
         self.bc_step = 0
-        self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
-        self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
+        self.bc_batch_size = max(
+            1, int(getattr(self.flags, "icopro_batch_size", 32))
+        )
+        self.bc_supervised_freq = max(
+            1, int(getattr(self.flags, "icopro_supervised_freq", 1))
+        )
         self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
         self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
         self.bc_ce_coef = float(getattr(self.flags, "icopro_ce_coef", 1.0))
-        self.bc_action_diff_coef = float(getattr(self.flags, "icopro_action_diff_coef", 1.0))
+        self.bc_action_diff_coef = float(
+            getattr(self.flags, "icopro_action_diff_coef", 1.0)
+        )
         self.bc_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
         self.bc_tree_coef = float(getattr(self.flags, "icopro_tree_coef", 0.0))
         self.bc_kl_coef = float(getattr(self.flags, "icopro_actor_kl_coef", 0.0))
         self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
         self.bc_noop_window = collections.deque(maxlen=150)
+        # Cached planner/env for IcoPro BC to avoid repeated cModelWrapper
+        # allocations and reduce GPU memory growth.
+        self.bc_planner = None
+        self.bc_planner_env = None
+        self.bc_planner_batch_size = 0
+        self.bc_planner_seq_len = 0
+        self.bc_planner_device = None
 
         data_path = getattr(self.flags, "icopro_data_path", "")
         if not data_path:
@@ -314,6 +327,83 @@ class SActorLearner:
             self._refresh_bc_model()
         self._logger.info("IcoPro model net initialised for BC planning.")
 
+    def _ensure_bc_planner(
+        self,
+        obs_seq_np: np.ndarray,
+        rewards_seq_np: np.ndarray,
+        actions_seq_np: np.ndarray,
+    ):
+        """Reuse a single cModelWrapper planner for IcoPro BC.
+
+        This avoids repeatedly allocating large planner buffers on the device.
+        """
+        batch_size, seq_len = actions_seq_np.shape
+        model_device = self.icopro_device
+        rebuild = (
+            self.bc_planner is None
+            or self.bc_planner_env is None
+            or self.bc_planner_batch_size != batch_size
+            or self.bc_planner_seq_len != seq_len
+            or self.bc_planner_device != model_device
+        )
+        if rebuild:
+            if self.bc_planner is not None and hasattr(self.bc_planner, "close"):
+                try:
+                    self.bc_planner.close()
+                except Exception:
+                    pass
+            base_env = BehaviorSequenceVectorEnv(
+                obs_seq=obs_seq_np,
+                rewards_seq=rewards_seq_np,
+                actions_seq=actions_seq_np,
+                num_actions=self.actor_net.num_actions,
+            )
+            planner = cModelWrapper(
+                env=base_env,
+                env_n=batch_size,
+                flags=self.flags,
+                model_net=self.bc_model_net,
+                device=model_device,
+                timing=False,
+            )
+            self.bc_planner_env = base_env
+            self.bc_planner = planner
+            self.bc_planner_batch_size = batch_size
+            self.bc_planner_seq_len = seq_len
+            self.bc_planner_device = model_device
+        else:
+            try:
+                self.bc_planner_env.update_sequences(
+                    obs_seq_np, rewards_seq_np, actions_seq_np
+                )
+            except Exception:
+                if self.bc_planner is not None and hasattr(self.bc_planner, "close"):
+                    try:
+                        self.bc_planner.close()
+                    except Exception:
+                        pass
+                base_env = BehaviorSequenceVectorEnv(
+                    obs_seq=obs_seq_np,
+                    rewards_seq=rewards_seq_np,
+                    actions_seq=actions_seq_np,
+                    num_actions=self.actor_net.num_actions,
+                )
+                planner = cModelWrapper(
+                    env=base_env,
+                    env_n=batch_size,
+                    flags=self.flags,
+                    model_net=self.bc_model_net,
+                    device=model_device,
+                    timing=False,
+                )
+                self.bc_planner_env = base_env
+                self.bc_planner = planner
+                self.bc_planner_batch_size = batch_size
+                self.bc_planner_seq_len = seq_len
+                self.bc_planner_device = model_device
+
+        return self.bc_planner, model_device
+
     def _refresh_bc_model(self):
         if self.model_param_buffer is None or self.bc_model_net is None:
             return
@@ -339,74 +429,109 @@ class SActorLearner:
         actions_seq_full = batch["actions_seq"]
         rewards_seq_full = batch.get("rewards_seq")
 
+        # Drop the first frame-stack; imitate on the remaining L steps
         obs_seq = obs_seq_full[:, 1:]
         human_actions_seq = actions_seq_full[:, 1:]
-        rewards_seq = rewards_seq_full[:, 1:] if rewards_seq_full is not None else None
+        rewards_seq = (
+            rewards_seq_full[:, 1:] if rewards_seq_full is not None else None
+        )
 
         batch_size, seq_len = human_actions_seq.shape
-        device = self.device
+        actor_device = self.device
 
+        # Planner runs on icopro_device (can be CPU or GPU). Only minimal
+        # tensors are moved to the actor device.
         obs_np = (obs_seq.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-        rewards_np = rewards_seq.cpu().numpy() if rewards_seq is not None else np.zeros((batch_size, seq_len), dtype=np.float32)
+        if rewards_seq is not None:
+            rewards_np = rewards_seq.cpu().numpy().astype(np.float32)
+        else:
+            rewards_np = np.zeros((batch_size, seq_len), dtype=np.float32)
+        human_actions_seq_np = human_actions_seq.cpu().numpy()
 
-        base_env = BehaviorSequenceVectorEnv(
-            obs_seq=obs_np,
-            rewards_seq=rewards_np,
-            actions_seq=human_actions_seq.cpu().numpy(),
-            num_actions=self.actor_net.num_actions,
-        )
-        planner = cModelWrapper(
-            env=base_env,
-            env_n=batch_size,
-            flags=self.flags,
-            model_net=self.bc_model_net,
-            device=device,
-            timing=False,
+        planner, model_device = self._ensure_bc_planner(
+            obs_np, rewards_np, human_actions_seq_np
         )
 
         with torch.no_grad():
             states, info = planner.reset(self.bc_model_net)
-        env_out = util.init_env_out(states, info, self.flags, dim_actions=self.actor_net.dim_actions, tuple_action=self.actor_net.tuple_action)
-        actor_state = self.actor_net.initial_state(batch_size=batch_size, device=device)
+
+        env_out = util.init_env_out(
+            states,
+            info,
+            self.flags,
+            dim_actions=self.actor_net.dim_actions,
+            tuple_action=self.actor_net.tuple_action,
+        )
+
+        def _to_actor(x):
+            return x.to(actor_device) if torch.is_tensor(x) else x
+
+        env_out = env_out._replace(
+            real_states=_to_actor(env_out.real_states),
+            tree_reps=_to_actor(env_out.tree_reps),
+            xs=_to_actor(env_out.xs) if env_out.xs is not None else None,
+            hs=_to_actor(env_out.hs) if env_out.hs is not None else None,
+            done=_to_actor(env_out.done),
+            real_done=_to_actor(env_out.real_done),
+            truncated_done=_to_actor(env_out.truncated_done),
+            last_pri=_to_actor(env_out.last_pri),
+            last_reset=_to_actor(env_out.last_reset),
+            reward=_to_actor(env_out.reward),
+            step_status=_to_actor(env_out.step_status),
+        )
+
+        actor_state = self.actor_net.initial_state(
+            batch_size=batch_size, device=actor_device
+        )
 
         # Track imaginary / curiosity episode returns (PostWrapper-lite for BC planner)
-        im_ep_ret = torch.zeros(batch_size, device=device)
-        cur_ep_ret = torch.zeros(batch_size, device=device)
+        im_ep_ret = torch.zeros(batch_size, device=actor_device)
+        cur_ep_ret = torch.zeros(batch_size, device=actor_device)
 
         margin_losses, ce_losses, pvp_losses, action_diff_losses = [], [], [], []
         all_pred_actions = []
         all_human_actions = []
 
         for t in range(seq_len):
-            actor_out, actor_state = self.actor_net(env_out, actor_state, compute_loss=False, greedy=False)
+            actor_out, actor_state = self.actor_net(
+                env_out, actor_state, compute_loss=False, greedy=False
+            )
             if not self.actor_net.disable_thinker:
                 primary_action, reset_action = actor_out.action
             else:
                 primary_action, reset_action = actor_out.action, None
 
             with torch.no_grad():
-                states, reward, done, truncated, info = planner.step((primary_action, reset_action), self.bc_model_net)
+                states, reward, done, truncated, info = planner.step(
+                    (
+                        primary_action.detach().cpu().numpy(),
+                        reset_action.detach().cpu().numpy()
+                        if reset_action is not None
+                        else np.zeros_like(primary_action.detach().cpu().numpy()),
+                    ),
+                    self.bc_model_net,
+                )
 
             # accumulate episode returns for imaginary / curiosity rewards if present
             real_done = info.get("real_done", done)
             if isinstance(real_done, torch.Tensor):
-                real_done_t = real_done.to(device)
+                real_done_t = real_done.to(actor_device)
             else:
-                real_done_t = torch.tensor(real_done, device=device)
+                real_done_t = torch.tensor(real_done, device=actor_device)
 
             im_reward = info.get("im_reward")
             if im_reward is not None:
                 if isinstance(im_reward, torch.Tensor):
-                    im_r = im_reward.view(-1).to(device)
+                    im_r = im_reward.view(-1).to(actor_device)
                 else:
-                    im_r = torch.tensor(im_reward).view(-1).to(device)
+                    im_r = torch.tensor(im_reward).view(-1).to(actor_device)
                 im_ep_ret += im_r
             cur_reward = info.get("cur_reward")
             if cur_reward is not None:
                 if isinstance(cur_reward, torch.Tensor):
-                    cur_r = cur_reward.view(-1).to(device)
+                    cur_r = cur_reward.view(-1).to(actor_device)
                 else:
-                    cur_r = torch.tensor(cur_reward).view(-1).to(device)
+                    cur_r = torch.tensor(cur_reward).view(-1).to(actor_device)
                 cur_ep_ret += cur_r
 
             # inject episode return fields expected by create_env_out
@@ -418,7 +543,23 @@ class SActorLearner:
                 im_ep_ret = im_ep_ret * (~real_done_t)
                 cur_ep_ret = cur_ep_ret * (~real_done_t)
 
-            env_out = util.create_env_out(actor_out.action, states, reward, done, truncated, info, flags=self.flags)
+            env_out = util.create_env_out(
+                actor_out.action, states, reward, done, truncated, info, flags=self.flags
+            )
+
+            env_out = env_out._replace(
+                real_states=_to_actor(env_out.real_states),
+                tree_reps=_to_actor(env_out.tree_reps),
+                xs=_to_actor(env_out.xs) if env_out.xs is not None else None,
+                hs=_to_actor(env_out.hs) if env_out.hs is not None else None,
+                done=_to_actor(env_out.done),
+                real_done=_to_actor(env_out.real_done),
+                truncated_done=_to_actor(env_out.truncated_done),
+                last_pri=_to_actor(env_out.last_pri),
+                last_reset=_to_actor(env_out.last_reset),
+                reward=_to_actor(env_out.reward),
+                step_status=_to_actor(env_out.step_status),
+            )
 
             logits_step = actor_out.pri_param[-1]
             # ensure 2D [B, num_actions]
@@ -426,12 +567,17 @@ class SActorLearner:
                 logits_step = logits_step[:, 0]
             if logits_step.dim() == 3:
                 logits_step = logits_step[:, 0, :]
-            human_actions = human_actions_seq[:, t].to(device)
+            human_actions = human_actions_seq[:, t]
             all_human_actions.append(human_actions)
             pred_actions = torch.argmax(logits_step.detach(), dim=-1)
             all_pred_actions.append(pred_actions)
 
-            margin_tensor = torch.full((human_actions.shape[0],), self.bc_margin, dtype=torch.float32, device=device)
+            margin_tensor = torch.full(
+                (human_actions.shape[0],),
+                self.bc_margin,
+                dtype=torch.float32,
+                device=actor_device,
+            )
             margin_losses.append(dqfd_margin_loss(logits_step, human_actions, margin_tensor))
             if self.bc_ce_coef > 0.0:
                 ce_losses.append(F.cross_entropy(logits_step, human_actions))
@@ -445,17 +591,31 @@ class SActorLearner:
                 else:
                     pvp_neg = torch.zeros_like(pvp_pos)
                 pvp_losses.append(pvp_pos + pvp_neg)
-            # action prob MSE vs one-hot human action
-            probs = F.softmax(logits_step, dim=-1)
-            target_onehot = F.one_hot(human_actions, num_classes=probs.shape[-1]).float()
-            step_diff = torch.mean((probs - target_onehot) ** 2, dim=-1)
-            action_diff_losses.append(step_diff.mean())
+            # action difference loss: cross-entropy between logits and human action
+            step_diff = F.cross_entropy(logits_step, human_actions)
+            action_diff_losses.append(step_diff)
 
-        margin_loss = torch.stack(margin_losses).mean() if margin_losses else torch.zeros((), device=device)
-        ce_loss = torch.stack(ce_losses).mean() if ce_losses else torch.zeros((), device=device)
-        pvp_loss = torch.stack(pvp_losses).mean() if pvp_losses else torch.zeros((), device=device)
-        kl_loss = torch.zeros((), device=device)
-        action_diff_loss = torch.stack(action_diff_losses).mean() if action_diff_losses else torch.zeros((), device=device)
+        margin_loss = (
+            torch.stack(margin_losses).mean()
+            if margin_losses
+            else torch.zeros((), device=actor_device)
+        )
+        ce_loss = (
+            torch.stack(ce_losses).mean()
+            if ce_losses
+            else torch.zeros((), device=actor_device)
+        )
+        pvp_loss = (
+            torch.stack(pvp_losses).mean()
+            if pvp_losses
+            else torch.zeros((), device=actor_device)
+        )
+        kl_loss = torch.zeros((), device=actor_device)
+        action_diff_loss = (
+            torch.stack(action_diff_losses).mean()
+            if action_diff_losses
+            else torch.zeros((), device=actor_device)
+        )
 
         total_loss = (
             self.bc_margin_coef * margin_loss
@@ -591,9 +751,8 @@ class SActorLearner:
         margin_tensor = torch.full((human_actions.shape[0],), self.bc_margin, dtype=torch.float32, device=self.device)
         margin_loss = dqfd_margin_loss(logits, human_actions, margin_tensor)
         ce_loss = F.cross_entropy(logits, human_actions) if self.bc_ce_coef > 0.0 else torch.zeros((), device=self.device)
-        probs = F.softmax(logits, dim=-1)
-        target_onehot = F.one_hot(human_actions, num_classes=probs.shape[-1]).float()
-        action_diff_loss = torch.mean((probs - target_onehot) ** 2, dim=-1).mean()
+        # action difference loss: cross-entropy between logits and human action
+        action_diff_loss = F.cross_entropy(logits, human_actions)
         kl_loss = torch.zeros((), device=self.device)
         pvp_loss = torch.zeros((), device=self.device)
         total_loss = (
@@ -1343,6 +1502,13 @@ class SActorLearner:
             self.actor_buffer.set_finish.remote()
         if getattr(self, 'bc_policy_adapter', None) is not None:
             self.bc_policy_adapter.close()
+        if getattr(self, "bc_planner", None) is not None and hasattr(
+            self.bc_planner, "close"
+        ):
+            try:
+                self.bc_planner.close()
+            except Exception:
+                pass
         self.plogger.close()
 
 
