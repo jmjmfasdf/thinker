@@ -64,20 +64,42 @@ def init_env_out(state, info, flags, dim_actions, tuple_action):
     return env_out     
 
 def create_env_out(action, state, reward, done, truncated_done, info, flags):
-    
+    device = reward.device if torch.is_tensor(reward) else None
+
+    def _zeros_like_reward(shape_like):
+        if torch.is_tensor(reward):
+            return torch.zeros_like(shape_like, device=device)
+        return torch.zeros_like(shape_like)
+
     aug_reward = [reward]
     if flags.im_cost > 0:
-        aug_reward.append(info["im_reward"][:, 0])
+        im_r = info.get("im_reward")
+        if im_r is None:
+            base = reward[:, 0] if torch.is_tensor(reward) else np.zeros(reward.shape[0])
+            im_r = torch.zeros_like(base, device=device) if torch.is_tensor(reward) else base
+        aug_reward.append(im_r[:, 0] if im_r.ndim > 1 else im_r)
     if flags.cur_cost > 0:
-        aug_reward.append(info["cur_reward"])
+        cur_r = info.get("cur_reward")
+        if cur_r is None:
+            base = reward[:, 0] if torch.is_tensor(reward) else np.zeros(reward.shape[0])
+            cur_r = torch.zeros_like(base, device=device) if torch.is_tensor(reward) else base
+        aug_reward.append(cur_r)
     aug_reward = torch.stack(aug_reward, dim=-1)
 
     if 'episode_return' in info:
         aug_epsoide_return = [info['episode_return']]
         if flags.im_cost > 0:
-            aug_epsoide_return.append(info["im_episode_return"])
+            im_er = info.get("im_episode_return")
+            if im_er is None:
+                base = aug_epsoide_return[0][:, 0] if torch.is_tensor(aug_epsoide_return[0]) else np.zeros_like(aug_epsoide_return[0])
+                im_er = torch.zeros_like(base, device=device) if torch.is_tensor(aug_epsoide_return[0]) else base
+            aug_epsoide_return.append(im_er)
         if flags.cur_cost > 0:
-            aug_epsoide_return.append(info["cur_episode_return"])
+            cur_er = info.get("cur_episode_return")
+            if cur_er is None:
+                base = aug_epsoide_return[0][:, 0] if torch.is_tensor(aug_epsoide_return[0]) else np.zeros_like(aug_epsoide_return[0])
+                cur_er = torch.zeros_like(base, device=device) if torch.is_tensor(aug_epsoide_return[0]) else base
+            aug_epsoide_return.append(cur_er)
         aug_epsoide_return = torch.stack(aug_epsoide_return, dim=-1)
     else:
         aug_epsoide_return = None
@@ -542,6 +564,9 @@ class Timings:
 class Wandb:
     def __init__(self, flags, subname=""):
         import wandb
+        # make sure project is non-empty; wandb requires a name
+        project = flags.project if getattr(flags, "project", "") else "thinker"
+        entity = os.getenv("WANDB_USER", "")
 
         self.wandb = wandb
         xpid = flags.full_xpid if hasattr(flags, "full_xpid") else flags.xpid
@@ -552,18 +577,27 @@ class Wandb:
         m = re.match(r"^v\d+", exp_name)
         if m:
             tags.append(m[0])
-        self.wandb.init(
-            project=flags.project,
-            config=flags,
-            entity=os.getenv("WANDB_USER", ""),
-            reinit=True,
-            # Restore parameters
-            resume="allow",
-            id=exp_name,
-            name=exp_name,
-            tags=tags,
-        )
-        self.wandb.config.update(flags, allow_val_change=True)
+        try:
+            self.wandb.init(
+                project=project,
+                config=flags,
+                entity=entity,
+                reinit=True,
+                resume="allow",  # Restore parameters
+                id=exp_name,
+                name=exp_name,
+                tags=tags,
+            )
+            self.wandb.config.update(flags, allow_val_change=True)
+        except Exception as exc:
+            # degrade gracefully so training does not crash
+            print(f"[Wandb] init failed (project={project}, entity={entity}): {exc}")
+            class _Dummy:
+                def log(self, *args, **kwargs): pass
+                def save(self, *args, **kwargs): pass
+                def finish(self, *args, **kwargs): pass
+                def Video(self, *args, **kwargs): return None
+            self.wandb = _Dummy()
 
 def compute_grad_norm(parameters, norm_type=2.0):
     grads = [p.grad for p in parameters if p.grad is not None]
