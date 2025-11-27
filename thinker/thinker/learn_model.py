@@ -347,6 +347,7 @@ class SModelLearner:
         self.bc_actor_margin = float(getattr(self.flags, "icopro_margin", 0.05))
         self.bc_actor_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
         self.bc_actor_ce_coef = float(getattr(self.flags, "icopro_ce_coef", 1.0))
+        self.bc_actor_action_diff_coef = float(getattr(self.flags, "icopro_action_diff_coef", 1.0))
         self.bc_actor_kl_coef = float(getattr(self.flags, "icopro_actor_kl_coef", 0.0))
         self.bc_actor_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
         self.bc_actor_tree_coef = float(getattr(self.flags, "icopro_tree_coef", 0.0))
@@ -461,65 +462,22 @@ class SModelLearner:
                 env_state=obs_input,
                 done=done,
                 actions=action_seq,
-                state=state,
-                future_env_state=next_input,
-                training=True,
-            )
-        losses = []
+            state=state,
+            future_env_state=next_input,
+            training=True,
+        )
         reward_loss = None
         if getattr(model_out, "rs", None) is not None:
             predicted_rewards = model_out.rs[0]
             if predicted_rewards.ndim == 2:
                 predicted_rewards = predicted_rewards[:, 0]
             reward_loss = F.mse_loss(predicted_rewards.float(), rewards.float())
-            losses.append(reward_loss)
-        policy_loss = None
-        policy_kl_loss = None
-        if getattr(model_out, "policy", None) is not None:
-            policy_logits = model_out.policy[0].float()
-            policy_logits = policy_logits.view(policy_logits.shape[0], -1)
-            policy_loss = F.cross_entropy(policy_logits, actions.long())
-            losses.append(policy_loss)
-            policy_log_probs = F.log_softmax(policy_logits, dim=-1)
-            policy_kl_loss = F.kl_div(policy_log_probs, batch["action_probs"], reduction="batchmean")
-        state_loss = None
-        if getattr(model_out, "xs", None) is not None:
-            predicted_next = model_out.xs[0]
-            target_next = self.model_net.normalize(next_input)
-            predicted_next = predicted_next.float()
-            mask = (1.0 - dones.view(-1, *([1] * (predicted_next.dim() - 1)))).to(predicted_next.dtype)
-            diff = (predicted_next - target_next) * mask
-            state_loss = torch.mean(diff ** 2)
-            losses.append(state_loss)
-        done_loss = None
-        if getattr(model_out, "done_logits", None) is not None:
-            done_logits = model_out.done_logits[0].float()
-            if done_logits.dim() > 1:
-                done_logits = done_logits.squeeze(-1)
-            done_targets = dones.float()
-            done_loss = F.binary_cross_entropy_with_logits(done_logits, done_targets)
-            losses.append(done_loss)
-        if not losses and (policy_kl_loss is None or self.bc_model_kl_coef == 0.0):
+
+        if reward_loss is None:
             return None
-        if losses:
-            total_loss = sum(losses)
-        else:
-            total_loss = torch.zeros((), device=self.device)
-        if policy_kl_loss is not None:
-            total_loss = total_loss + self.bc_model_kl_coef * policy_kl_loss
-        total_loss = self.bc_model_coef * total_loss
-        result = {"total_loss": total_loss}
-        if reward_loss is not None:
-            result["reward_loss"] = reward_loss
-        if policy_loss is not None:
-            result["policy_loss"] = policy_loss
-        if policy_kl_loss is not None:
-            result["policy_kl_loss"] = policy_kl_loss
-        if state_loss is not None:
-            result["state_loss"] = state_loss
-        if done_loss is not None:
-            result["done_loss"] = done_loss
-        return result
+
+        total_loss = self.bc_model_coef * reward_loss
+        return {"total_loss": total_loss, "reward_loss": reward_loss}
 
     def _sample_actor_bc_batch(self):
         if self.bc_loader is None:
@@ -633,6 +591,8 @@ class SModelLearner:
 
         margin_losses = []
         ce_losses = []
+        logits_steps = []
+        human_steps = []
         pvp_losses = []
         kl_losses = []
         pred_actions_all_steps = []
@@ -655,6 +615,8 @@ class SModelLearner:
             else:
                 q_values = logits
             human_actions = human_actions_seq[:, t]
+            logits_steps.append(logits)
+            human_steps.append(human_actions)
             predicted_actions = torch.argmax(logits.detach(), dim=-1)
             pred_actions_all_steps.append(predicted_actions)
             human_actions_all_steps.append(human_actions)
@@ -692,11 +654,21 @@ class SModelLearner:
             torch.stack(margin_losses).mean() if margin_losses else torch.zeros((), device=device)
         )
         ce_loss = torch.stack(ce_losses).mean() if ce_losses else torch.zeros((), device=device)
+        if logits_steps:
+            stacked_logits = torch.stack(logits_steps, dim=1)  # [B, L, A]
+            stacked_human = torch.stack(human_steps, dim=1)    # [B, L]
+            probs = F.softmax(stacked_logits, dim=-1)
+            target_onehot = F.one_hot(stacked_human, num_classes=probs.shape[-1]).float()
+            mse_per_step = torch.mean((probs - target_onehot) ** 2, dim=-1)  # [B, L]
+            action_diff_loss = mse_per_step.sum(dim=1).mean()  # sum over time per batch, mean over batch
+        else:
+            action_diff_loss = torch.zeros((), device=device)
         pvp_loss = torch.stack(pvp_losses).mean() if pvp_losses else torch.zeros((), device=device)
         kl_loss = torch.stack(kl_losses).mean() if kl_losses else torch.zeros((), device=device)
         total_loss = (
             self.bc_actor_margin_coef * margin_loss
             + self.bc_actor_ce_coef * ce_loss
+            + self.bc_actor_action_diff_coef * action_diff_loss
             + self.bc_actor_pvp_coef * pvp_loss
             + self.bc_actor_kl_coef * kl_loss
         )
@@ -717,6 +689,7 @@ class SModelLearner:
             "total_loss": total_loss,
             "margin_loss": margin_loss,
             "ce_loss": ce_loss,
+            "action_diff_loss": action_diff_loss,
             "pvp_loss": pvp_loss,
             "kl_loss": kl_loss,
             "accuracy": accuracy,
@@ -834,6 +807,7 @@ class SModelLearner:
             "total_loss": total_loss.detach().cpu().item(),
             "margin_loss": metrics["margin_loss"].detach().cpu().item(),
             "ce_loss": metrics["ce_loss"].detach().cpu().item(),
+            "action_diff_loss": metrics.get("action_diff_loss", torch.zeros(())).detach().cpu().item(),
             "pvp_loss": metrics["pvp_loss"].detach().cpu().item(),
             "kl_loss": metrics["kl_loss"].detach().cpu().item(),
             "accuracy": metrics["accuracy"],
@@ -974,6 +948,8 @@ class SModelLearner:
                 stats["icopro/actor/total_loss"] = self.latest_icopro_actor_stats["total_loss"]
                 stats["icopro/actor/margin_loss"] = self.latest_icopro_actor_stats["margin_loss"]
                 stats["icopro/actor/ce_loss"] = self.latest_icopro_actor_stats["ce_loss"]
+                if "action_diff_loss" in self.latest_icopro_actor_stats:
+                    stats["icopro/actor/action_diff_loss"] = self.latest_icopro_actor_stats["action_diff_loss"]
                 stats["icopro/actor/pvp_loss"] = self.latest_icopro_actor_stats["pvp_loss"]
                 stats["icopro/actor/kl_loss"] = self.latest_icopro_actor_stats["kl_loss"]
                 stats["icopro/actor/accuracy"] = self.latest_icopro_actor_stats["accuracy"]
