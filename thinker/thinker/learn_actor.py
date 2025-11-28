@@ -1394,8 +1394,9 @@ class SActorLearner:
                 stats["rmean_%s_episode_return" % prefix] = r
 
         if not self.disable_thinker:
+            mask_stats = last_step_real & ~next_step_real
             max_rollout_depth = (
-                (train_actor_out.max_rollout_depth[last_step_real & ~next_step_real])
+                train_actor_out.max_rollout_depth[mask_stats]
                 .detach()
                 .cpu()
                 .numpy()
@@ -1404,6 +1405,20 @@ class SActorLearner:
                 np.average(max_rollout_depth) if len(max_rollout_depth) > 0 else 0.0
             )
             stats["max_rollout_depth"] = max_rollout_depth
+
+            # fraction of primary actions equal to index 0 (noop frequency)
+            last_pri = getattr(train_actor_out, "last_pri", None)
+            if last_pri is not None:
+                last_pri_sel = last_pri[mask_stats]
+                if last_pri_sel.numel() > 0:
+                    # handle possible extra action dimension
+                    if last_pri_sel.dim() > 1:
+                        last_pri_sel = last_pri_sel[..., 0]
+                    last_pri_flat = last_pri_sel.view(-1)
+                    noop_frequency = (last_pri_flat == 0).float().mean().item()
+                else:
+                    noop_frequency = 0.0
+                stats["noop_frequency"] = noop_frequency
 
         mean_abs_v = torch.mean(torch.abs(train_actor_out.baseline)).item()
 

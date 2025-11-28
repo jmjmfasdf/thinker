@@ -105,6 +105,7 @@ icopro_batch_size: 32
 icopro_margin: 0.05
 icopro_margin_coef: 1.0
 icopro_ce_coef: 1.0
+icopro_action_diff_coef: 1.0
 icopro_pvp_coef: 0.5
 icopro_tree_coef: 0.0
 icopro_actor_lr: 0.0001
