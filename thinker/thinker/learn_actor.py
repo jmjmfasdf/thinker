@@ -1318,6 +1318,27 @@ class SActorLearner:
         losses["reg_loss"] = reg_loss
         total_loss += self.flags.reg_cost * reg_loss
 
+        # optional regularization on planning step times
+        step_time_cost = float(getattr(self.flags, "step_time_cost", 0.0))
+        step_time_loss = None
+        if step_time_cost > 0.0 and not self.disable_thinker:
+            step_times = getattr(train_actor_out, "step_times", None)
+            if step_times is not None:
+                st = step_times
+                if isinstance(st, torch.Tensor):
+                    st = st.clone()
+                else:
+                    st = torch.tensor(st, device=self.device, dtype=torch.float32)
+                # collapse any extra timing dimension (e.g. per-phase) into a scalar per (T,B)
+                if st.dim() > 2:
+                    st = st.sum(dim=-1)
+                # replace NaNs with 0 so they don't dominate the loss
+                st[torch.isnan(st)] = 0.0
+                if st.numel() > 0:
+                    step_time_loss = st.mean()
+                    total_loss += step_time_cost * step_time_loss
+                    losses["step_time_loss"] = step_time_loss
+
         if self.ppo_enable:
             if self.actor_net.discrete_action:
                 tar_pri_log_prob = F.log_softmax(base_pri_logits, dim=-1)

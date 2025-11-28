@@ -97,6 +97,7 @@ policy_vis_length: 20 # length of the video visualization
 profile: true # whether to output all the time statistics of the run
 parallel_actor: true # whether to use a parallel ray actor for training the actor
 float16: true # whether to use mixed precision
+step_time_cost: 0.0 # coefficient for penalizing large planning step times
 # icopro supervised integration
 icopro_data_path: ''
 icopro_subjects: '1'
