@@ -1197,6 +1197,27 @@ class SActorLearner:
             discounts.append((~done).float() * self.im_discounting)            
             masks.append(None)
 
+        # optional gradient re-weighting based on step times (no reward shaping)
+        step_time_cost = float(getattr(self.flags, "step_time_cost", 0.0))
+        time_weights = None
+        step_time_loss = None
+        if step_time_cost > 0.0 and not self.disable_thinker:
+            step_times = getattr(train_actor_out, "step_times", None)
+            if step_times is not None:
+                st = step_times
+                if not isinstance(st, torch.Tensor):
+                    st = torch.tensor(st, device=self.device, dtype=torch.float32)
+                if st.dim() > 2:
+                    st = st.sum(dim=-1)  # (T,B,K) -> (T,B)
+                st = st.clone()
+                st[torch.isnan(st)] = 0.0
+                if st.numel() > 0:
+                    # log-only metric
+                    step_time_loss = st.mean()
+                    # normalize and build per-step weights in [0,1]
+                    st_norm = (st * 1e6).clamp(min=0.0)
+                    time_weights = 1.0 / (1.0 + step_time_cost * st_norm)
+
         if not self.ppo_enable or self.flags.ppo_v_trace:
             log_rhos = new_actor_out.c_action_log_prob - train_actor_out.c_action_log_prob
         else:
@@ -1242,15 +1263,20 @@ class SActorLearner:
                 pg_loss = -torch.minimum(unclipped_is * adv, clipped_is * adv)
 
             if masks[i] is not None: pg_loss = pg_loss * masks[i]
+            if time_weights is not None: pg_loss = pg_loss * time_weights
             pg_loss = torch.sum(pg_loss)
 
             vs = v_trace.vs if not self.ppo_enable else vs
             pg_losses.append(pg_loss)
+            # combine original masks with time-based weights for baseline loss
+            mask_i = masks[i]
+            if time_weights is not None:
+                mask_i = time_weights if mask_i is None else mask_i * time_weights
             if self.flags.critic_enc_type == 0:
                 baseline_loss = compute_baseline_loss(
                     baseline=new_actor_out.baseline[:, :, i],
                     target_baseline=vs,
-                    mask=masks[i]
+                    mask=mask_i
                 )
             else:
                 baseline_loss = compute_baseline_enc_loss(
@@ -1258,7 +1284,7 @@ class SActorLearner:
                     target_baseline=vs,
                     rv_tran=self.actor_net.rv_tran,
                     enc_type=self.flags.critic_enc_type,
-                    mask=masks[i]
+                    mask=mask_i
                 )
 
             baseline_losses.append(baseline_loss)
@@ -1318,26 +1344,9 @@ class SActorLearner:
         losses["reg_loss"] = reg_loss
         total_loss += self.flags.reg_cost * reg_loss
 
-        # optional regularization on planning step times
-        step_time_cost = float(getattr(self.flags, "step_time_cost", 0.0))
-        step_time_loss = None
-        if step_time_cost > 0.0 and not self.disable_thinker:
-            step_times = getattr(train_actor_out, "step_times", None)
-            if step_times is not None:
-                st = step_times
-                if isinstance(st, torch.Tensor):
-                    st = st.clone()
-                else:
-                    st = torch.tensor(st, device=self.device, dtype=torch.float32)
-                # collapse any extra timing dimension (e.g. per-phase) into a scalar per (T,B)
-                if st.dim() > 2:
-                    st = st.sum(dim=-1)
-                # replace NaNs with 0 so they don't dominate the loss
-                st[torch.isnan(st)] = 0.0
-                if st.numel() > 0:
-                    step_time_loss = st.mean()
-                    total_loss += step_time_cost * step_time_loss
-                    losses["step_time_loss"] = step_time_loss
+        # log average step time (no direct penalty on total_loss)
+        if step_time_loss is not None:
+            losses["step_time_loss"] = step_time_loss
 
         if self.ppo_enable:
             if self.actor_net.discrete_action:
