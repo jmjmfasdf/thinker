@@ -21,8 +21,21 @@ from gymnasium import spaces
 from thinker.bc_loader import FrameStackedBehavioralDataLoader
 from thinker.dataset_env import BehaviorSequenceVectorEnv
 from thinker.model_net import ModelNet
-from imitation import ThinkerPolicyAdapter, dqfd_margin_loss
 from thinker.cenv import cModelWrapper
+
+def dqfd_margin_loss(q_values: torch.Tensor, actions: torch.Tensor, margin: torch.Tensor) -> torch.Tensor:
+    if q_values.ndim != 2:
+        raise ValueError("q_values must be 2D")
+    batch_size, num_actions = q_values.shape
+    actions = actions.view(batch_size, 1)
+    margin = margin.view(batch_size, 1)
+    margin_matrix = margin.repeat(1, num_actions)
+    zeros = torch.zeros_like(margin)
+    margin_matrix.scatter_(1, actions, zeros)
+    q_selected = q_values.gather(1, actions)
+    max_margin = torch.max(q_values + margin_matrix, dim=1, keepdim=True)[0]
+    loss = max_margin - q_selected
+    return loss.mean()
 
 def compute_baseline_loss(
     baseline,
@@ -236,7 +249,6 @@ class SActorLearner:
         )
         self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
         self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
-        self.bc_ce_coef = float(getattr(self.flags, "icopro_ce_coef", 1.0))
         self.bc_action_diff_coef = float(
             getattr(self.flags, "icopro_action_diff_coef", 1.0)
         )
@@ -488,7 +500,7 @@ class SActorLearner:
         im_ep_ret = torch.zeros(batch_size, device=actor_device)
         cur_ep_ret = torch.zeros(batch_size, device=actor_device)
 
-        margin_losses, ce_losses, pvp_losses, action_diff_losses = [], [], [], []
+        margin_losses, pvp_losses, action_diff_losses = [], [], []
         all_pred_actions = []
         all_human_actions = []
 
@@ -579,8 +591,6 @@ class SActorLearner:
                 device=actor_device,
             )
             margin_losses.append(dqfd_margin_loss(logits_step, human_actions, margin_tensor))
-            if self.bc_ce_coef > 0.0:
-                ce_losses.append(F.cross_entropy(logits_step, human_actions))
             if self.bc_pvp_coef > 0.0:
                 q_human = logits_step.gather(1, human_actions.unsqueeze(1)).squeeze(1)
                 q_agent = logits_step.gather(1, pred_actions.unsqueeze(1)).squeeze(1)
@@ -600,11 +610,6 @@ class SActorLearner:
             if margin_losses
             else torch.zeros((), device=actor_device)
         )
-        ce_loss = (
-            torch.stack(ce_losses).mean()
-            if ce_losses
-            else torch.zeros((), device=actor_device)
-        )
         pvp_loss = (
             torch.stack(pvp_losses).mean()
             if pvp_losses
@@ -619,7 +624,6 @@ class SActorLearner:
 
         total_loss = (
             self.bc_margin_coef * margin_loss
-            + self.bc_ce_coef * ce_loss
             + self.bc_pvp_coef * pvp_loss
             + self.bc_kl_coef * kl_loss
             + self.bc_action_diff_coef * action_diff_loss
@@ -643,7 +647,6 @@ class SActorLearner:
         return {
             "total_loss": total_loss,
             "margin_loss": margin_loss,
-            "ce_loss": ce_loss,
             "action_diff_loss": action_diff_loss,
             "pvp_loss": pvp_loss,
             "kl_loss": kl_loss,
@@ -750,14 +753,12 @@ class SActorLearner:
             logits = logits[:, 0, :]
         margin_tensor = torch.full((human_actions.shape[0],), self.bc_margin, dtype=torch.float32, device=self.device)
         margin_loss = dqfd_margin_loss(logits, human_actions, margin_tensor)
-        ce_loss = F.cross_entropy(logits, human_actions) if self.bc_ce_coef > 0.0 else torch.zeros((), device=self.device)
         # action difference loss: cross-entropy between logits and human action
         action_diff_loss = F.cross_entropy(logits, human_actions)
         kl_loss = torch.zeros((), device=self.device)
         pvp_loss = torch.zeros((), device=self.device)
         total_loss = (
             self.bc_margin_coef * margin_loss
-            + self.bc_ce_coef * ce_loss
             + self.bc_pvp_coef * pvp_loss
             + self.bc_kl_coef * kl_loss
             + self.bc_action_diff_coef * action_diff_loss
@@ -766,7 +767,6 @@ class SActorLearner:
         return {
             "total_loss": total_loss,
             "margin_loss": margin_loss,
-            "ce_loss": ce_loss,
             "action_diff_loss": action_diff_loss,
             "pvp_loss": pvp_loss,
             "kl_loss": kl_loss,
@@ -793,7 +793,6 @@ class SActorLearner:
         out = {
             "total_loss": total_loss.detach().cpu().item(),
             "margin_loss": metrics["margin_loss"].detach().cpu().item(),
-            "ce_loss": metrics["ce_loss"].detach().cpu().item(),
             "pvp_loss": metrics["pvp_loss"].detach().cpu().item(),
             "kl_loss": metrics["kl_loss"].detach().cpu().item() if torch.is_tensor(metrics["kl_loss"]) else float(metrics["kl_loss"]),
             "accuracy": metrics["accuracy"],
@@ -1022,7 +1021,6 @@ class SActorLearner:
             if self.latest_icopro_actor_stats:
                 stats["icopro/actor/total_loss"] = self.latest_icopro_actor_stats["total_loss"]
                 stats["icopro/actor/margin_loss"] = self.latest_icopro_actor_stats["margin_loss"]
-                stats["icopro/actor/ce_loss"] = self.latest_icopro_actor_stats["ce_loss"]
                 stats["icopro/actor/pvp_loss"] = self.latest_icopro_actor_stats["pvp_loss"]
                 stats["icopro/actor/kl_loss"] = self.latest_icopro_actor_stats.get("kl_loss", 0.0)
                 if "action_diff_loss" in self.latest_icopro_actor_stats:

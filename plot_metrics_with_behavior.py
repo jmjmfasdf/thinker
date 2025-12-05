@@ -12,10 +12,10 @@ import numpy as np
 
 import fig_pong
 from behavior_similarity_copy import (
+    THINKER_SCORE_PLACEHOLDER,
     StepMetrics as BehaviorStepMetrics,
     _build_step_metrics,
     _load_human_metrics,
-    _load_thinker_file_metrics,
     _plot_metrics,
     _summarize,
 )
@@ -42,7 +42,7 @@ def _to_step_number(step_token: str) -> Optional[int]:
 
 def _collect_behavior_differences(subject: int,
                                   game_number: int,
-                                  thinker_dir: Path,
+                                  metrics_dir: Path,
                                   human_dir: Path) -> Tuple[
                                       Tuple[BehaviorStepMetrics, ...],
                                       Dict[str, Dict[int, Tuple[float, float]]],
@@ -50,7 +50,42 @@ def _collect_behavior_differences(subject: int,
     """Compute noop and score differences per Thinker step grouped by game."""
 
     human = _load_human_metrics(subject, game_number, human_dir)
-    thinker_files = _load_thinker_file_metrics(thinker_dir)
+    thinker_files: Dict[str, list] = {}
+
+    metric_paths = sorted(
+        glob.glob(os.path.join(metrics_dir, "*.npz"))
+        + glob.glob(os.path.join(metrics_dir, "*.npy"))
+    )
+    for file_path in metric_paths:
+        filename = os.path.basename(file_path)
+        stem, _ = os.path.splitext(filename)  # e.g. spaceinvaders_1e6_0
+        parts = stem.split("_")
+        if len(parts) < 3:
+            continue
+        game_token = "_".join(parts[:-2])
+        step_token = parts[-2]
+        step_key = f"{game_token}_{step_token}"
+
+        try:
+            metrics = _load_metrics_file(file_path)
+        except Exception as exc:  # pragma: no cover - diagnostics
+            print(f"Failed to load metrics from {file_path}: {exc}")
+            continue
+
+        actions = np.asarray(metrics.get("action", []), dtype=int)
+        if actions.size == 0:
+            continue
+        valid_mask = actions >= 0
+        if not np.any(valid_mask):
+            continue
+        noop_ratio = float(np.mean(actions[valid_mask] == 0))
+        score = float(THINKER_SCORE_PLACEHOLDER.get(stem, math.nan))
+
+        # Minimal container matching the interface expected by _build_step_metrics.
+        thinker_files.setdefault(step_key, []).append(
+            type("Metric", (), {"noop_ratio": noop_ratio, "score": score})()
+        )
+
     step_metrics = tuple(_build_step_metrics(human, thinker_files))
 
     per_game: Dict[str, Dict[int, Tuple[float, float]]] = defaultdict(dict)
@@ -69,7 +104,7 @@ def _collect_behavior_differences(subject: int,
 
         score_diff = math.nan
         if math.isfinite(sm.human_mean_score) and math.isfinite(sm.thinker_mean_score):
-            score_diff = sm.human_mean_score - sm.thinker_mean_score
+            score_diff =  sm.thinker_mean_score - sm.human_mean_score
 
         per_game[game_token][step_number] = (noop_diff, score_diff)
 
@@ -143,8 +178,6 @@ def parse_args() -> argparse.Namespace:
                         help="Stride between sliding windows (default: 1)")
     parser.add_argument("--subject", type=int, required=True, help="Human subject id (1-6)")
     parser.add_argument("--game-number", type=int, required=True, help="Game number (0-2)")
-    parser.add_argument("--thinker-dir", type=Path, required=True,
-                        help="Directory with Thinker *.npy files")
     parser.add_argument("--human-dir", type=Path, required=True,
                         help="Root directory for human behavioral data")
     parser.add_argument("--behavior-outdir", "--output-dir", dest="behavior_outdir",
@@ -165,7 +198,7 @@ def main() -> None:
     step_metrics, behavior_map = _collect_behavior_differences(
         args.subject,
         args.game_number,
-        args.thinker_dir,
+        Path(args.folder),
         args.human_dir,
     )
 

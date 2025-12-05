@@ -344,6 +344,18 @@ class Env(gym.Wrapper):
     def _write_send_model_buffer(self, state, reward, done, truncated_done, info, primary_action, action_prob):
         real_step_mask = (info["step_status"] == 0) | (info["step_status"] == 3)
         reward = reward.unsqueeze(-1)
+        step_times = info.get("step_times", None)
+        if step_times is not None:
+            if isinstance(step_times, torch.Tensor):
+                st = step_times
+            else:
+                st = torch.tensor(step_times)
+            st = st[real_step_mask]
+            step_times_np = st.detach().cpu().numpy().astype(np.float32)
+        else:
+            # keep key shape consistent even if timing is disabled
+            b = int(real_step_mask.sum().item())
+            step_times_np = np.zeros((b, 1), dtype=np.float32)
         data = {
                 "baseline": info["baseline"][real_step_mask],
                 "action": primary_action[real_step_mask],            
@@ -351,6 +363,7 @@ class Env(gym.Wrapper):
                 "done": done[real_step_mask],
                 "truncated_done": truncated_done[real_step_mask],
                 "real_state": info["real_states_np"][real_step_mask.cpu().numpy()],
+                "step_times": step_times_np,
             }       
 
         per_state = info["initial_per_state"] if "initial_per_state"  in info else {}

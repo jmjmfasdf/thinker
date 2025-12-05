@@ -830,8 +830,13 @@ def calculate_action_diversities(data, real_indices):
 
     return np.array(action_diversities)
 
-def create_step_analysis_plots(gamename, step_data, output_dir):
-    """Step별 분석 결과를 그래프로 생성"""
+def create_step_analysis_plots(gamename, step_data, output_dir,
+                               behavior_series=None, score_series=None):
+    """Step별 분석 결과를 그래프로 생성.
+
+    behavior_series, score_series 인자는 호환성을 위해 받지만,
+    현재 구현에서는 사용하지 않는다.
+    """
     
     # 9개 그래프 생성
     plot_configs = [

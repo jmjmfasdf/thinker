@@ -16,6 +16,20 @@ import gc
 from collections import namedtuple
 from thinker.bc_loader import FrameStackedBehavioralDataLoader
 
+def dqfd_margin_loss(q_values: torch.Tensor, actions: torch.Tensor, margin: torch.Tensor) -> torch.Tensor:
+    if q_values.ndim != 2:
+        raise ValueError("q_values must be 2D")
+    batch_size, num_actions = q_values.shape
+    actions = actions.view(batch_size, 1)
+    margin = margin.view(batch_size, 1)
+    margin_matrix = margin.repeat(1, num_actions)
+    zeros = torch.zeros_like(margin)
+    margin_matrix.scatter_(1, actions, zeros)
+    q_selected = q_values.gather(1, actions)
+    max_margin = torch.max(q_values + margin_matrix, dim=1, keepdim=True)[0]
+    loss = max_margin - q_selected
+    return loss.mean()
+
 def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_prob, is_weights, mask=None):
     k, b, d, _ = policy.shape
     if discrete_action:
@@ -292,6 +306,10 @@ class SModelLearner:
         self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
         self.bc_model_coef = float(getattr(self.flags, "icopro_model_coef", 1.0))
         self.bc_model_kl_coef = float(getattr(self.flags, "icopro_model_kl_coef", 0.0))
+        # Reuse IcoPro actor hyperparameters for model policy shaping
+        self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
+        self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
+        self.bc_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
 
         data_path = getattr(self.flags, "icopro_data_path", "")
         if not data_path:
@@ -392,10 +410,10 @@ class SModelLearner:
                 env_state=obs_input,
                 done=done,
                 actions=action_seq,
-            state=state,
-            future_env_state=next_input,
-            training=True,
-        )
+                state=state,
+                future_env_state=next_input,
+                training=True,
+            )
         reward_loss = None
         if getattr(model_out, "rs", None) is not None:
             predicted_rewards = model_out.rs[0]
@@ -403,11 +421,58 @@ class SModelLearner:
                 predicted_rewards = predicted_rewards[:, 0]
             reward_loss = F.mse_loss(predicted_rewards.float(), rewards.float())
 
-        if reward_loss is None:
+        margin_loss = None
+        pvp_loss = None
+
+        # Optional policy-based margin / PVP losses for model_net (IcoPro-style)
+        if getattr(model_out, "policy", None) is not None and self.model_net.discrete_action:
+            logits = model_out.policy[0].float()
+            # ensure 2D [B, num_actions]
+            if logits.dim() == 4:
+                logits = logits[:, 0]
+            if logits.dim() == 3:
+                logits = logits[:, 0, :]
+            human_actions = actions
+
+            if self.bc_margin_coef > 0.0:
+                margin_tensor = torch.full(
+                    (human_actions.shape[0],),
+                    self.bc_margin,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                margin_loss = dqfd_margin_loss(logits, human_actions, margin_tensor)
+
+            if self.bc_pvp_coef > 0.0:
+                with torch.no_grad():
+                    pred_actions = torch.argmax(logits, dim=-1)
+                q_human = logits.gather(1, human_actions.unsqueeze(1)).squeeze(1)
+                q_agent = logits.gather(1, pred_actions.unsqueeze(1)).squeeze(1)
+                pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
+                diff = (pred_actions != human_actions).float()
+                if diff.sum() > 0:
+                    pvp_neg = F.mse_loss(diff * q_agent, diff * (-torch.ones_like(q_agent)))
+                else:
+                    pvp_neg = torch.zeros_like(pvp_pos)
+                pvp_loss = pvp_pos + pvp_neg
+
+        if reward_loss is None and margin_loss is None and pvp_loss is None:
             return None
 
-        total_loss = self.bc_model_coef * reward_loss
-        return {"total_loss": total_loss, "reward_loss": reward_loss}
+        total_loss = torch.zeros((), device=self.device)
+        metrics = {}
+        if reward_loss is not None:
+            total_loss = total_loss + self.bc_model_coef * reward_loss
+            metrics["reward_loss"] = reward_loss
+        if margin_loss is not None:
+            total_loss = total_loss + self.bc_margin_coef * margin_loss
+            metrics["margin_loss"] = margin_loss
+        if pvp_loss is not None:
+            total_loss = total_loss + self.bc_pvp_coef * pvp_loss
+            metrics["pvp_loss"] = pvp_loss
+
+        metrics["total_loss"] = total_loss
+        return metrics
 
     def _maybe_run_bc_update(self):
         """Optional supervised update of the model using behavioral data."""
@@ -573,6 +638,10 @@ class SModelLearner:
                     stats["icopro/model/state_loss"] = self.latest_icopro_model_stats["state_loss"]
                 if "done_loss" in self.latest_icopro_model_stats:
                     stats["icopro/model/done_loss"] = self.latest_icopro_model_stats["done_loss"]
+                if "margin_loss" in self.latest_icopro_model_stats:
+                    stats["icopro/model/margin_loss"] = self.latest_icopro_model_stats["margin_loss"]
+                if "pvp_loss" in self.latest_icopro_model_stats:
+                    stats["icopro/model/pvp_loss"] = self.latest_icopro_model_stats["pvp_loss"]
             self.plogger.log(stats)
             self.latest_icopro_model_stats = None
             if self.timing is not None:
@@ -728,6 +797,22 @@ class SModelLearner:
         vp_net = self.model_net.vp_net
         initial_per_state = {sk: getattr(train_model_out, sk)[0] for sk in train_model_out._fields if sk.startswith("per")}
 
+        # Optional gradient re-weighting based on step times (similar to actor)
+        step_time_cost = float(getattr(self.flags, "step_time_cost", 0.0))
+        step_time_loss = None
+        if step_time_cost > 0.0 and hasattr(train_model_out, "step_times"):
+            st = getattr(train_model_out, "step_times", None)
+            if st is not None:
+                if not isinstance(st, torch.Tensor):
+                    st = torch.tensor(st, device=self.device, dtype=torch.float32)
+                if st.dim() > 2:
+                    st = st.sum(dim=-1)  # (T,B,K) -> (T,B)
+                st = st.clone()
+                st[torch.isnan(st)] = 0.0
+                if st.numel() > 0:
+                    # For logging / regularization
+                    step_time_loss = st.mean()
+
         if self.flags.model_mem_unroll_len > 0:
             past_env_state_norm = self.model_net.normalize(train_model_out.initial_per_state["past_real_state"])
             past_done = train_model_out.initial_per_state["past_done"]
@@ -835,6 +920,10 @@ class SModelLearner:
                 losses["done_loss"] = done_loss
         if self.flags.model_reg_loss_cost > 0.0:
             total_loss = total_loss + self.flags.model_reg_loss_cost * reg_loss
+
+        if step_time_loss is not None and step_time_cost > 0.0:
+            total_loss = total_loss + step_time_cost * step_time_loss
+            losses["step_time_loss"] = step_time_loss
 
         losses["total_loss_p"] = total_loss
 
