@@ -240,6 +240,9 @@ class SActorLearner:
         self.bc_policy_adapter = None
         self.bc_optimizer = None
         self.bc_enabled = False
+        self.action_prior = None
+        self.action_prior_ema = None
+        self.action_prior_ema_beta = float(getattr(self.flags, "action_prior_ema", 0.05))
         self.bc_step = 0
         self.bc_batch_size = max(
             1, int(getattr(self.flags, "icopro_batch_size", 32))
@@ -297,6 +300,27 @@ class SActorLearner:
             self._logger.warning("IcoPro actor data loader found no files; disabling supervised actor loss.")
             self.bc_loader = None
             return
+        action_prior = np.asarray(self.bc_loader.action_distribution, dtype=np.float32)
+        if action_prior.shape[0] != self.actor_net.num_actions:
+            self._logger.warning(
+                "Human action prior size mismatch: %d (data) vs %d (policy); skipping prior regularizer.",
+                action_prior.shape[0],
+                self.actor_net.num_actions,
+            )
+        else:
+            prior_sum = float(np.sum(action_prior))
+            if prior_sum <= 0.0 or not np.isfinite(prior_sum):
+                action_prior = np.full(
+                    self.actor_net.num_actions,
+                    1.0 / self.actor_net.num_actions,
+                    dtype=np.float32,
+                )
+            else:
+                action_prior = action_prior / prior_sum
+            self.action_prior = torch.tensor(
+                action_prior, dtype=torch.float32, device=self.device
+            )
+            self._logger.info("Loaded human action prior for RL regularizer.")
         lr = float(getattr(self.flags, "icopro_actor_lr", 0.0))
         if lr <= 0:
             self._logger.info("icopro_actor_lr <= 0; supervised actor updates disabled.")
@@ -1197,9 +1221,12 @@ class SActorLearner:
 
         # optional gradient re-weighting based on step times (no reward shaping)
         step_time_cost = float(getattr(self.flags, "step_time_cost", 0.0))
+        step_time_cost_reward = float(getattr(self.flags, "step_time_cost_reward", 0.0))
+        step_time_cost_weight = float(getattr(self.flags, "step_time_cost_weight", step_time_cost))
         time_weights = None
         step_time_loss = None
-        if step_time_cost > 0.0 and not self.disable_thinker:
+        step_time_penalty = None
+        if (step_time_cost_weight > 0.0 or step_time_cost_reward > 0.0) and not self.disable_thinker:
             step_times = getattr(train_actor_out, "step_times", None)
             if step_times is not None:
                 st = step_times
@@ -1213,8 +1240,33 @@ class SActorLearner:
                     # log-only metric
                     step_time_loss = st.mean()
                     # normalize and build per-step weights in [0,1]
-                    st_norm = (st * 1e6).clamp(min=0.0)
-                    time_weights = 1.0 / (1.0 + step_time_cost * st_norm)
+                    st_norm_weight = (st * 1e6).clamp(min=0.0)
+                    time_weights = 1.0 / (1.0 + step_time_cost_weight * st_norm_weight)
+                    if step_time_cost_reward > 0.0:
+                        # reward shaping uses a milder ms scale
+                        st_norm_reward = (st * 1e3).clamp(min=0.0)
+                        step_time_penalty = step_time_cost_reward * st_norm_reward
+
+        if step_time_penalty is not None:
+            st_pen = step_time_penalty
+            if st_pen.dim() == 1:
+                st_pen = st_pen.view(-1, 1)
+            if st_pen.dim() == 2:
+                # align batch dim; allow (B,T) transpose case
+                if st_pen.shape[0] == rewards.shape[1] and st_pen.shape[1] == rewards.shape[0]:
+                    st_pen = st_pen.transpose(0, 1)
+                elif st_pen.shape[1] == 1 and rewards.shape[1] > 1:
+                    st_pen = st_pen.expand(-1, rewards.shape[1])
+            if st_pen.shape[0] != rewards.shape[0]:
+                st_pen = st_pen[-rewards.shape[0]:]
+            if st_pen.shape[1] != rewards.shape[1]:
+                if st_pen.shape[1] == 1:
+                    st_pen = st_pen.expand(-1, rewards.shape[1])
+                else:
+                    raise ValueError(f"step_time_penalty shape {st_pen.shape} incompatible with rewards {rewards.shape[:2]}")
+            st_pen = st_pen.unsqueeze(-1)  # (T,B,1)
+            rewards = rewards.clone()
+            rewards[:, :, 0] = rewards[:, :, 0] - st_pen.squeeze(-1)
 
         if not self.ppo_enable or self.flags.ppo_v_trace:
             log_rhos = new_actor_out.c_action_log_prob - train_actor_out.c_action_log_prob
@@ -1341,6 +1393,41 @@ class SActorLearner:
         reg_loss = torch.sum(new_actor_out.reg_loss)        
         losses["reg_loss"] = reg_loss
         total_loss += self.flags.reg_cost * reg_loss
+
+        action_prior_weight = float(getattr(self.flags, "action_prior_weight", 0.0))
+        if (
+            action_prior_weight > 0.0
+            and self.action_prior is not None
+            and self.actor_net.discrete_action
+        ):
+            pri_logits = new_actor_out.pri_param
+            if pri_logits.dim() == 4:
+                pri_logits = pri_logits[:, :, 0, :]
+            elif pri_logits.dim() == 2:
+                pri_logits = pri_logits.unsqueeze(0)
+            pri_probs = F.softmax(pri_logits, dim=-1)
+            real_mask = last_step_real.float().unsqueeze(-1)
+            denom = real_mask.sum()
+            if denom > 0:
+                p_batch = (pri_probs * real_mask).sum(dim=(0, 1)) / denom
+                p_batch = p_batch / p_batch.sum()
+                ema_beta = min(max(self.action_prior_ema_beta, 0.0), 1.0)
+                if self.action_prior_ema is None:
+                    p_smooth = p_batch
+                else:
+                    p_smooth = (
+                        (1.0 - ema_beta) * self.action_prior_ema
+                        + ema_beta * p_batch
+                    )
+                self.action_prior_ema = p_smooth.detach()
+                eps = 1e-8
+                p_smooth = p_smooth.clamp_min(eps)
+                p_target = self.action_prior.clamp_min(eps)
+                action_prior_loss = torch.sum(
+                    p_smooth * (torch.log(p_smooth) - torch.log(p_target))
+                )
+                losses["action_prior_loss"] = action_prior_loss
+                total_loss += action_prior_weight * action_prior_loss
 
         # log average step time (no direct penalty on total_loss)
         if step_time_loss is not None:

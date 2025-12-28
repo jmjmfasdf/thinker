@@ -3,7 +3,7 @@
 has_model: true # whether the model exists
 train_model: true # whether to train the model
 model_batch_size: 128 # training batch size of the model
-model_learning_rate: 0.0001 # model learning rate
+model_learning_rate: 0.0003 # model learning rate
 model_optimizer: 'adam' # can be adam or sgd
 model_sgd_momentum: 0.9
 model_sgd_weight_decay: 0.0001
@@ -103,6 +103,8 @@ parallel: false # whether to use a parallel ray actor for training the model
 float16: false # whether to use mixed precision
 base_seed: 1 # base seed for the gym environment
 project: ''
+step_time_cost_weight: 0.0 # coefficient for gradient re-weighting based on step time
+step_time_cost_reward: 0.0 # coefficient for reward shaping based on step time
 # ray resources
 ray_mem: -1 # default initialized ray memory
 ray_gpu: -1 # number of initial gpu (set to -1 for auto detect)

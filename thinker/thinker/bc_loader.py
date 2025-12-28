@@ -132,7 +132,7 @@ class FrameStackedBehavioralDataLoader:
         return int(action_entry)
 
     def _create_forward_stack(self, images: np.ndarray, start_idx: int) -> np.ndarray:
-        """Create a non-overlapping frame stack starting at start_idx (frames start_idx ... start_idx+frame_stack_n-1)."""
+        """Create a frame stack starting at start_idx using consecutive frames (start_idx ... start_idx+frame_stack_n-1)."""
         frames = []
         for offset in range(self.frame_stack_n):
             frame_idx = start_idx + offset
@@ -185,8 +185,8 @@ class FrameStackedBehavioralDataLoader:
     
     def get_sequence_batch(self, batch_size: int = 1, sequence_length: int = 2) -> Optional[Dict[str, np.ndarray]]:
         """
-        Get a batch of non-overlapping frame-stack sequences for imitation learning.
-        Each observation stack uses consecutive frames with stride=frame_stack_n
+        Get a batch of frame-stack sequences for imitation learning.
+        Each observation stack uses consecutive frames with stride=1 between stacked observations,
         and the human action is taken from the first frame of each stack.
 
         Args:
@@ -261,7 +261,7 @@ class FrameStackedBehavioralDataLoader:
     def _sample_nonoverlap_sequences_from_file(
         self, file_idx: int, num_samples: int, sequence_length: int
     ) -> Optional[List[Dict[str, np.ndarray]]]:
-        """Sample non-overlapping stacked sequences from a single file."""
+        """Sample stacked sequences from a single file (stack starts slide by 1 frame within a sequence)."""
         if file_idx >= len(self.data_files):
             return None
         try:
@@ -275,7 +275,10 @@ class FrameStackedBehavioralDataLoader:
             print(f"[WARNING] Failed to load file {self.data_files[file_idx]}: {e}")
             return None
 
-        frames_per_seq = self.frame_stack_n * sequence_length
+        # Total raw frames needed for a sequence when stacked obs start 1 frame apart:
+        # first stack uses frames [start, start+stack_n-1], last stack starts at start+(L-1)
+        # and uses up to start+(L-1)+(stack_n-1) => stack_n + L - 1 frames.
+        frames_per_seq = self.frame_stack_n + sequence_length - 1
         candidates: List[int] = []
         for start, end in self._enumerate_episode_spans(is_first, is_terminal):
             max_start = end - frames_per_seq + 1
@@ -299,7 +302,8 @@ class FrameStackedBehavioralDataLoader:
             actions_seq = []
             rewards_seq = []
             for t in range(sequence_length):
-                stack_start = start_idx + t * self.frame_stack_n
+                # shift stacked observations by 1 frame each step
+                stack_start = start_idx + t
                 obs_seq.append(self._create_forward_stack(images, stack_start))
                 actions_seq.append(self._action_index(actions[stack_start]))
                 rewards_seq.append(

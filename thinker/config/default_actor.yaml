@@ -9,7 +9,7 @@ reward_clip: -1.0 # reward clipping; if positve, the reward is clipped within th
 # training setting
 train_actor: true # whether to train actor
 total_steps: 100000000 # total number of real steps to train 1e8
-actor_learning_rate: 0.0002 # actor learning rate
+actor_learning_rate: 0.0003 # actor learning rate
 actor_batch_size: 16 # actor batch size
 actor_unroll_len: 201 # unroll length used to update actor
 actor_use_rms: false # whether to use rms (default: adam) as optimizer
@@ -30,6 +30,8 @@ autotune: false # autotune the entropy_cost and im_entropy_cost
 tar_entropy_scale: 0.4 # target policy entropy; 1 for uniform policy so it should be less than 1
 tar_im_entropy_scale: 0.4 # target imaginary policy entropy; 1 for uniform policy so it should be less than 1
 reg_cost: 0.001 # regularization cost
+action_prior_weight: 0.0 # weight for action distribution regularizer vs human prior
+action_prior_ema: 0.05 # EMA update rate for action distribution regularizer
 # actor setting
 # - general
 see_real_state: True # whether to see root real state
@@ -98,6 +100,8 @@ profile: true # whether to output all the time statistics of the run
 parallel_actor: true # whether to use a parallel ray actor for training the actor
 float16: true # whether to use mixed precision
 step_time_cost: 0.0 # coefficient for penalizing large planning step times
+step_time_cost_weight: 0.0 # coefficient for gradient re-weighting based on step time
+step_time_cost_reward: 0.0 # coefficient for reward shaping based on step time
 # icopro supervised integration
 icopro_data_path: ''
 icopro_subjects: '1'
