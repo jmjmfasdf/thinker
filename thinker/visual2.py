@@ -18,6 +18,10 @@ from thinker.util import init_env_out, create_env_out
 from thinker.actor_net import ActorNet
 import thinker.util as util
 import gym
+from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+from pytorch_grad_cam.utils.image import show_cam_on_image
+_HAS_GRADCAM = True
 
 def plot_gym_env_out(x, ax=None, title=None):
     if ax is None:
@@ -289,6 +293,158 @@ def _extract_tree_rep_vector(actor_out):
     vec = tensor[-1, 0]
     return vec.cpu().numpy()
 
+def _unwrap_actor_net(actor_net):
+    if hasattr(actor_net, "actor"):
+        candidate = getattr(actor_net, "actor")
+        if isinstance(candidate, torch.nn.Module):
+            return candidate
+    return actor_net
+
+def _resolve_real_cam_layer(actor_net):
+    net = _unwrap_actor_net(actor_net)
+    encoder = getattr(net, "real_state_encoder", None)
+    if encoder is None:
+        return None
+    if hasattr(encoder, "resnet2") and len(encoder.resnet2) > 0:
+        return encoder.resnet2[-1]
+    if hasattr(encoder, "feat_convs") and len(encoder.feat_convs) > 0:
+        return encoder.feat_convs[-1]
+    return None
+
+def _resolve_x_cam_layer(actor_net):
+    net = _unwrap_actor_net(actor_net)
+    encoder = getattr(net, "x_encoder_pre", None)
+    if encoder is None:
+        return None
+    if hasattr(encoder, "resnet2") and len(encoder.resnet2) > 0:
+        return encoder.resnet2[-1]
+    if hasattr(encoder, "feat_convs") and len(encoder.feat_convs) > 0:
+        return encoder.feat_convs[-1]
+    return None
+
+def _describe_real_encoder(actor_net):
+    net = _unwrap_actor_net(actor_net)
+    lines = []
+    lines.append(f"actor_net type: {type(net).__name__}")
+    encoder = getattr(net, "real_state_encoder", None)
+    if encoder is None:
+        lines.append("real_state_encoder: None")
+        return "; ".join(lines)
+    lines.append(f"real_state_encoder type: {type(encoder).__name__}")
+    lines.append(f"real_state_encoder.oned_input: {getattr(encoder, 'oned_input', None)}")
+    lines.append(f"has resnet2: {hasattr(encoder, 'resnet2')}")
+    lines.append(f"has feat_convs: {hasattr(encoder, 'feat_convs')}")
+    if hasattr(encoder, "resnet2"):
+        lines.append(f"resnet2 len: {len(encoder.resnet2)}")
+    if hasattr(encoder, "feat_convs"):
+        lines.append(f"feat_convs len: {len(encoder.feat_convs)}")
+    return "; ".join(lines)
+
+def _describe_x_encoder(actor_net):
+    net = _unwrap_actor_net(actor_net)
+    lines = []
+    lines.append(f"actor_net type: {type(net).__name__}")
+    encoder = getattr(net, "x_encoder_pre", None)
+    if encoder is None:
+        lines.append("x_encoder_pre: None")
+        return "; ".join(lines)
+    lines.append(f"x_encoder_pre type: {type(encoder).__name__}")
+    lines.append(f"x_encoder_pre.oned_input: {getattr(encoder, 'oned_input', None)}")
+    lines.append(f"has resnet2: {hasattr(encoder, 'resnet2')}")
+    lines.append(f"has feat_convs: {hasattr(encoder, 'feat_convs')}")
+    if hasattr(encoder, "resnet2"):
+        lines.append(f"resnet2 len: {len(encoder.resnet2)}")
+    if hasattr(encoder, "feat_convs"):
+        lines.append(f"feat_convs len: {len(encoder.feat_convs)}")
+    return "; ".join(lines)
+
+def _detach_actor_state(actor_state):
+    if actor_state is None:
+        return None
+    detached = []
+    for state in actor_state:
+        if torch.is_tensor(state):
+            detached.append(state.detach())
+        else:
+            detached.append(state)
+    return tuple(detached)
+
+def _extract_action_index(actor_out):
+    if actor_out is None or actor_out.pri is None:
+        return None
+    if not torch.is_tensor(actor_out.pri):
+        return None
+    pri = actor_out.pri
+    if pri.dim() < 3:
+        return None
+    return int(pri[-1, 0, 0].item())
+
+def _prepare_cam_image(real_img):
+    if real_img is None or real_img.ndim != 3:
+        return None
+    if real_img.shape[0] in (1, 3) or real_img.shape[0] > 3:
+        img = np.transpose(real_img, (1, 2, 0))
+    else:
+        img = real_img
+    if img.shape[2] == 1:
+        img = np.repeat(img, 3, axis=2)
+    elif img.shape[2] > 3:
+        img = img[:, :, -3:]
+    if img.dtype != np.float32:
+        img = img.astype(np.float32)
+    if img.max() > 1.0:
+        img = img / 255.0
+    img = np.clip(img, 0.0, 1.0)
+    return img
+
+class ActorRealCamWrapper(torch.nn.Module):
+    def __init__(self, actor_net):
+        super().__init__()
+        self.actor_net = _unwrap_actor_net(actor_net)
+        self.env_out = None
+        self.actor_state = None
+
+    def set_context(self, env_out, actor_state):
+        self.env_out = env_out
+        self.actor_state = actor_state
+
+    def forward(self, real_states):
+        if self.env_out is None:
+            raise RuntimeError("Grad-CAM context env_out is not set.")
+        if real_states.dim() != 4:
+            raise ValueError("Grad-CAM expects real_states with shape (B, C, H, W).")
+        env_out = self.env_out._replace(real_states=real_states.unsqueeze(0))
+        actor_out, _ = self.actor_net(env_out, self.actor_state)
+        logits = actor_out.pri_param
+        logits = logits[-1]
+        if logits.dim() == 3:
+            logits = logits[:, 0, :]
+        return logits
+
+class ActorXCamWrapper(torch.nn.Module):
+    def __init__(self, actor_net):
+        super().__init__()
+        self.actor_net = _unwrap_actor_net(actor_net)
+        self.env_out = None
+        self.actor_state = None
+
+    def set_context(self, env_out, actor_state):
+        self.env_out = env_out
+        self.actor_state = actor_state
+
+    def forward(self, xs):
+        if self.env_out is None:
+            raise RuntimeError("Grad-CAM context env_out is not set.")
+        if xs.dim() != 4:
+            raise ValueError("Grad-CAM expects xs with shape (B, C, H, W).")
+        env_out = self.env_out._replace(xs=xs.unsqueeze(0))
+        actor_out, _ = self.actor_net(env_out, self.actor_state)
+        logits = actor_out.pri_param
+        logits = logits[-1]
+        if logits.dim() == 3:
+            logits = logits[:, 0, :]
+        return logits
+
 def _collect_encoder_vectors(env, env_out, device):
     real_vectors = None
     im_vectors = None
@@ -498,6 +654,8 @@ def visualize(
     max_frames=-1,
     use_gpu=True,  # GPU 사용 여부 추가
     save_encoder_vectors=True,  # encoder 벡터 저장 옵션 추가
+    save_gradcam=True,
+    gradcam_debug=False,
 ):        
     savedir = savedir.replace("__project__", __project__)
     ckpdir = os.path.join(savedir, xpid)      
@@ -579,6 +737,31 @@ def visualize(
         n += 1
     outdir = outdir_
 
+    gradcam = None
+    gradcam_model = None
+    if save_gradcam:
+        if not _HAS_GRADCAM:
+            print("Grad-CAM disabled: pytorch-grad-cam not available.")
+            save_gradcam = False
+        else:
+            target_layer = _resolve_x_cam_layer(actor_net)
+            if target_layer is None:
+                print("Grad-CAM disabled: x_encoder_pre layer not found.")
+                print("Grad-CAM debug:", _describe_x_encoder(actor_net))
+                save_gradcam = False
+            else:
+                gradcam_model = ActorXCamWrapper(actor_net)
+                try:
+                    gradcam = GradCAM(
+                        model=gradcam_model,
+                        target_layers=[target_layer],
+                    )
+                except Exception as exc:
+                    print(f"Grad-CAM disabled: failed to initialize ({exc})")
+                    gradcam = None
+                    gradcam_model = None
+                    save_gradcam = False
+
     # initalize env
     state, info = env.reset()
     env_out = init_env_out(state, info, flags, actor_net.dim_actions, actor_net.tuple_action)
@@ -620,6 +803,8 @@ def visualize(
     if save_encoder_vectors:
         video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
         print("Saving both images and encoder vectors")
+    if save_gradcam:
+        video_stats.update({"gradcam_real": [], "real_imgs_gradcam": []})
     
     # 메모리 효율성을 위한 최대 저장 프레임 수 제한 (전체 프레임 저장을 위해 충분히 큰 값 설정)
     max_video_frames = 10000000000000  # 최대 100,000프레임까지 저장 가능
@@ -642,6 +827,9 @@ def visualize(
     video_stats["im_imgs"].append(root_xs)
     video_stats["step_times"].append(current_step_times)
     video_stats["tree_reps_vector"].append(None)
+    if save_gradcam:
+        video_stats["gradcam_real"].append(None)
+        video_stats["real_imgs_gradcam"].append(None)
     
         # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
     if save_encoder_vectors:
@@ -684,11 +872,15 @@ def visualize(
                     print(f"Step {step}: GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
                     print(f"Video frames stored: {len(video_stats['real_imgs'])}")
         
+        actor_state_for_cam = None
+        if save_gradcam:
+            actor_state_for_cam = _detach_actor_state(actor_state)
         actor_out, actor_state = actor_net(env_out, actor_state)        
         action = actor_out.action
         tree_rep_vector = _extract_tree_rep_vector(actor_out)
 
         last_real_step = (env_out.step_status == 0) | (env_out.step_status == 3)
+        last_real_step_env_flag = bool(last_real_step.reshape(-1)[0].item())
 
         if last_real_step:
             agent_v = actor_out.baseline[0, 0, 0]
@@ -706,6 +898,76 @@ def visualize(
         last_real_step = (info["step_status"] == 0) | (info["step_status"] == 3)
         last_real_step_flag = bool(last_real_step.reshape(-1)[0].item())
         next_real_step = (info["step_status"] == 2) | (info["step_status"] == 3)
+
+        gradcam_real = None
+        gradcam_overlay = None
+        if save_gradcam and gradcam is not None and gradcam_model is not None:
+            action_index = _extract_action_index(actor_out)
+            if action_index is not None:
+                env_out_cam = env_out
+                gradcam_model.set_context(env_out_cam, actor_state_for_cam)
+                float16_prev = getattr(gradcam_model.actor_net, "float16", None)
+                if float16_prev is not None:
+                    gradcam_model.actor_net.float16 = False
+                try:
+                    if env_out.xs is None:
+                        raise RuntimeError("env_out.xs is None; cannot compute Grad-CAM from xs.")
+                    xs_tensor = env_out.xs[-1].to(device)
+                    if xs_tensor.dtype not in (torch.float32, torch.float16):
+                        xs_tensor = xs_tensor.float()
+                    xs_tensor = xs_tensor.detach().requires_grad_(True)
+                    targets = [ClassifierOutputTarget(action_index)]
+                    cam = gradcam(input_tensor=xs_tensor, targets=targets)
+                    if cam is not None and len(cam) > 0:
+                        gradcam_real = cam[0].astype(np.float32)
+                        real_img = env_out.real_states[0, 0, -copy_n:].detach().cpu().numpy()
+                        base_img = _prepare_cam_image(real_img)
+                        if base_img is not None and show_cam_on_image is not None:
+                            gradcam_overlay = show_cam_on_image(base_img, gradcam_real, use_rgb=True)
+                finally:
+                    if float16_prev is not None:
+                        gradcam_model.actor_net.float16 = float16_prev
+                if save_gradcam and len(video_stats["gradcam_real"]) == 1 and video_stats["gradcam_real"][0] is None:
+                    video_stats["gradcam_real"][0] = gradcam_real
+                    video_stats["real_imgs_gradcam"][0] = gradcam_overlay
+                if gradcam_debug:
+                    layer_act_max = None
+                    layer_grad_max = None
+                    if hasattr(gradcam, "activations_and_grads"):
+                        acts = gradcam.activations_and_grads.activations
+                        grads = gradcam.activations_and_grads.gradients
+                        if acts:
+                            layer_act_max = float(acts[-1].abs().max().item())
+                        if grads:
+                            layer_grad_max = float(grads[-1].abs().max().item())
+                    grad_val = xs_tensor.grad if 'xs_tensor' in locals() else None
+                    grad_max = None if grad_val is None else grad_val.abs().max().item()
+                    cam_max = None if gradcam_real is None else float(np.max(gradcam_real))
+                    manual_grad_max = None
+                    if gradcam_model is not None:
+                        try:
+                            gradcam_model.set_context(env_out_cam, actor_state_for_cam)
+                            float16_prev_dbg = getattr(gradcam_model.actor_net, "float16", None)
+                            if float16_prev_dbg is not None:
+                                gradcam_model.actor_net.float16 = False
+                            if env_out.xs is None:
+                                raise RuntimeError("env_out.xs is None; cannot compute Grad-CAM from xs.")
+                            xs_dbg = env_out.xs[-1].to(device).detach().clone().requires_grad_(True)
+                            logits_dbg = gradcam_model(xs_dbg)
+                            loss_dbg = logits_dbg[0, action_index]
+                            gradcam_model.zero_grad(set_to_none=True)
+                            loss_dbg.backward()
+                            manual_grad_max = float(xs_dbg.grad.abs().max().item())
+                        except Exception:
+                            manual_grad_max = None
+                        finally:
+                            if float16_prev_dbg is not None:
+                                gradcam_model.actor_net.float16 = float16_prev_dbg
+                    print(
+                        f"Grad-CAM debug step {step}: env_step_status={int(env_out.step_status[0,0].item())} "
+                        f"action_index={action_index} cam_max={cam_max} input_grad_max={grad_max} "
+                        f"layer_act_max={layer_act_max} layer_grad_max={layer_grad_max} manual_grad_max={manual_grad_max}"
+                    )
 
         if render:
             if not last_real_step:
@@ -798,6 +1060,9 @@ def visualize(
             video_stats["im_imgs"].append(xs)
             video_stats["step_times"].append(step_times)
             video_stats["tree_reps_vector"].append(tree_rep_vector)
+            if save_gradcam:
+                video_stats["gradcam_real"].append(gradcam_real)
+                video_stats["real_imgs_gradcam"].append(gradcam_overlay)
             
             # SRN encoder 벡터 저장
             if save_encoder_vectors:
@@ -828,6 +1093,9 @@ def visualize(
                 video_stats["im_imgs"].append(root_xs)
                 video_stats["step_times"].append(step_times)
                 video_stats["tree_reps_vector"].append(tree_rep_vector)
+                if save_gradcam:
+                    video_stats["gradcam_real"].append(gradcam_real)
+                    video_stats["real_imgs_gradcam"].append(gradcam_overlay)
                 reset_status = im_dict["cur_reset"][-1].item()
                 if save_encoder_vectors:
                     _append_encoder_vectors(
@@ -998,6 +1266,26 @@ def visualize(
                 video_stats["tree_reps_vector"] = None
         else:
             video_stats["tree_reps_vector"] = None
+        if "gradcam_real" in video_stats:
+            valid_cam = next((gc for gc in video_stats["gradcam_real"] if gc is not None), None)
+            if valid_cam is not None:
+                fill_cam = np.full_like(valid_cam, np.nan, dtype=np.float32)
+                video_stats["gradcam_real"] = np.stack(
+                    [gc.astype(np.float32) if gc is not None else fill_cam for gc in video_stats["gradcam_real"]],
+                    axis=0,
+                )
+            else:
+                video_stats["gradcam_real"] = None
+        if "real_imgs_gradcam" in video_stats:
+            valid_overlay = next((gi for gi in video_stats["real_imgs_gradcam"] if gi is not None), None)
+            if valid_overlay is not None:
+                fill_overlay = np.zeros_like(valid_overlay, dtype=np.uint8)
+                video_stats["real_imgs_gradcam"] = np.stack(
+                    [gi.astype(np.uint8) if gi is not None else fill_overlay for gi in video_stats["real_imgs_gradcam"]],
+                    axis=0,
+                )
+            else:
+                video_stats["real_imgs_gradcam"] = None
         # gen_video(video_stats, outdir)
         np.save(os.path.join(outdir, "video_stat.npy"), video_stats)
 
@@ -1034,6 +1322,18 @@ if __name__ == "__main__":
         type=bool,
         help="Whether to save SRN encoder vectors in addition to images",
     )
+    parser.add_argument(
+        "--save_gradcam",
+        default=True,
+        type=bool,
+        help="Whether to save Grad-CAM heatmaps for real steps",
+    )
+    parser.add_argument(
+        "--gradcam_debug",
+        default=False,
+        type=bool,
+        help="Whether to print Grad-CAM gradient diagnostics",
+    )
     flags = parser.parse_args()    
     if flags.project: flags.savedir=flags.savedir.replace("__project__", flags.project)
 
@@ -1048,4 +1348,6 @@ if __name__ == "__main__":
         max_frames=flags.max_frames,
         use_gpu=flags.use_gpu,
         save_encoder_vectors=flags.save_encoder_vectors,
-    )
+        save_gradcam=flags.save_gradcam,
+        gradcam_debug=flags.gradcam_debug,
+    ) 
