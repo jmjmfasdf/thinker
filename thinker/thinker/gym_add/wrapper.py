@@ -390,6 +390,27 @@ class VectorWrap(WrapperExtended):
         info["episode_step"] = episode_step[env_id] if env_id is not None else episode_step
 
         return observation, reward, terminated, truncated, info
+
+    def current_human_action(self, env_id=None):
+        """Return current human action(s) if the underlying env provides them."""
+        try:
+            if hasattr(self.env, "current_human_action"):
+                action = self.env.current_human_action()
+                if env_id is None:
+                    return np.array(action, dtype=np.int64) if isinstance(action, (list, np.ndarray)) else np.array([action], dtype=np.int64)
+                if isinstance(env_id, (list, np.ndarray)):
+                    return np.array([action[i] for i in env_id], dtype=np.int64)
+                return np.array([action], dtype=np.int64)
+            if hasattr(self.env, "get_attr"):
+                actions = self.env.get_attr("current_human_action")
+                if env_id is None:
+                    return np.array(actions, dtype=np.int64)
+                if isinstance(env_id, (list, np.ndarray)):
+                    return np.array([actions[i] for i in env_id], dtype=np.int64)
+                return np.array([actions[env_id]], dtype=np.int64)
+        except Exception:
+            return None
+        return None
     
     def quick_save(self, env_id=None):
         if env_id is None: env_id = list(range(self.num_envs))
@@ -639,4 +660,3 @@ class DummyWrapper(gym.Wrapper):
     
 def dict_map(x, f):
     return {k:f(v) if v is not None else None for (k, v) in x.items()}    
-

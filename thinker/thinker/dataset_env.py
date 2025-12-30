@@ -15,7 +15,7 @@ class BehaviorDatasetVectorEnv:
 
     Observations are frame-stacked and resized on the fly.
     Real steps advance through precomputed logical indices (every
-    `frame_stack_n` frames within an episode). When an episode ends, the env
+    frame within an episode; stride=1). When an episode ends, the env
     immediately resets and returns the first observation of the next episode in
     the same step, mirroring EnvPoolWrap behavior.
     """
@@ -85,9 +85,16 @@ class BehaviorDatasetVectorEnv:
 
     # ---------------------- Vector env API ----------------------
     def reset(self, *, reset_stat: bool = False, seed: Optional[int] = None):
-        # Reset to the beginning if past end
-        if self._pos >= self._num_steps:
+        # Reset to an episode start (FrameStack-style behavior).
+        if self._num_steps == 0:
             self._pos = 0
+        elif self._pos >= self._num_steps:
+            self._pos = 0
+        elif not self._episode_start_flags[self._pos]:
+            next_pos = self._find_next_episode_start(self._pos)
+            self._pos = next_pos if next_pos is not None else 0
+        if reset_stat:
+            self._pos_stack.clear()
         obs = self._build_stack(self._logical_indices[self._pos])
         info = {
             "real_done": False,
@@ -176,12 +183,13 @@ class BehaviorDatasetVectorEnv:
         # Build CHW stacked observation ending at frame index `index`.
         frames: List[np.ndarray] = []
         tgt_ep = self._episode_id(index)
+        ep_start = self._episode_start_idx(index)
         for offset in range(self.frame_stack_n - 1, -1, -1):
             src = index - offset
             valid = src >= 0 and self._episode_id(src) == tgt_ep
             if not valid:
-                ch = 1 if self.grayscale else self._raw_images.shape[-1]
-                frames.append(np.zeros((ch, self.target_h, self.target_w), dtype=np.uint8))
+                # Repeat the first frame of the episode instead of zero padding.
+                frames.append(self._preprocess_frame(self._raw_images[ep_start]))
             else:
                 frames.append(self._preprocess_frame(self._raw_images[src]))
         return np.concatenate(frames, axis=0)
@@ -196,8 +204,17 @@ class BehaviorDatasetVectorEnv:
                 count += 1
         return max(0, count)
 
+    def _episode_start_idx(self, idx: int) -> int:
+        """Return the first frame index for the episode containing idx."""
+        if idx <= 0:
+            return 0
+        for i in range(idx, 0, -1):
+            if bool(self._is_first[i]):
+                return i
+        return 0
+
     def _prepare_logical_steps(self):
-        """Generate logical steps with non-overlapping stacks (stride=frame_stack_n)."""
+        """Generate logical steps with overlapping stacks (stride=1)."""
         logical_indices: List[int] = []
         reward_ranges: List[Tuple[int, int]] = []
         action_indices: List[int] = []
@@ -210,23 +227,17 @@ class BehaviorDatasetVectorEnv:
             human_actions = self._raw_actions.astype(np.int64)
 
         ep_start_ptr = 0
-        frames_since_reset = 0
         for idx in range(len(self._raw_images)):
             new_ep = idx == 0 or bool(self._is_first[idx])
             if new_ep:
                 ep_start_ptr = idx
-                frames_since_reset = 1
-            else:
-                frames_since_reset += 1
-
-            # emit only every frame_stack_n frames (non-overlapping)
-            if frames_since_reset % self.frame_stack_n == 0:
-                start_idx = max(ep_start_ptr, idx - self.frame_stack_n + 1)
-                logical_indices.append(idx)
-                reward_ranges.append((start_idx, idx + 1))
-                # action aligned with the latest frame in the block
-                action_indices.append(int(human_actions[idx]))
-                episode_starts.append(new_ep or len(logical_indices) == 1)
+            # emit every frame (overlapping stacks)
+            start_idx = max(ep_start_ptr, idx - self.frame_stack_n + 1)
+            logical_indices.append(idx)
+            reward_ranges.append((start_idx, idx + 1))
+            # action aligned with the latest frame in the block
+            action_indices.append(int(human_actions[idx]))
+            episode_starts.append(new_ep or len(logical_indices) == 1)
 
         return logical_indices, reward_ranges, action_indices, episode_starts
 

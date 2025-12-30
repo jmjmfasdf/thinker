@@ -272,6 +272,34 @@ def _extract_step_times(env_out):
         st = st[0]
     return st.cpu().numpy()
 
+def _onehot_action(action_idx, num_actions):
+    if action_idx is None:
+        return None
+    if action_idx < 0 or action_idx >= num_actions:
+        return None
+    onehot = np.zeros(num_actions, dtype=np.int64)
+    onehot[action_idx] = 1
+    return onehot
+
+def _extract_action_onehots(info, num_actions):
+    if info is None or not isinstance(info, dict):
+        return None, None
+    def _to_int(value):
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            value = value.detach().cpu().reshape(-1)
+            if value.numel() == 0:
+                return None
+            return int(value[0].item())
+        arr = np.asarray(value).reshape(-1)
+        if arr.size == 0:
+            return None
+        return int(arr[0])
+    human_idx = _to_int(info.get("human_action"))
+    thinker_idx = _to_int(info.get("thinker_action"))
+    return _onehot_action(human_idx, num_actions), _onehot_action(thinker_idx, num_actions)
+
 def _extract_tree_rep_vector(actor_out):
     if actor_out is None:
         return None
@@ -644,7 +672,7 @@ def visualize(
     im_done = False
 
     # video_stats 초기화 - 기존 이미지와 encoder 벡터 모두 저장
-    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": []}
+    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": [], "human_action": [], "thinker_action": []}
     if save_encoder_vectors:
         video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
         print("Saving both images and encoder vectors")
@@ -670,6 +698,8 @@ def visualize(
     video_stats["im_imgs"].append(root_xs)
     video_stats["step_times"].append(current_step_times)
     video_stats["tree_reps_vector"].append(None)
+    video_stats["human_action"].append(None)
+    video_stats["thinker_action"].append(None)
     
         # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
     if save_encoder_vectors:
@@ -821,11 +851,17 @@ def visualize(
                 # imagainary action
                 status_value = 2
                 reward_to_log = 0.0
+            if status_value == 0:
+                human_action_oh, thinker_action_oh = _extract_action_onehots(info, env.num_actions)
+            else:
+                human_action_oh, thinker_action_oh = None, None
             video_stats["status"].append(status_value)
             video_stats["real_imgs"].append(root_real_states)
             video_stats["im_imgs"].append(xs)
             video_stats["step_times"].append(step_times)
             video_stats["tree_reps_vector"].append(tree_rep_vector)
+            video_stats["human_action"].append(human_action_oh)
+            video_stats["thinker_action"].append(thinker_action_oh)
             
             # SRN encoder 벡터 저장
             if save_encoder_vectors:
@@ -856,6 +892,8 @@ def visualize(
                 video_stats["im_imgs"].append(root_xs)
                 video_stats["step_times"].append(step_times)
                 video_stats["tree_reps_vector"].append(tree_rep_vector)
+                video_stats["human_action"].append(None)
+                video_stats["thinker_action"].append(None)
                 reset_status = im_dict["cur_reset"][-1].item()
                 if save_encoder_vectors:
                     _append_encoder_vectors(

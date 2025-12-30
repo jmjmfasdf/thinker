@@ -287,6 +287,8 @@ cdef class cWrapper():
     cdef object per_state    
     cdef list model_states_keys
     cdef object default_info    
+    cdef object last_thinker_action
+    cdef object last_human_action
 
     cdef readonly object observation_space
     cdef readonly object action_space
@@ -563,6 +565,9 @@ cdef class cWrapper():
                 "real_states_np": self.real_states_np,          
             }
         )
+        if self.last_thinker_action is not None:
+            return_info["thinker_action"] = torch.tensor(self.last_thinker_action, device=self.device)
+            return_info["human_action"] = torch.tensor(self.last_human_action, device=self.device)
         if self.time:
             return_info["step_times"] = torch.tensor(
                 np.array(self._step_time_np, copy=True), dtype=torch.float, device=self.device
@@ -669,6 +674,10 @@ cdef class cModelWrapper(cWrapper):
             obs, info = self.env.reset(reset_stat=True, seed=seed)
             self.default_info = util.dict_map(info, lambda x: torch.tensor(x, device=self.device))
             self.real_states_np = np.copy(obs)
+            self.last_thinker_action = np.full(self.env_n, -1, dtype=np.int32)
+            self.last_human_action = np.full(self.env_n, -1, dtype=np.int32)
+            self.last_thinker_action = np.full(self.env_n, -1, dtype=np.int32)
+            self.last_human_action = np.full(self.env_n, -1, dtype=np.int32)
 
             # obtain output from model
             obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
@@ -763,14 +772,27 @@ cdef class cModelWrapper(cWrapper):
             if a.dtype != np.int32:
                 a = a.astype(np.int32)
             if i == 0:
-                re_action = a
-                im_action = a
+                re_action = a.copy()
+                im_action = a.copy()
                 assert (a >= 0).all() and (a < self.num_actions).all(), \
                     f"primary action should be in [0, {self.num_actions-1}], not {a}"
             else:
                 reset = a       
                 assert (a >= 0).all() and (a < 2).all(), \
                     f"reset action should be in [0, 1], not {a}"  
+
+        human_actions = None
+        if hasattr(self.env, "current_human_action"):
+            try:
+                human_actions = self.env.current_human_action()
+            except Exception:
+                human_actions = None
+        if human_actions is not None:
+            human_actions = np.asarray(human_actions, dtype=np.int32).reshape(-1)
+            if human_actions.shape[0] != self.env_n:
+                human_actions = None
+        self.last_thinker_action = np.full(self.env_n, -1, dtype=np.int32)
+        self.last_human_action = np.full(self.env_n, -1, dtype=np.int32)
 
         pass_model_states = []
         pass_raw_action, pass_model_raw_action = [], []
@@ -814,6 +836,10 @@ cdef class cModelWrapper(cWrapper):
                 # record baseline before moving on
                 self.baseline_mean_q[i] = (average(self.root_nodes[i][0].prollout_qs[0]) -
                     self.root_nodes[i][0].r) / self.discounting
+                self.last_thinker_action[i] = re_action[i]
+                if human_actions is not None:
+                    self.last_human_action[i] = int(human_actions[i])
+                    re_action[i] = self.last_human_action[i]
                 encoded = <dict> self.root_nodes[i][0].encoded
                 pass_idx_restore.push_back(i)
                 pass_action.push_back(re_action[i])                                  
@@ -1159,14 +1185,27 @@ cdef class cPerfectWrapper(cWrapper):
             if a.dtype != np.int32:
                 a = a.astype(np.int32)
             if i == 0:
-                re_action = a
-                im_action = a
+                re_action = a.copy()
+                im_action = a.copy()
                 assert (a >= 0).all() and (a < self.num_actions).all(), \
                     f"primiary action should be in [0, {self.num_actions-1}], not {a}"
             else:
                 reset = a       
                 assert (a >= 0).all() and (a < 2).all(), \
                     f"reset action should be in [0, 1], not {a}"  
+
+        human_actions = None
+        if hasattr(self.env, "current_human_action"):
+            try:
+                human_actions = self.env.current_human_action()
+            except Exception:
+                human_actions = None
+        if human_actions is not None:
+            human_actions = np.asarray(human_actions, dtype=np.int32).reshape(-1)
+            if human_actions.shape[0] != self.env_n:
+                human_actions = None
+        self.last_thinker_action = np.full(self.env_n, -1, dtype=np.int32)
+        self.last_human_action = np.full(self.env_n, -1, dtype=np.int32)
 
         for i in range(self.env_n):            
             # compute the mask of real / imagination step                             
@@ -1209,6 +1248,10 @@ cdef class cPerfectWrapper(cWrapper):
                 # record baseline before moving on
                 self.baseline_mean_q[i] = (average(self.root_nodes[i][0].prollout_qs[0]) -
                     self.root_nodes[i][0].r) / self.discounting                
+                self.last_thinker_action[i] = re_action[i]
+                if human_actions is not None:
+                    self.last_human_action[i] = int(human_actions[i])
+                    re_action[i] = self.last_human_action[i]
                 encoded = <dict> self.root_nodes[i][0].encoded
                 pass_idx_restore.push_back(i)
                 pass_action.push_back(re_action[i])
