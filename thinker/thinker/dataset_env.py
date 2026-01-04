@@ -126,9 +126,8 @@ class BehaviorDatasetVectorEnv:
         idx = self._logical_indices[self._pos]
         obs = self._build_stack(idx)
 
-        # Compute reward as sum over the segment that produced this obs
-        seg_lo, seg_hi = self._segment_reward_range[self._pos]
-        reward_val = float(np.sum(self._rewards[seg_lo:seg_hi]))
+        # Use reward from the latest frame in the stack.
+        reward_val = float(self._rewards[idx])
 
         # Determine termination at this step
         # Done only if this logical index is terminal in the data.

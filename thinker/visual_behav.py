@@ -627,6 +627,7 @@ def visualize(
     savevideo=True,
     seed=-1,
     max_frames=-1,
+    max_eps_n=-1,
     use_gpu=True,  # GPU 사용 여부 추가
     save_encoder_vectors=True,  # encoder 벡터 저장 옵션 추가
 ):        
@@ -636,7 +637,6 @@ def visualize(
     ckpdir =  os.path.abspath(os.path.expanduser(ckpdir))
     outdir = os.path.abspath(os.path.expanduser(outdir))
 
-    max_eps_n = 1
     config_path = os.path.join(ckpdir, 'config_c.yaml')
     flags = util.create_flags(config_path, save_flags=False)
     if seed < 0:
@@ -688,9 +688,14 @@ def visualize(
         )
         env = Env(env_fn=lambda: base_env, **env_kwargs)
         render = False
+        if max_eps_n <= 0:
+            eps_count = int(np.sum(is_first))
+            max_eps_n = eps_count if eps_count > 0 else 1
     else:
         env = Env(name=flags.name, **env_kwargs)
         render = "Safexp" in flags.name
+        if max_eps_n <= 0:
+            max_eps_n = 1
 
     if "Sokoban" in flags.name:
         action_meanings = ["NOOP", "UP", "DOWN", "LEFT", "RIGHT"]
@@ -1169,6 +1174,12 @@ if __name__ == "__main__":
         help="Alias of max_frames for dataset playback",
     )
     parser.add_argument(
+        "--max_eps",
+        default="-1",
+        type=int,
+        help="Max number of episodes to record (-1 uses dataset episode count)",
+    )
+    parser.add_argument(
         "--use_gpu",
         default=True,
         type=bool,
@@ -1202,6 +1213,7 @@ if __name__ == "__main__":
         savevideo=True,
         seed=flags.seed,
         max_frames=flags.max_frames,
+        max_eps_n=flags.max_eps,
         use_gpu=flags.use_gpu,
         save_encoder_vectors=flags.save_encoder_vectors,
     )
