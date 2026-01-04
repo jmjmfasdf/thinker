@@ -300,6 +300,107 @@ def _extract_action_onehots(info, num_actions):
     thinker_idx = _to_int(info.get("thinker_action"))
     return _onehot_action(human_idx, num_actions), _onehot_action(thinker_idx, num_actions)
 
+def _stack_onehots(onehots, num_actions):
+    if len(onehots) == 0:
+        return None
+    valid = next((oh for oh in onehots if oh is not None), None)
+    if valid is None:
+        return None
+    fill = np.zeros(num_actions, dtype=np.int64)
+    return np.stack([oh if oh is not None else fill for oh in onehots], axis=0)
+
+def _finalize_video_stats(video_stats, num_actions):
+    if len(video_stats["tree_reps"]) == 0:
+        return None
+    video_stats["tree_reps"] = {
+        k: np.concatenate([v[k] for v in video_stats["tree_reps"]], axis=0)
+        for k in video_stats["tree_reps"][0].keys()
+    }
+    video_stats["env_return"] = np.array(video_stats["env_return"], dtype=np.float32)
+    if len(video_stats["cur_rewards"]) > 0 and video_stats["cur_rewards"][0] is not None:
+        video_stats["cur_rewards"] = np.stack(video_stats["cur_rewards"], axis=0).astype(np.float32)
+    else:
+        video_stats["cur_rewards"] = None
+    if len(video_stats["step_times"]) > 0:
+        valid_step = next((st for st in video_stats["step_times"] if st is not None), None)
+        if valid_step is not None:
+            fill = np.full_like(valid_step, np.nan, dtype=np.float32)
+            video_stats["step_times"] = np.stack(
+                [st.astype(np.float32) if st is not None else fill for st in video_stats["step_times"]],
+                axis=0,
+            )
+        else:
+            video_stats["step_times"] = None
+    else:
+        video_stats["step_times"] = None
+    if len(video_stats["tree_reps_vector"]) > 0:
+        valid_tree = next((tv for tv in video_stats["tree_reps_vector"] if tv is not None), None)
+        if valid_tree is not None:
+            fill_tree = np.full_like(valid_tree, np.nan, dtype=np.float32)
+            video_stats["tree_reps_vector"] = np.stack(
+                [tv.astype(np.float32) if tv is not None else fill_tree for tv in video_stats["tree_reps_vector"]],
+                axis=0,
+            )
+        else:
+            video_stats["tree_reps_vector"] = None
+    else:
+        video_stats["tree_reps_vector"] = None
+    video_stats["human_action"] = _stack_onehots(video_stats["human_action"], num_actions)
+    video_stats["thinker_action"] = _stack_onehots(video_stats["thinker_action"], num_actions)
+    return video_stats
+
+def _save_video_stats(video_stats, outdir, num_actions, filename):
+    finalized = _finalize_video_stats(video_stats, num_actions)
+    if finalized is None:
+        return False
+    np.save(os.path.join(outdir, filename), finalized)
+    return True
+
+def _init_video_stats(save_encoder_vectors):
+    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": [], "human_action": [], "thinker_action": []}
+    if save_encoder_vectors:
+        video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
+    return video_stats
+
+def _seed_video_stats(video_stats, env_out, env, render, copy_n, tree_reps, current_step_times, save_encoder_vectors, device):
+    if not render:
+        root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy()
+        root_xs = env_out.xs[0, 0, -copy_n:].cpu().numpy()
+    else:
+        root_real_states = env.render(mode='rgb_array', camera_id=0)[0]
+        root_xs = root_real_states
+
+    video_stats["real_imgs"].append(root_real_states)
+    video_stats["im_imgs"].append(root_xs)
+    video_stats["step_times"].append(current_step_times)
+    video_stats["tree_reps_vector"].append(None)
+    video_stats["human_action"].append(None)
+    video_stats["thinker_action"].append(None)
+
+    if save_encoder_vectors:
+        status_value = 0
+        real_vectors, im_vectors, im_vp_vectors, vectors_from_real = _collect_encoder_vectors(
+            env, env_out, device
+        )
+        _append_encoder_vectors(
+            video_stats,
+            real_vectors,
+            im_vectors,
+            im_vp_vectors,
+            status_value,
+            vectors_from_real,
+        )
+
+    video_stats["status"].append(0)
+    video_stats["tree_reps"].append({k: v.detach().cpu().numpy() for k, v in tree_reps.items()})
+    last_reward_to_log = _extract_last_reward(env_out.reward)
+    if last_reward_to_log is None:
+        num_rewards = env_out.reward.shape[-1] if env_out.reward is not None and env_out.reward.dim() >= 3 else 1
+        last_reward_to_log = np.zeros(num_rewards, dtype=np.float32)
+    video_stats["env_return"].append(0.0)
+    video_stats["cur_rewards"].append(last_reward_to_log)
+    return root_real_states, root_xs, last_reward_to_log
+
 def _extract_tree_rep_vector(actor_out):
     if actor_out is None:
         return None
@@ -672,9 +773,8 @@ def visualize(
     im_done = False
 
     # video_stats 초기화 - 기존 이미지와 encoder 벡터 모두 저장
-    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": [], "human_action": [], "thinker_action": []}
+    video_stats = _init_video_stats(save_encoder_vectors)
     if save_encoder_vectors:
-        video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
         print("Saving both images and encoder vectors")
     
     # 메모리 효율성을 위한 최대 저장 프레임 수 제한 (전체 프레임 저장을 위해 충분히 큰 값 설정)
@@ -687,47 +787,25 @@ def visualize(
 
     current_step_times = _extract_step_times(env_out)
 
-    if not render:
-        root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy() 
-        last_root_real_states = root_real_states
-        root_xs = env_out.xs[0, 0, -copy_n:].cpu().numpy()
-    else:
-        root_real_states = env.render(mode='rgb_array', camera_id=0)[0] 
-    
-    video_stats["real_imgs"].append(root_real_states)
-    video_stats["im_imgs"].append(root_xs)
-    video_stats["step_times"].append(current_step_times)
-    video_stats["tree_reps_vector"].append(None)
-    video_stats["human_action"].append(None)
-    video_stats["thinker_action"].append(None)
-    
-        # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
-    if save_encoder_vectors:
-        status_value = 0
-        real_vectors, im_vectors, im_vp_vectors, vectors_from_real = _collect_encoder_vectors(
-            env, env_out, device
-        )
-        _append_encoder_vectors(
-            video_stats,
-            real_vectors,
-            im_vectors,
-            im_vp_vectors,
-            status_value,
-            vectors_from_real,
-        )
-
-    video_stats["status"].append(0)  # 0 for real step, 1 for reset, 2 for normal
-    video_stats["tree_reps"].append({k: v.cpu().numpy() for k, v in tree_reps.items()})
-    last_reward_to_log = _extract_last_reward(env_out.reward)
-    if last_reward_to_log is None:
-        num_rewards = env_out.reward.shape[-1] if env_out.reward is not None and env_out.reward.dim() >= 3 else 1
-        last_reward_to_log = np.zeros(num_rewards, dtype=np.float32)
-    video_stats["env_return"].append(0.0)
-    video_stats["cur_rewards"].append(last_reward_to_log)
+    root_real_states, root_xs, last_reward_to_log = _seed_video_stats(
+        video_stats,
+        env_out,
+        env,
+        render,
+        copy_n,
+        tree_reps,
+        current_step_times,
+        save_encoder_vectors,
+        device,
+    )
+    last_root_real_states = root_real_states
 
     # 메모리 관리를 위한 배치 크기 설정
     batch_size = 5  # 한 번에 처리할 프레임 수 제한 (더 작게 설정)
-    
+    video_stat_idx = 0
+
+    prev_grad_enabled = torch.is_grad_enabled()
+    torch.set_grad_enabled(False)
     while len(returns) < max_eps_n:
         step += 1
         
@@ -752,13 +830,13 @@ def visualize(
             agent_v = actor_out.baseline[0, 0, 0]
 
         # additional stat record - GPU에서 CPU로 이동하여 저장
-        im_dict["pri_logits"].append(actor_out.pri_param[:,0].cpu())
-        im_dict["reset_logits"].append(actor_out.reset_logits[:,0].cpu())
-        im_dict["pri"].append(actor_out.pri[:,0].cpu())
-        im_dict["cur_reset"].append(actor_out.reset[:,0].cpu())
+        im_dict["pri_logits"].append(actor_out.pri_param[:, 0].detach().cpu())
+        im_dict["reset_logits"].append(actor_out.reset_logits[:, 0].detach().cpu())
+        im_dict["pri"].append(actor_out.pri[:, 0].detach().cpu())
+        im_dict["cur_reset"].append(actor_out.reset[:, 0].detach().cpu())
         
         tree_reps_ = env.decode_tree_reps(env_out.tree_reps)
-        model_policy.append(tree_reps_["cur_policy"].cpu())       
+        model_policy.append(tree_reps_["cur_policy"].detach().cpu())
 
         state, reward, done, truncated_done, info = env.step(action[0], action[1])
         last_real_step = (info["step_status"] == 0) | (info["step_status"] == 3)
@@ -875,7 +953,7 @@ def visualize(
                 )
             
             video_stats["tree_reps"].append(
-                {k: v.cpu().numpy() for k, v in tree_reps.items()}
+                {k: v.detach().cpu().numpy() for k, v in tree_reps.items()}
             )
             video_stats["env_return"].append(reward_to_log)
             video_stats["cur_rewards"].append(last_reward_to_log)
@@ -906,7 +984,7 @@ def visualize(
                     )
                 video_stats["status"].append(reset_status)
                 video_stats["tree_reps"].append(
-                    {k: v.cpu().numpy() for k, v in tree_reps.items()}
+                    {k: v.detach().cpu().numpy() for k, v in tree_reps.items()}
                 )
                 video_stats["env_return"].append(0.0)
                 video_stats["cur_rewards"].append(last_reward_to_log)
@@ -1017,6 +1095,30 @@ def visualize(
                 real_rets = ep_ret_vec[:, 0] if ep_ret_vec.ndim == 2 else ep_ret_vec
                 new_rets = real_rets[real_done_mask]
                 returns.extend(new_rets)
+            if savevideo:
+                saved = _save_video_stats(
+                    video_stats,
+                    outdir,
+                    env.num_actions,
+                    f"video_stat_{video_stat_idx:03d}.npy",
+                )
+                if saved:
+                    video_stat_idx += 1
+                video_stats = _init_video_stats(save_encoder_vectors)
+                if len(returns) < max_eps_n:
+                    current_step_times = _extract_step_times(env_out)
+                    root_real_states, root_xs, last_reward_to_log = _seed_video_stats(
+                        video_stats,
+                        env_out,
+                        env,
+                        render,
+                        copy_n,
+                        tree_reps,
+                        current_step_times,
+                        save_encoder_vectors,
+                        device,
+                    )
+                    last_root_real_states = root_real_states
             prev_episode_return = 0.0
             print(
                 "Finish %d episode: avg. return: %.2f (+-%.2f) "
@@ -1029,43 +1131,15 @@ def visualize(
 
         if max_frames >= 0 and real_step > max_frames:
             break
+    torch.set_grad_enabled(prev_grad_enabled)
 
     if savevideo:
-        video_stats["tree_reps"] = {
-            k: np.concatenate([v[k] for v in video_stats["tree_reps"]], axis=0)
-            for k in video_stats["tree_reps"][0].keys()
-        }
-        video_stats["env_return"] = np.array(video_stats["env_return"], dtype=np.float32)
-        if len(video_stats["cur_rewards"]) > 0 and video_stats["cur_rewards"][0] is not None:
-            video_stats["cur_rewards"] = np.stack(video_stats["cur_rewards"], axis=0).astype(np.float32)
-        else:
-            video_stats["cur_rewards"] = None
-        if len(video_stats["step_times"]) > 0:
-            valid_step = next((st for st in video_stats["step_times"] if st is not None), None)
-            if valid_step is not None:
-                fill = np.full_like(valid_step, np.nan, dtype=np.float32)
-                video_stats["step_times"] = np.stack(
-                    [st.astype(np.float32) if st is not None else fill for st in video_stats["step_times"]],
-                    axis=0,
-                )
-            else:
-                video_stats["step_times"] = None
-        else:
-            video_stats["step_times"] = None
-        if len(video_stats["tree_reps_vector"]) > 0:
-            valid_tree = next((tv for tv in video_stats["tree_reps_vector"] if tv is not None), None)
-            if valid_tree is not None:
-                fill_tree = np.full_like(valid_tree, np.nan, dtype=np.float32)
-                video_stats["tree_reps_vector"] = np.stack(
-                    [tv.astype(np.float32) if tv is not None else fill_tree for tv in video_stats["tree_reps_vector"]],
-                    axis=0,
-                )
-            else:
-                video_stats["tree_reps_vector"] = None
-        else:
-            video_stats["tree_reps_vector"] = None
-        # gen_video(video_stats, outdir)
-        np.save(os.path.join(outdir, "video_stat.npy"), video_stats)
+        _save_video_stats(
+            video_stats,
+            outdir,
+            env.num_actions,
+            f"video_stat_{video_stat_idx:03d}.npy",
+        )
 
     # 메모리 정리
     if use_gpu:

@@ -111,12 +111,16 @@ class BehaviorDatasetVectorEnv:
         # Advance one logical step
         self._pos += 1
         if self._pos >= self._num_steps:
-            # End of dataset: emit zeros and mark done
+            # End of dataset: emit zeros and mark done only if data says terminal.
             obs = np.zeros((1,) + self.observation_space.shape, dtype=np.uint8)
             reward = 0.0
-            done = True
-            truncated = True
-            info = {"real_done": True}
+            if self._num_steps > 0:
+                last_idx = self._logical_indices[-1]
+                done = bool(self._is_terminal[last_idx])
+            else:
+                done = False
+            truncated = not done
+            info = {"real_done": bool(done)}
             return obs, reward, done, truncated, info
 
         idx = self._logical_indices[self._pos]
@@ -127,7 +131,7 @@ class BehaviorDatasetVectorEnv:
         reward_val = float(np.sum(self._rewards[seg_lo:seg_hi]))
 
         # Determine termination at this step
-        # Done if this logical index is terminal, or next step starts a new episode
+        # Done only if this logical index is terminal in the data.
         is_term = bool(self._is_terminal[idx])
         done = bool(is_term)
         truncated = False
