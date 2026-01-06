@@ -691,11 +691,13 @@ def visualize(
         if max_eps_n <= 0:
             eps_count = int(np.sum(is_first))
             max_eps_n = eps_count if eps_count > 0 else 1
+        print(f"[visual_behav] max_eps_n={max_eps_n} (dataset)")
     else:
         env = Env(name=flags.name, **env_kwargs)
         render = "Safexp" in flags.name
         if max_eps_n <= 0:
             max_eps_n = 1
+        print(f"[visual_behav] max_eps_n={max_eps_n} (env)")
 
     if "Sokoban" in flags.name:
         action_meanings = ["NOOP", "UP", "DOWN", "LEFT", "RIGHT"]
@@ -730,15 +732,21 @@ def visualize(
                                                   checkpoint["step"])
                                                   )
     # create output folder
-    n = 0
-    while True:
-        name = "%s-%d-%d" % (flags.xpid, checkpoint["real_step"], n)
-        outdir_ = os.path.join(outdir, name)
-        if not os.path.exists(outdir_):
-            os.makedirs(outdir_)
-            print(f"Outputting to {outdir_}")
-            break
-        n += 1
+    if data_path:
+        base_name = os.path.splitext(os.path.basename(data_path))[0]
+        outdir_ = os.path.join(outdir, base_name)
+        os.makedirs(outdir_, exist_ok=True)
+        print(f"Outputting to {outdir_}")
+    else:
+        n = 0
+        while True:
+            name = "%s-%d-%d" % (flags.xpid, checkpoint["real_step"], n)
+            outdir_ = os.path.join(outdir, name)
+            if not os.path.exists(outdir_):
+                os.makedirs(outdir_)
+                print(f"Outputting to {outdir_}")
+                break
+            n += 1
     outdir = outdir_
 
     # initalize env
@@ -1100,6 +1108,7 @@ def visualize(
                 real_rets = ep_ret_vec[:, 0] if ep_ret_vec.ndim == 2 else ep_ret_vec
                 new_rets = real_rets[real_done_mask]
                 returns.extend(new_rets)
+            print(f"[visual_behav] episode_done returns={len(returns)}/{max_eps_n}")
             if savevideo:
                 saved = _save_video_stats(
                     video_stats,
