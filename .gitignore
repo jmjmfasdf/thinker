@@ -39,5 +39,6 @@ step_analysis_spaceinvaders/
 tmp_metrics_plots/
 behavioral_data_4kframe_legacy/
 behavioral_data_block/
+behavioral_data_block_old/
 design_matrix.mat/
 pong_3e6_sub1_game1_day1_block1_episode0_17872/

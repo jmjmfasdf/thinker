@@ -88,6 +88,7 @@ class HumanMetrics:
     paths: List[Path]
     noop_ratios: np.ndarray
     reward_sums: np.ndarray
+    action_counts: np.ndarray
 
 
 @dataclass
@@ -176,6 +177,7 @@ def _load_human_metrics(subject: int, game_number: int, human_dir: Path) -> Huma
 
     noop_ratios: List[float] = []
     reward_sums: List[float] = []
+    action_counts = np.zeros((0,), dtype=np.int64)
 
     for path in paths:
         with np.load(path, allow_pickle=True) as data:
@@ -183,10 +185,21 @@ def _load_human_metrics(subject: int, game_number: int, human_dir: Path) -> Huma
             rewards = data["reward"].astype(float)
         noop_ratios.append(float(np.mean(actions == 0)))
         reward_sums.append(float(np.sum(rewards)))
+        valid_actions = actions[actions >= 0]
+        if valid_actions.size:
+            max_action = int(valid_actions.max())
+            if max_action >= action_counts.size:
+                action_counts = np.pad(
+                    action_counts, (0, max_action + 1 - action_counts.size)
+                )
+            action_counts[:max_action + 1] += np.bincount(
+                valid_actions, minlength=max_action + 1
+            )
 
     return HumanMetrics(paths=paths,
                         noop_ratios=np.asarray(noop_ratios, dtype=float),
-                        reward_sums=np.asarray(reward_sums, dtype=float))
+                        reward_sums=np.asarray(reward_sums, dtype=float),
+                        action_counts=action_counts)
 
 
 def _load_thinker_file_metrics(thinker_dir: Path) -> Dict[str, List[ThinkerFileMetric]]:
