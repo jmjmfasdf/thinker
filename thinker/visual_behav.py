@@ -347,6 +347,30 @@ def _finalize_video_stats(video_stats, num_actions):
         video_stats["tree_reps_vector"] = None
     video_stats["human_action"] = _stack_onehots(video_stats["human_action"], num_actions)
     video_stats["thinker_action"] = _stack_onehots(video_stats["thinker_action"], num_actions)
+    if len(video_stats["actor_policy"]) > 0:
+        valid_policy = next((ap for ap in video_stats["actor_policy"] if ap is not None), None)
+        if valid_policy is not None:
+            fill_policy = np.full_like(valid_policy, np.nan, dtype=np.float32)
+            video_stats["actor_policy"] = np.stack(
+                [ap.astype(np.float32) if ap is not None else fill_policy for ap in video_stats["actor_policy"]],
+                axis=0,
+            )
+        else:
+            video_stats["actor_policy"] = None
+    else:
+        video_stats["actor_policy"] = None
+    if len(video_stats["reset_policy"]) > 0:
+        valid_reset = next((rp for rp in video_stats["reset_policy"] if rp is not None), None)
+        if valid_reset is not None:
+            fill_reset = np.full_like(valid_reset, np.nan, dtype=np.float32)
+            video_stats["reset_policy"] = np.stack(
+                [rp.astype(np.float32) if rp is not None else fill_reset for rp in video_stats["reset_policy"]],
+                axis=0,
+            )
+        else:
+            video_stats["reset_policy"] = None
+    else:
+        video_stats["reset_policy"] = None
     return video_stats
 
 def _save_video_stats(video_stats, outdir, num_actions, filename):
@@ -357,12 +381,12 @@ def _save_video_stats(video_stats, outdir, num_actions, filename):
     return True
 
 def _init_video_stats(save_encoder_vectors):
-    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": [], "human_action": [], "thinker_action": []}
+    video_stats = {"real_imgs": [], "im_imgs": [], "actor_policy": [], "reset_policy": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": [], "human_action": [], "thinker_action": []}
     if save_encoder_vectors:
         video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
     return video_stats
 
-def _seed_video_stats(video_stats, env_out, env, render, copy_n, tree_reps, current_step_times, save_encoder_vectors, device):
+def _seed_video_stats(video_stats, env_out, env, render, copy_n, tree_reps, current_step_times, save_encoder_vectors, device, actor_policy_logit_init, reset_policy_logit_init):
     if not render:
         root_real_states = env_out.real_states[0, 0, -copy_n:].cpu().numpy()
         root_xs = env_out.xs[0, 0, -copy_n:].cpu().numpy()
@@ -372,6 +396,8 @@ def _seed_video_stats(video_stats, env_out, env, render, copy_n, tree_reps, curr
 
     video_stats["real_imgs"].append(root_real_states)
     video_stats["im_imgs"].append(root_xs)
+    video_stats["actor_policy"].append(actor_policy_logit_init)
+    video_stats["reset_policy"].append(reset_policy_logit_init)
     video_stats["step_times"].append(current_step_times)
     video_stats["tree_reps_vector"].append(None)
     video_stats["human_action"].append(None)
@@ -800,6 +826,22 @@ def visualize(
 
     current_step_times = _extract_step_times(env_out)
 
+    with torch.no_grad():
+        actor_state_snapshot = tuple(
+            s.clone() if torch.is_tensor(s) else s for s in actor_state
+        )
+        actor_out_init, _ = actor_net(env_out, actor_state_snapshot)
+        actor_policy_logit_init = (
+            actor_out_init.pri_param.detach().cpu().numpy()
+            if getattr(actor_out_init, "pri_param", None) is not None
+            else None
+        )
+        reset_policy_logit_init = (
+            actor_out_init.reset_logits.detach().cpu().numpy()
+            if getattr(actor_out_init, "reset_logits", None) is not None
+            else None
+        )
+
     root_real_states, root_xs, last_reward_to_log = _seed_video_stats(
         video_stats,
         env_out,
@@ -810,6 +852,8 @@ def visualize(
         current_step_times,
         save_encoder_vectors,
         device,
+        actor_policy_logit_init,
+        reset_policy_logit_init,
     )
     last_root_real_states = root_real_states
 
@@ -833,7 +877,17 @@ def visualize(
                     print(f"Step {step}: GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
                     print(f"Video frames stored: {len(video_stats['real_imgs'])}")
         
-        actor_out, actor_state = actor_net(env_out, actor_state)        
+        actor_out, actor_state = actor_net(env_out, actor_state)
+        actor_policy_logit = (
+            actor_out.pri_param.detach().cpu().numpy()
+            if getattr(actor_out, "pri_param", None) is not None
+            else None
+        )
+        reset_policy_logit = (
+            actor_out.reset_logits.detach().cpu().numpy()
+            if getattr(actor_out, "reset_logits", None) is not None
+            else None
+        )
         action = actor_out.action
         tree_rep_vector = _extract_tree_rep_vector(actor_out)
 
@@ -949,6 +1003,8 @@ def visualize(
             video_stats["status"].append(status_value)
             video_stats["real_imgs"].append(root_real_states)
             video_stats["im_imgs"].append(xs)
+            video_stats["actor_policy"].append(actor_policy_logit)
+            video_stats["reset_policy"].append(reset_policy_logit)
             video_stats["step_times"].append(step_times)
             video_stats["tree_reps_vector"].append(tree_rep_vector)
             video_stats["human_action"].append(human_action_oh)
@@ -981,6 +1037,8 @@ def visualize(
                 # reset / force reset
                 video_stats["real_imgs"].append(root_real_states)
                 video_stats["im_imgs"].append(root_xs)
+                video_stats["actor_policy"].append(actor_policy_logit)
+                video_stats["reset_policy"].append(reset_policy_logit)
                 video_stats["step_times"].append(step_times)
                 video_stats["tree_reps_vector"].append(tree_rep_vector)
                 video_stats["human_action"].append(None)
@@ -1121,6 +1179,21 @@ def visualize(
                 video_stats = _init_video_stats(save_encoder_vectors)
                 if len(returns) < max_eps_n:
                     current_step_times = _extract_step_times(env_out)
+                    with torch.no_grad():
+                        actor_state_snapshot = tuple(
+                            s.clone() if torch.is_tensor(s) else s for s in actor_state
+                        )
+                        actor_out_init, _ = actor_net(env_out, actor_state_snapshot)
+                        actor_policy_logit_init = (
+                            actor_out_init.pri_param.detach().cpu().numpy()
+                            if getattr(actor_out_init, "pri_param", None) is not None
+                            else None
+                        )
+                        reset_policy_logit_init = (
+                            actor_out_init.reset_logits.detach().cpu().numpy()
+                            if getattr(actor_out_init, "reset_logits", None) is not None
+                            else None
+                        )
                     root_real_states, root_xs, last_reward_to_log = _seed_video_stats(
                         video_stats,
                         env_out,
@@ -1131,6 +1204,8 @@ def visualize(
                         current_step_times,
                         save_encoder_vectors,
                         device,
+                        actor_policy_logit_init,
+                        reset_policy_logit_init,
                     )
                     last_root_real_states = root_real_states
             prev_episode_return = 0.0
