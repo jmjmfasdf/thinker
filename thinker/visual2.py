@@ -615,7 +615,7 @@ def visualize(
     im_done = False
 
     # video_stats 초기화 - 기존 이미지와 encoder 벡터 모두 저장
-    video_stats = {"real_imgs": [], "im_imgs": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": []}
+    video_stats = {"real_imgs": [], "im_imgs": [], "actor_policy": [], "reset_policy": [], "status": [], "tree_reps": [], "env_return": [], "cur_rewards": [], "step_times": [], "tree_reps_vector": []}
     if save_encoder_vectors:
         video_stats.update({"real_vectors": [], "im_vectors": [], "im_vp_vectors": []})
         print("Saving both images and encoder vectors")
@@ -635,9 +635,27 @@ def visualize(
         root_xs = env_out.xs[0, 0, -copy_n:].cpu().numpy()
     else:
         root_real_states = env.render(mode='rgb_array', camera_id=0)[0] 
+
+    with torch.no_grad():
+        actor_state_snapshot = tuple(
+            s.clone() if torch.is_tensor(s) else s for s in actor_state
+        )
+        actor_out_init, _ = actor_net(env_out, actor_state_snapshot)
+        actor_policy_logit_init = (
+            actor_out_init.pri_param.detach().cpu().numpy()
+            if getattr(actor_out_init, "pri_param", None) is not None
+            else None
+        )
+        reset_policy_logit_init = (
+            actor_out_init.reset_logits.detach().cpu().numpy()
+            if getattr(actor_out_init, "reset_logits", None) is not None
+            else None
+        )
     
     video_stats["real_imgs"].append(root_real_states)
     video_stats["im_imgs"].append(root_xs)
+    video_stats["actor_policy"].append(actor_policy_logit_init)
+    video_stats["reset_policy"].append(reset_policy_logit_init)
     video_stats["step_times"].append(current_step_times)
     video_stats["tree_reps_vector"].append(None)
         # SRN latent output 저장 (옵션) - real_imgs/im_imgs와 동일한 로직으로 저장
@@ -686,6 +704,16 @@ def visualize(
                     print(f"Video frames stored: {len(video_stats['real_imgs'])}")
         
         actor_out, actor_state = actor_net(env_out, actor_state)
+        actor_policy_logit = (
+            actor_out.pri_param.detach().cpu().numpy()
+            if getattr(actor_out, "pri_param", None) is not None
+            else None
+        )
+        reset_policy_logit = (
+            actor_out.reset_logits.detach().cpu().numpy()
+            if getattr(actor_out, "reset_logits", None) is not None
+            else None
+        )
         action = actor_out.action
         tree_rep_vector = _extract_tree_rep_vector(actor_out)
 
@@ -798,6 +826,8 @@ def visualize(
             video_stats["status"].append(status_value)
             video_stats["real_imgs"].append(root_real_states)
             video_stats["im_imgs"].append(xs)
+            video_stats["actor_policy"].append(actor_policy_logit)
+            video_stats["reset_policy"].append(reset_policy_logit)
             video_stats["step_times"].append(step_times)
             video_stats["tree_reps_vector"].append(tree_rep_vector)
             
@@ -828,6 +858,8 @@ def visualize(
                 # reset / force reset
                 video_stats["real_imgs"].append(root_real_states)
                 video_stats["im_imgs"].append(root_xs)
+                video_stats["actor_policy"].append(actor_policy_logit)
+                video_stats["reset_policy"].append(reset_policy_logit)
                 video_stats["step_times"].append(step_times)
                 video_stats["tree_reps_vector"].append(tree_rep_vector)
                 reset_status = im_dict["cur_reset"][-1].item()
@@ -1001,6 +1033,30 @@ def visualize(
                 video_stats["tree_reps_vector"] = None
         else:
             video_stats["tree_reps_vector"] = None
+        if len(video_stats["actor_policy"]) > 0:
+            valid_policy = next((ap for ap in video_stats["actor_policy"] if ap is not None), None)
+            if valid_policy is not None:
+                fill_policy = np.full_like(valid_policy, np.nan, dtype=np.float32)
+                video_stats["actor_policy"] = np.stack(
+                    [ap.astype(np.float32) if ap is not None else fill_policy for ap in video_stats["actor_policy"]],
+                    axis=0,
+                )
+            else:
+                video_stats["actor_policy"] = None
+        else:
+            video_stats["actor_policy"] = None
+        if len(video_stats["reset_policy"]) > 0:
+            valid_reset = next((rp for rp in video_stats["reset_policy"] if rp is not None), None)
+            if valid_reset is not None:
+                fill_reset = np.full_like(valid_reset, np.nan, dtype=np.float32)
+                video_stats["reset_policy"] = np.stack(
+                    [rp.astype(np.float32) if rp is not None else fill_reset for rp in video_stats["reset_policy"]],
+                    axis=0,
+                )
+            else:
+                video_stats["reset_policy"] = None
+        else:
+            video_stats["reset_policy"] = None
         # gen_video(video_stats, outdir)
         np.save(os.path.join(outdir, "video_stat.npy"), video_stats)
 

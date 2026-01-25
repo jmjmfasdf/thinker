@@ -41,7 +41,7 @@ class FrameStackedBehavioralDataLoader:
         self.current_file_idx = 0
         self.current_pos = 0
         self.current_data = None  # Initialize current_data attribute
-        self.num_actions = 6
+        self.num_actions = self._num_actions_for_game_id(game_id)
         self.action_distribution = self._compute_action_distribution()
         
         print(f"Loaded {len(self.data_files)} data files")
@@ -77,6 +77,15 @@ class FrameStackedBehavioralDataLoader:
             return np.full(self.num_actions, 1.0 / self.num_actions, dtype=np.float64)
 
         return action_counts / total
+
+    @staticmethod
+    def _num_actions_for_game_id(game_id: int) -> int:
+        action_counts = {
+            0: 9,  # Enduro
+            1: 6,  # Pong
+            2: 6,  # Space Invaders
+        }
+        return action_counts.get(game_id, 6)
 
     def _load_data_files(self) -> List[str]:
         """Load all .npz files from specified subjects and game"""
