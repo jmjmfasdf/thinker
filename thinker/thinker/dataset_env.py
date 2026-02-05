@@ -334,6 +334,16 @@ class BehaviorSequenceVectorEnv:
         }
         return obs, info
 
+    def current_human_action(self, env_id: Optional[List[int]] = None):
+        if self.actions_seq is None:
+            return None
+        if env_id is None:
+            env_id = np.arange(self.env_n, dtype=np.int64)
+        else:
+            env_id = np.asarray(env_id, dtype=np.int64)
+        actions = self.actions_seq[env_id, self._pos[env_id]]
+        return np.array(actions, dtype=np.int64)
+
     def step(self, action, *, env_id: Optional[List[int]] = None):
         if env_id is None:
             env_id = np.arange(self.env_n, dtype=np.int64)

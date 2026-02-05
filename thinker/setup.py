@@ -40,7 +40,10 @@ CYTHONIZE = cythonize is not None
 #CYTHONIZE = bool(int(os.getenv("CYTHONIZE", 0))) and cythonize is not None
 #CYTHONIZE = True
 
-extensions = [Extension("thinker.cenv", ["thinker/cenv.pyx"])]
+extensions = [
+    Extension("thinker.cenv", ["thinker/cenv.pyx"]),
+    Extension("thinker.cenv_bc", ["thinker/cenv_bc.pyx"]),
+]
 if CYTHONIZE:
     print("Compiling Cython sources")
     compiler_directives = {"language_level": 3}

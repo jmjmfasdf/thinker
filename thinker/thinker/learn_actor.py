@@ -21,7 +21,8 @@ from gymnasium import spaces
 from thinker.bc_loader import FrameStackedBehavioralDataLoader
 from thinker.dataset_env import BehaviorSequenceVectorEnv
 from thinker.model_net import ModelNet
-from thinker.cenv import cModelWrapper
+from thinker.cenv import cModelWrapper as OnlineCModelWrapper
+from thinker.cenv_bc import cModelWrapper as BCCModelWrapper
 
 def dqfd_margin_loss(q_values: torch.Tensor, actions: torch.Tensor, margin: torch.Tensor) -> torch.Tensor:
     if q_values.ndim != 2:
@@ -394,7 +395,7 @@ class SActorLearner:
                 actions_seq=actions_seq_np,
                 num_actions=self.actor_net.num_actions,
             )
-            planner = cModelWrapper(
+            planner = BCCModelWrapper(
                 env=base_env,
                 env_n=batch_size,
                 flags=self.flags,
@@ -424,7 +425,7 @@ class SActorLearner:
                     actions_seq=actions_seq_np,
                     num_actions=self.actor_net.num_actions,
                 )
-                planner = cModelWrapper(
+                planner = BCCModelWrapper(
                     env=base_env,
                     env_n=batch_size,
                     flags=self.flags,
