@@ -196,7 +196,8 @@ class FrameStackedBehavioralDataLoader:
         """
         Get a batch of frame-stack sequences for imitation learning.
         Each observation stack uses consecutive frames with stride=1 between stacked observations.
-        The human action is shifted by +1 relative to the stack start so obs_t -> action_{t+1}.
+        Stacks are built from the most recent frame going backwards (t-3..t), and the
+        human action is aligned with the most recent frame (action at t).
 
         Args:
             batch_size: number of sequences to return
@@ -205,8 +206,8 @@ class FrameStackedBehavioralDataLoader:
         Returns:
             Dict with keys:
             - 'obs_seq': (B, L, C*stack_n, H, W) stacked observations (float/normalized)
-            - 'actions_seq': (B, L) discrete human actions (next action, i.e. index +1)
-            - 'rewards_seq': (B, L) summed rewards per stack
+            - 'actions_seq': (B, L) discrete human actions (most recent action at t)
+            - 'rewards_seq': (B, L) summed rewards over the last stack_n frames (t-3..t)
             - 'sequence_starts': (B,) bool flags (all True; each sample is a fresh sequence)
         """
         if len(self.data_files) == 0:
@@ -284,24 +285,22 @@ class FrameStackedBehavioralDataLoader:
             print(f"[WARNING] Failed to load file {self.data_files[file_idx]}: {e}")
             return None
 
-        # Total raw frames needed for a sequence when stacked obs start 1 frame apart:
-        # first stack uses frames [start, start+stack_n-1], last stack starts at start+(L-1)
-        # and uses up to start+(L-1)+(stack_n-1) => stack_n + L - 1 frames.
-        frames_per_seq = self.frame_stack_n + sequence_length - 1
-        # For shifted actions: we need action indices up to start + sequence_length.
-        max_frame_offset = self.frame_stack_n + sequence_length - 2
-        max_action_offset = sequence_length
-        max_offset = max(max_frame_offset, max_action_offset)
+        # Total raw frames needed for a sequence when stacked obs end at t:
+        # first stack uses frames [start-(stack_n-1), start], last stack ends at start+(L-1).
+        frames_per_seq = (self.frame_stack_n - 1) + sequence_length
         candidates: List[int] = []
         for start, end in self._enumerate_episode_spans(is_first, is_terminal):
-            max_start = end - max_offset
-            if max_start < start:
+            min_start = start + (self.frame_stack_n - 1)
+            max_start = end - (sequence_length - 1)
+            if max_start < min_start:
                 continue
             # Align stacks so each uses fresh frames (stride = frame_stack_n)
-            s = start
+            s = min_start
             while s <= max_start:
-                window_end = s + max_offset + 1
-                if window_end <= len(images) and not np.any(is_terminal[s:window_end]) and not np.any(is_first[s + 1:window_end]):
+                window_start = s - (self.frame_stack_n - 1)
+                window_end = s + (sequence_length - 1)
+                # Ensure stacks stay within episode and don't cross boundaries
+                if not np.any(is_first[window_start + 1 : window_end + 1]) and not np.any(is_terminal[window_start:window_end]):
                     candidates.append(s)
                 s += self.frame_stack_n
 
@@ -316,12 +315,12 @@ class FrameStackedBehavioralDataLoader:
             rewards_seq = []
             for t in range(sequence_length):
                 # shift stacked observations by 1 frame each step
-                stack_start = start_idx + t
-                obs_seq.append(self._create_forward_stack(images, stack_start))
-                action_idx = stack_start + 1
-                actions_seq.append(self._action_index(actions[action_idx]))
+                stack_end = start_idx + t
+                obs_seq.append(self._create_frame_stack(images, stack_end))
+                actions_seq.append(self._action_index(actions[stack_end]))
+                reward_start = max(0, stack_end - (self.frame_stack_n - 1))
                 rewards_seq.append(
-                    float(np.sum(rewards[stack_start : stack_start + self.frame_stack_n]))
+                    float(np.sum(rewards[reward_start : stack_end + 1]))
                 )
             sequences.append(
                 {
@@ -404,7 +403,7 @@ class FrameStackedBehavioralDataLoader:
             if file_samples:
                 batch_obs.extend(file_samples['obs'])
                 batch_next_obs.extend(file_samples['next_obs'])
-                batch_actions.extend(file_samples['next_action_idx'])
+                batch_actions.extend(file_samples['actions'])
                 batch_rewards.extend(file_samples['rewards'])
                 batch_curr_rewards.extend(file_samples['curr_rewards'])
                 batch_next_rewards.extend(file_samples['next_rewards'])
@@ -425,7 +424,7 @@ class FrameStackedBehavioralDataLoader:
         batch = {
             'obs': np.stack(batch_obs, axis=0),           # [B, C*stack_n, H, W]
             'next_obs': np.stack(batch_next_obs, axis=0), # [B, C*stack_n, H, W]
-            'actions': np.stack(batch_actions, axis=0),   # [B, action_dim]
+            'actions': np.stack(batch_actions, axis=0),   # [B]
             'rewards': np.stack(batch_rewards, axis=0),    # [B]
             'curr_rewards': np.array(batch_curr_rewards, dtype=np.float32),
             'next_rewards': np.array(batch_next_rewards, dtype=np.float32),
@@ -435,7 +434,7 @@ class FrameStackedBehavioralDataLoader:
             'next_action_onehot': np.stack(batch_next_action_onehot, axis=0).astype(np.float32),
             'prev_actions': np.array(batch_prev_actions, dtype=np.int64),
             'sequence_starts': np.array(batch_sequence_starts, dtype=np.bool_),
-            'next_action_idx': np.stack(batch_actions, axis=0),
+            'next_action_idx': np.stack(batch_next_actions, axis=0) if batch_next_actions else np.stack(batch_actions, axis=0),
         }
         if batch_dones:
             batch['dones'] = np.stack(batch_dones, axis=0)
@@ -466,12 +465,14 @@ class FrameStackedBehavioralDataLoader:
         if len(images) < min_length:
             return None
         
-        # Find valid indices (ensure sufficient frames)
+        # Find valid indices within each episode (ensure sufficient history and next step)
         valid_indices = []
-        for i in range(self.frame_stack_n - 1, len(images) - 1):
-            curr_idx = i
-            next_idx = i + 1
-            valid_indices.append(curr_idx)
+        for start, end in self._enumerate_episode_spans(is_first, is_terminal):
+            min_idx = start + (self.frame_stack_n - 1)
+            max_idx = end - 1
+            if max_idx < min_idx:
+                continue
+            valid_indices.extend(range(min_idx, max_idx + 1))
         
         if len(valid_indices) == 0:
             return None
@@ -509,17 +510,16 @@ class FrameStackedBehavioralDataLoader:
 
             # Get action, reward, and terminal flag
             action_curr = actions[curr_idx]
-            next_stack_start = max(0, next_idx - self.frame_stack_n + 1)
-            action_next = actions[next_stack_start]
+            action_next = actions[next_idx]
             if actions.ndim > 1 and actions.shape[-1] > 1:
                 action_curr_idx = int(np.argmax(action_curr))
                 action_next_idx = int(np.argmax(action_next))
             else:
                 action_curr_idx = int(action_curr)
                 action_next_idx = int(action_next)
-            start_idx = max(0, curr_idx - self.frame_stack_n + 1)
+            start_idx = curr_idx - (self.frame_stack_n - 1)
             reward_sum = float(np.sum(rewards[start_idx:curr_idx + 1]))
-            next_start_idx = max(0, next_idx - self.frame_stack_n + 1)
+            next_start_idx = next_idx - (self.frame_stack_n - 1)
             next_reward_sum = float(np.sum(rewards[next_start_idx:next_idx + 1]))
             done_flag = False
             if curr_idx < len(is_terminal) and is_terminal[curr_idx]:
@@ -548,8 +548,15 @@ class FrameStackedBehavioralDataLoader:
             next_onehot[action_next_idx] = 1.0
             file_curr_action_onehot.append(curr_onehot)
             file_next_action_onehot.append(next_onehot)
-            sequence_start_flag = bool(is_first[next_idx]) or curr_idx == 0
-            prev_action_idx = action_curr_idx if not sequence_start_flag else 0
+            sequence_start_flag = bool(is_first[curr_idx]) or bool(is_first[start_idx]) or curr_idx == 0
+            if not sequence_start_flag and curr_idx - 1 >= 0:
+                prev_action_raw = actions[curr_idx - 1]
+                if actions.ndim > 1 and actions.shape[-1] > 1:
+                    prev_action_idx = int(np.argmax(prev_action_raw))
+                else:
+                    prev_action_idx = int(prev_action_raw)
+            else:
+                prev_action_idx = 0
             file_prev_actions.append(prev_action_idx)
             file_sequence_starts.append(sequence_start_flag)
 

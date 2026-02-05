@@ -466,11 +466,11 @@ class SActorLearner:
         actions_seq_full = batch["actions_seq"]
         rewards_seq_full = batch.get("rewards_seq")
 
-        # Drop the first frame-stack; imitate on the remaining L steps
-        obs_seq = obs_seq_full[:, 1:]
+        # Predict action_{t+1} from obs_t
+        obs_seq = obs_seq_full[:, :-1]
         human_actions_seq = actions_seq_full[:, 1:]
         rewards_seq = (
-            rewards_seq_full[:, 1:] if rewards_seq_full is not None else None
+            rewards_seq_full[:, :-1] if rewards_seq_full is not None else None
         )
 
         batch_size, seq_len = human_actions_seq.shape

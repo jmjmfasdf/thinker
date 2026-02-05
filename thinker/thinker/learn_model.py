@@ -391,32 +391,7 @@ class SModelLearner:
                     "rewards_seq": rewards_seq,
                     "sequence_starts": sequence_starts,
                 }
-        batch = self.bc_loader.get_paired_batch(batch_size=self.bc_batch_size)
-        if batch is None:
-            return None
-        obs = torch.from_numpy(batch["obs"]).float().to(self.device)
-        next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)
-        actions_np = np.asarray(batch["actions"])
-        if actions_np.ndim > 1 and actions_np.shape[-1] > 1:
-            actions_idx = actions_np.argmax(axis=-1)
-        else:
-            actions_idx = actions_np.reshape(-1)
-        actions = torch.from_numpy(actions_idx.astype(np.int64)).long().to(self.device)
-        rewards = torch.from_numpy(np.asarray(batch["rewards"], dtype=np.float32)).to(self.device)
-        dones_np = batch.get("dones")
-        if dones_np is not None:
-            dones = torch.from_numpy(np.asarray(dones_np, dtype=np.float32)).to(self.device)
-        else:
-            dones = torch.zeros_like(rewards)
-        action_probs = torch.from_numpy(batch["curr_action_onehot"]).float().to(self.device)
-        return {
-            "obs": obs,
-            "next_obs": next_obs,
-            "actions": actions,
-            "rewards": rewards,
-            "dones": dones,
-            "action_probs": action_probs,
-        }
+        return None
 
     def _compute_bc_loss(self):
         if not self.bc_enabled or self.bc_loader is None:
@@ -424,30 +399,25 @@ class SModelLearner:
         batch = self._sample_bc_batch()
         if batch is None:
             return None
-        if "obs_seq" in batch:
-            obs_seq = batch["obs_seq"]
-            actions_seq = batch["actions_seq"]
-            rewards_seq = batch.get("rewards_seq")
-            # Build transitions: obs_t -> obs_{t+1} with shifted actions (action_{t+1})
-            obs = obs_seq[:, :-1]
-            next_obs = obs_seq[:, 1:]
-            actions = actions_seq[:, :-1]
-            if rewards_seq is not None:
-                rewards = rewards_seq[:, 1:]
-            else:
-                rewards = torch.zeros_like(actions, dtype=torch.float32)
-            # Flatten sequences into a single batch
-            obs = obs.reshape(-1, *obs.shape[2:])
-            next_obs = next_obs.reshape(-1, *next_obs.shape[2:])
-            actions = actions.reshape(-1)
-            rewards = rewards.reshape(-1)
-            dones = torch.zeros_like(rewards)
+        if "obs_seq" not in batch:
+            return None
+        obs_seq = batch["obs_seq"]
+        actions_seq = batch["actions_seq"]
+        rewards_seq = batch.get("rewards_seq")
+        # Build transitions: obs_t + action_{t+1} -> obs_{t+1}, reward_{t+1}
+        obs = obs_seq[:, :-1]
+        next_obs = obs_seq[:, 1:]
+        actions = actions_seq[:, 1:]
+        if rewards_seq is not None:
+            rewards = rewards_seq[:, 1:]
         else:
-            obs = batch["obs"]
-            next_obs = batch["next_obs"]
-            actions = batch["actions"]
-            rewards = batch["rewards"]
-            dones = batch["dones"]
+            rewards = torch.zeros_like(actions, dtype=torch.float32)
+        # Flatten sequences into a single batch
+        obs = obs.reshape(-1, *obs.shape[2:])
+        next_obs = next_obs.reshape(-1, *next_obs.shape[2:])
+        actions = actions.reshape(-1)
+        rewards = rewards.reshape(-1)
+        dones = torch.zeros_like(rewards)
         if getattr(self.model_net, "state_dtype_n", 0) == 0:
             obs_input = (obs * 255.0).clamp(0, 255).to(torch.uint8)
             next_input = (next_obs * 255.0).clamp(0, 255).to(torch.uint8)

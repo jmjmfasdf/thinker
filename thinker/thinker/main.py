@@ -52,6 +52,7 @@ class Env(gym.Wrapper):
                  gpu=True,
                  load_net=True, 
                  timing=False,
+                 core_wrapper=None,
                  **kwargs):
         assert name is not None or env_fn is not None, \
             "need either env or env-making function"        
@@ -195,15 +196,16 @@ class Env(gym.Wrapper):
             self.rank * env_n + self.flags.base_seed + env_n
         ))        
 
-        if self.flags.wrapper_type == 0:
-            core_wrapper = cModelWrapper
-        elif self.flags.wrapper_type == 1:
-            core_wrapper = wrapper.DummyWrapper
-        elif self.flags.wrapper_type == 2:
-            core_wrapper = cPerfectWrapper
-        else:
-            raise Exception(
-                f"wrapper_type can only be [0, 1, 2], not {self.flags.wrapper_type}")
+        if core_wrapper is None:
+            if self.flags.wrapper_type == 0:
+                core_wrapper = cModelWrapper
+            elif self.flags.wrapper_type == 1:
+                core_wrapper = wrapper.DummyWrapper
+            elif self.flags.wrapper_type == 2:
+                core_wrapper = cPerfectWrapper
+            else:
+                raise Exception(
+                    f"wrapper_type can only be [0, 1, 2], not {self.flags.wrapper_type}")
 
         # wrap the env with core Cython wrapper that runs
         # the core Thinker algorithm

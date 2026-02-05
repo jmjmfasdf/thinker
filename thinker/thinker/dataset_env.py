@@ -14,10 +14,13 @@ class BehaviorDatasetVectorEnv:
     drive imagination and real steps using pre-recorded observations.
 
     Observations are frame-stacked and resized on the fly.
-    Real steps advance through precomputed logical indices (every
-    `frame_stack_n` frames within an episode). When an episode ends, the env
-    immediately resets and returns the first observation of the next episode in
-    the same step, mirroring EnvPoolWrap behavior.
+    Real steps advance through precomputed logical indices using stride=1
+    within each episode. Each stacked observation is built from the most
+    recent frame going backwards (t-3..t), and the human action is aligned
+    with the most recent frame (action at t).
+    When an episode ends, the env immediately resets and returns the first
+    observation of the next episode in the same step, mirroring EnvPoolWrap
+    behavior.
     """
 
     def __init__(
@@ -63,7 +66,13 @@ class BehaviorDatasetVectorEnv:
         self.metadata: Dict[str, Any] = {}
 
         # Precompute logical step indices and episode boundaries
-        self._logical_indices, self._segment_reward_range, self._segment_actions_idx, self._episode_start_flags = self._prepare_logical_steps()
+        (
+            self._logical_indices,
+            self._segment_reward_range,
+            self._segment_actions_idx,
+            self._segment_terminal_idx,
+            self._episode_start_flags,
+        ) = self._prepare_logical_steps()
         self._num_steps = len(self._logical_indices)
         self._pos = 0
         self._pos_stack: List[int] = []
@@ -120,8 +129,8 @@ class BehaviorDatasetVectorEnv:
         reward_val = float(np.sum(self._rewards[seg_lo:seg_hi]))
 
         # Determine termination at this step
-        # Done if this logical index is terminal, or next step starts a new episode
-        is_term = bool(self._is_terminal[idx])
+        term_idx = self._segment_terminal_idx[self._pos]
+        is_term = bool(self._is_terminal[term_idx])
         done = bool(is_term)
         truncated = False
 
@@ -196,11 +205,27 @@ class BehaviorDatasetVectorEnv:
                 count += 1
         return max(0, count)
 
+    def _enumerate_episode_spans(self) -> List[Tuple[int, int]]:
+        spans: List[Tuple[int, int]] = []
+        start_idx = 0
+        T = len(self._is_first)
+        for idx in range(T):
+            if idx > start_idx and self._is_first[idx]:
+                spans.append((start_idx, idx - 1))
+                start_idx = idx
+            if self._is_terminal[idx]:
+                spans.append((start_idx, idx))
+                start_idx = idx + 1
+        if start_idx < T:
+            spans.append((start_idx, T - 1))
+        return spans
+
     def _prepare_logical_steps(self):
-        """Generate logical steps with non-overlapping stacks (stride=frame_stack_n)."""
+        """Generate logical steps with stride=1 backward stacks and aligned actions."""
         logical_indices: List[int] = []
         reward_ranges: List[Tuple[int, int]] = []
         action_indices: List[int] = []
+        terminal_indices: List[int] = []
         episode_starts: List[bool] = []
 
         # Derive action indices (supports one-hot or index)
@@ -209,26 +234,20 @@ class BehaviorDatasetVectorEnv:
         else:
             human_actions = self._raw_actions.astype(np.int64)
 
-        ep_start_ptr = 0
-        frames_since_reset = 0
-        for idx in range(len(self._raw_images)):
-            new_ep = idx == 0 or bool(self._is_first[idx])
-            if new_ep:
-                ep_start_ptr = idx
-                frames_since_reset = 1
-            else:
-                frames_since_reset += 1
+        for start, end in self._enumerate_episode_spans():
+            min_idx = start + (self.frame_stack_n - 1)
+            if end < min_idx:
+                continue
+            for t in range(min_idx, end + 1):
+                stack_start = t - (self.frame_stack_n - 1)
+                # stack is guaranteed to be within episode span
+                logical_indices.append(t)
+                reward_ranges.append((stack_start, t + 1))
+                action_indices.append(int(human_actions[t]))
+                terminal_indices.append(t)
+                episode_starts.append(t == min_idx)
 
-            # emit only every frame_stack_n frames (non-overlapping)
-            if frames_since_reset % self.frame_stack_n == 0:
-                start_idx = max(ep_start_ptr, idx - self.frame_stack_n + 1)
-                logical_indices.append(idx)
-                reward_ranges.append((start_idx, idx + 1))
-                # action aligned with the latest frame in the block
-                action_indices.append(int(human_actions[idx]))
-                episode_starts.append(new_ep or len(logical_indices) == 1)
-
-        return logical_indices, reward_ranges, action_indices, episode_starts
+        return logical_indices, reward_ranges, action_indices, terminal_indices, episode_starts
 
     def _find_next_episode_start(self, pos: int) -> Optional[int]:
         # Find the next logical index that begins a new episode

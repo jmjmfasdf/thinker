@@ -19,6 +19,7 @@ from thinker.actor_net import ActorNet
 import thinker.util as util
 import gym
 from thinker.dataset_env import BehaviorDatasetVectorEnv
+from thinker.cenv_bc import cModelWrapper as BCCModelWrapper
 
 def plot_gym_env_out(x, ax=None, title=None):
     if ax is None:
@@ -281,23 +282,24 @@ def _onehot_action(action_idx, num_actions):
     onehot[action_idx] = 1
     return onehot
 
+def _coerce_action_idx(value):
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        value = value.detach().cpu().reshape(-1)
+        if value.numel() == 0:
+            return None
+        return int(value[0].item())
+    arr = np.asarray(value).reshape(-1)
+    if arr.size == 0:
+        return None
+    return int(arr[0])
+
 def _extract_action_onehots(info, num_actions):
     if info is None or not isinstance(info, dict):
         return None, None
-    def _to_int(value):
-        if value is None:
-            return None
-        if torch.is_tensor(value):
-            value = value.detach().cpu().reshape(-1)
-            if value.numel() == 0:
-                return None
-            return int(value[0].item())
-        arr = np.asarray(value).reshape(-1)
-        if arr.size == 0:
-            return None
-        return int(arr[0])
-    human_idx = _to_int(info.get("human_action"))
-    thinker_idx = _to_int(info.get("thinker_action"))
+    human_idx = _coerce_action_idx(info.get("human_action"))
+    thinker_idx = _coerce_action_idx(info.get("thinker_action"))
     return _onehot_action(human_idx, num_actions), _onehot_action(thinker_idx, num_actions)
 
 def _stack_onehots(onehots, num_actions):
@@ -693,6 +695,7 @@ def visualize(
         # Custom dataset env: disable envpool auto-creation
         flags.envpool = False
         env_kwargs["envpool"] = False
+        env_kwargs["core_wrapper"] = BCCModelWrapper
         data = np.load(os.path.abspath(os.path.expanduser(data_path)))
         images = data["image"]
         actions = data["action"]
