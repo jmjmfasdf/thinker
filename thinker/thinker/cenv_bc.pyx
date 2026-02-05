@@ -664,7 +664,7 @@ cdef class cModelWrapper(cWrapper):
         cdef float[:,:] model_out       
         cdef size_t _old_root_n
 
-        with torch.no_grad():
+        if self.enable_grad:
             # Free any previously allocated trees to avoid leaking GPU memory
             _old_root_n = self.root_nodes.size()
             if _old_root_n > 0:
@@ -699,8 +699,8 @@ cdef class cModelWrapper(cWrapper):
                                       actions=pass_action.unsqueeze(0).to(self.device), 
                                       state=self.initial_per_state,)  
             self.update_per_state(model_net_out, idx=None)
-            vs = model_net_out.vs[-1, :, 0].cpu()
-            logits = model_net_out.policy[-1]    
+            vs = model_net_out.vs[-1, :, 0].detach().cpu()
+            logits = model_net_out.policy[-1].detach()
             logits = logits.squeeze(-2)
             logits = logits.cpu().numpy()
 
@@ -729,6 +729,72 @@ cdef class cModelWrapper(cWrapper):
             states = self.prepare_state(None, None)
             info = self.prepare_info(info, self.status, False)
             return states, info
+        else:
+            with torch.no_grad():
+                # Free any previously allocated trees to avoid leaking GPU memory
+                _old_root_n = self.root_nodes.size()
+                if _old_root_n > 0:
+                    for i in range(_old_root_n):
+                        node_del(self.root_nodes[i], except_idx=-1)
+                    self.root_nodes.clear()
+                if self.cur_nodes.size() > 0:
+                    self.cur_nodes.clear()
+                # some init.
+                self.root_nodes_qmax = np.zeros(self.env_n, dtype=np.float32)
+                self.root_nodes_qmax_ = np.zeros(self.env_n, dtype=np.float32)
+                self.rollout_depth = np.zeros(self.env_n, dtype=np.intc)
+                self.max_rollout_depth = np.zeros(self.env_n, dtype=np.intc)
+                self.cur_t = np.zeros(self.env_n, dtype=np.intc)
+                self.baseline_mean_q = torch.zeros(self.env_n, dtype=torch.float, device=self.device)        
+
+                # reset obs
+                obs, info = self.env.reset(reset_stat=True, seed=seed)
+                self.default_info = util.dict_map(info, lambda x: torch.tensor(x, device=self.device))
+                self.real_states_np = np.copy(obs)
+                self.last_thinker_action = np.full(self.env_n, -1, dtype=np.int32)
+                self.last_human_action = np.full(self.env_n, -1, dtype=np.int32)
+                self.last_thinker_action = np.full(self.env_n, -1, dtype=np.int32)
+                self.last_human_action = np.full(self.env_n, -1, dtype=np.int32)
+
+                # obtain output from model
+                obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
+                pass_action = torch.zeros(self.env_n, self.raw_dim_actions, dtype=torch.long)
+                self.initial_per_state = model_net.initial_state(batch_size=self.env_n, device=self.device)
+                model_net_out = model_net(env_state=obs_py, 
+                                          done=None,
+                                          actions=pass_action.unsqueeze(0).to(self.device), 
+                                          state=self.initial_per_state,)  
+                self.update_per_state(model_net_out, idx=None)
+                vs = model_net_out.vs[-1, :, 0].detach().cpu()
+                logits = model_net_out.policy[-1].detach()
+                logits = logits.squeeze(-2)
+                logits = logits.cpu().numpy()
+
+                # compute and update root node and current node
+                for i in range(self.env_n):
+                    root_node = node_new(pparent=NULL, action=pass_action[i, 0].item(), logit=0., num_actions=self.num_actions, 
+                        discounting=self.discounting, rec_t=self.rec_t, remember_path=True)   
+                    if i == 0: 
+                        self.model_states_keys = [md for md in model_net_out.state.keys() if not md.startswith("per_sr")]
+
+                    encoded = {"real_states": obs_py[i],
+                               "xs": model_net_out.xs[-1, i] if model_net_out.xs is not None else None,
+                               "hs": model_net_out.hs[-1, i] if model_net_out.hs is not None else None,
+                               "model_states": tuple(model_net_out.state[md][i] for md in self.model_states_keys),    
+                              }  
+                    node_expand(pnode=root_node, r=0., v=vs[i].item(), t=self.total_step[i], done=False,
+                        logits=logits[i], encoded=<PyObject*>encoded, override=False)
+                    node_visit(pnode=root_node)
+                    self.root_nodes.push_back(root_node)
+                    self.cur_nodes.push_back(root_node)
+                
+                # record initial root_nodes_qmax 
+                for i in range(self.env_n):
+                    self.root_nodes_qmax[i] = self.root_nodes[i][0].max_q
+                
+                states = self.prepare_state(None, None)
+                info = self.prepare_info(info, self.status, False)
+                return states, info
 
     def step(self, action, model_net):  
         
@@ -887,7 +953,7 @@ cdef class cModelWrapper(cWrapper):
         if pass_idx_step.size() > 0:
             if self.time:
                 block_start = timeit.default_timer()
-            with torch.no_grad():
+            if self.enable_grad:
                 obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
                 pass_action_py = torch.tensor(pass_action, dtype=torch.long, device=self.device).unsqueeze(0).unsqueeze(-1)
                 done_py = torch.tensor(done, dtype=torch.bool, device=self.device)
@@ -902,8 +968,24 @@ cdef class cModelWrapper(cWrapper):
                     state=self.initial_per_state,
                 )  
                 self.update_per_state(model_net_out_1, idx=pass_idx_step)
-            vs_1 = model_net_out_1.vs[-1, :, 0].float().cpu().numpy()
-            logits_1_ = model_net_out_1.policy[-1].float()
+            else:
+                with torch.no_grad():
+                    obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
+                    pass_action_py = torch.tensor(pass_action, dtype=torch.long, device=self.device).unsqueeze(0).unsqueeze(-1)
+                    done_py = torch.tensor(done, dtype=torch.bool, device=self.device)
+                    if pass_idx_step.size() == self.env_n:
+                        self.initial_per_state = self.per_state
+                    else:
+                        self.initial_per_state = {sk: sv[pass_idx_step] for sk, sv in self.per_state.items()}
+                    model_net_out_1 = model_net(
+                        env_state=obs_py, 
+                        done=done_py,
+                        actions=pass_action_py, 
+                        state=self.initial_per_state,
+                    )  
+                    self.update_per_state(model_net_out_1, idx=pass_idx_step)
+            vs_1 = model_net_out_1.vs[-1, :, 0].float().detach().cpu().numpy()
+            logits_1_ = model_net_out_1.policy[-1].float().detach()
             logits_1_ = logits_1_.squeeze(-2)
             logits_1 = logits_1_.cpu().numpy()
             if self.time:
@@ -933,14 +1015,14 @@ cdef class cModelWrapper(cWrapper):
                     model_net_out_4 = model_net.forward_single(
                         state=pass_model_states,
                         action=pass_model_action_py)  
-            rs_4 = model_net_out_4.rs[-1, :, 0].float().cpu().numpy()
-            vs_4 = model_net_out_4.vs[-1, :, 0].float().cpu().numpy()
-            logits_4_ = model_net_out_4.policy[-1].float()
+            rs_4 = model_net_out_4.rs[-1, :, 0].float().detach().cpu().numpy()
+            vs_4 = model_net_out_4.vs[-1, :, 0].float().detach().cpu().numpy()
+            logits_4_ = model_net_out_4.policy[-1].float().detach()
             logits_4_ = logits_4_.squeeze(-2)
 
             logits_4 = logits_4_.cpu().numpy()
             if self.pred_done:
-                done_4 = model_net_out_4.dones[-1].bool().cpu().numpy()
+                done_4 = model_net_out_4.dones[-1].bool().detach().cpu().numpy()
             if self.time and pass_model_idx.size() > 0:
                 block_time = timeit.default_timer() - block_start
                 share = block_time / pass_model_idx.size()
@@ -1131,8 +1213,8 @@ cdef class cPerfectWrapper(cWrapper):
                                       done=None,
                                       actions=pass_action.unsqueeze(0).to(self.device), 
                                       state=None,)  
-            vs = model_net_out.vs[:, :, 0].cpu()
-            logits = model_net_out.policy[-1]    
+            vs = model_net_out.vs[:, :, 0].detach().cpu()
+            logits = model_net_out.policy[-1].detach()
             logits = logits.squeeze(-2)
             logits = logits.cpu().numpy()
             self.env.quick_save()
@@ -1329,8 +1411,8 @@ cdef class cPerfectWrapper(cWrapper):
                                           done=done_py,
                                           actions=pass_action_py, 
                                           state=None,)  
-            vs = model_net_out.vs[-1, :, 0].float().cpu().numpy()
-            logits_ = model_net_out.policy[-1].float()
+            vs = model_net_out.vs[-1, :, 0].float().detach().cpu().numpy()
+            logits_ = model_net_out.policy[-1].float().detach()
             logits_ = logits_.squeeze(-2)
             logits = logits_.cpu().numpy()
             if self.time:

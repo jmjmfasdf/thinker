@@ -598,6 +598,42 @@ class SModelLearner:
                 self.model_net,
             )
 
+            def _ensure_2d(v):
+                if torch.is_tensor(v):
+                    return v.unsqueeze(-1) if v.dim() == 1 else v
+                if isinstance(v, np.ndarray):
+                    return v[:, None] if v.ndim == 1 else v
+                return v
+
+            if isinstance(info, dict):
+                if "episode_return" in info and info["episode_return"] is not None:
+                    info["episode_return"] = _ensure_2d(info["episode_return"])
+                elif "episode_return" in info and info["episode_return"] is None:
+                    info["episode_return"] = None
+                if "im_episode_return" in info and info["im_episode_return"] is not None:
+                    info["im_episode_return"] = _ensure_2d(info["im_episode_return"])
+                if "cur_episode_return" in info and info["cur_episode_return"] is not None:
+                    info["cur_episode_return"] = _ensure_2d(info["cur_episode_return"])
+                # Fill missing episode returns to keep create_env_out stacking stable.
+                if getattr(self.flags, "im_cost", 0.0) > 0.0:
+                    if "im_episode_return" not in info or info["im_episode_return"] is None:
+                        base_er = info.get("episode_return")
+                        if base_er is None:
+                            info["im_episode_return"] = torch.zeros(
+                                (batch_size, 1), device=self.device
+                            )
+                        else:
+                            info["im_episode_return"] = torch.zeros_like(base_er)
+                if getattr(self.flags, "cur_cost", 0.0) > 0.0:
+                    if "cur_episode_return" not in info or info["cur_episode_return"] is None:
+                        base_er = info.get("episode_return")
+                        if base_er is None:
+                            info["cur_episode_return"] = torch.zeros(
+                                (batch_size, 1), device=self.device
+                            )
+                        else:
+                            info["cur_episode_return"] = torch.zeros_like(base_er)
+
             step_status = info.get("step_status", None)
             if step_status is None:
                 break
