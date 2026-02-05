@@ -11,6 +11,7 @@ from torch.cuda.amp import GradScaler
 from thinker.core.file_writer import FileWriter
 from thinker.core.module import guassian_kl_div
 from thinker.model_net import ModelNet, VPNet
+from thinker.actor_net import ActorNet
 import thinker.util as util
 import gc
 from collections import namedtuple
@@ -82,6 +83,7 @@ class SModelLearner:
             self.actor_param_buffer = ray_obj.get("actor_param_buffer") if ray_obj else None
 
         self.reward_n = self.model_net.reward_n
+        self.actor_net = None
 
         if self.device == torch.device("cuda"):
             self._logger.info("Init. model-learning: Using CUDA.")
@@ -362,6 +364,25 @@ class SModelLearner:
         self.bc_enabled = True
         self._logger.info(f"IcoPro model data loader initialised with {len(self.bc_loader.data_files)} files (subjects={subjects}, game_id={game_id}).")
 
+    def _ensure_bc_actor_net(self):
+        if self.actor_net is not None:
+            return True
+        if self.actor_param_buffer is None:
+            self._logger.warning("actor_param_buffer missing; cannot build BC actor for model loss.")
+            return False
+        init_params = None
+        try:
+            init_params = ray.get(self.actor_param_buffer.get_data.remote("actor_net_init_params"))
+        except Exception as exc:
+            self._logger.warning(f"Failed to fetch actor init params: {exc}")
+        if init_params is None:
+            self._logger.warning("actor_net_init_params not available; skipping BC model update.")
+            return False
+        self.actor_net = ActorNet(**init_params)
+        self.actor_net.to(self.device)
+        self.actor_net.train(False)
+        return True
+
     def _ensure_bc_planner(
         self,
         obs_seq_np: np.ndarray,
@@ -484,127 +505,161 @@ class SModelLearner:
             return None
         if "obs_seq" not in batch:
             return None
-        obs_seq = batch["obs_seq"]
-        actions_seq = batch["actions_seq"]
-        rewards_seq = batch.get("rewards_seq")
-        # Build transitions: obs_t + action_{t+1} -> obs_{t+1}, reward_{t+1}
-        obs = obs_seq[:, :-1]
-        next_obs = obs_seq[:, 1:]
-        actions = actions_seq[:, 1:]
-        if rewards_seq is not None:
-            rewards = rewards_seq[:, 1:]
-        else:
-            rewards = torch.zeros_like(actions, dtype=torch.float32)
+        obs_seq_full = batch["obs_seq"]
+        actions_seq_full = batch["actions_seq"]
+        rewards_seq_full = batch.get("rewards_seq")
 
-        # Ensure tree carry via cenv_bc sequence playback (no grad)
-        with torch.no_grad():
-            obs_np = (obs.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-            if rewards_seq is not None:
-                rewards_np = rewards.cpu().numpy().astype(np.float32)
-            else:
-                rewards_np = np.zeros_like(actions.cpu().numpy(), dtype=np.float32)
-            actions_np = actions.cpu().numpy().astype(np.int64)
-            planner = self._ensure_bc_planner(obs_np, rewards_np, actions_np)
-            was_training = self.model_net.training
-            self.model_net.eval()
+        if not self._ensure_bc_actor_net():
+            return None
+        if self.actor_param_buffer is not None:
             try:
-                states, info = planner.reset(self.model_net)
-                dummy_action = np.zeros((actions_np.shape[0],), dtype=np.int32)
-                dummy_reset = np.zeros_like(dummy_action)
-                for _ in range(actions_np.shape[1]):
-                    states, reward, done, truncated, info = planner.step(
-                        (dummy_action, dummy_reset), self.model_net
-                    )
-            finally:
-                if was_training:
-                    self.model_net.train()
-        # Flatten sequences into a single batch
-        obs = obs.reshape(-1, *obs.shape[2:])
-        next_obs = next_obs.reshape(-1, *next_obs.shape[2:])
-        actions = actions.reshape(-1)
-        rewards = rewards.reshape(-1)
-        dones = torch.zeros_like(rewards)
-        if getattr(self.model_net, "state_dtype_n", 0) == 0:
-            obs_input = (obs * 255.0).clamp(0, 255).to(torch.uint8)
-            next_input = (next_obs * 255.0).clamp(0, 255).to(torch.uint8)
-        else:
-            obs_input = obs
-            next_input = next_obs
-        batch_size = obs.shape[0]
-        done = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-        prev_actions = torch.zeros(batch_size, 1, dtype=torch.long, device=self.device)
-        current_actions = actions.view(batch_size, 1)
-        action_seq = torch.stack([prev_actions, current_actions], dim=0)
-        state = self.model_net.initial_state(batch_size=batch_size, device=self.device)
-        amp_enabled = self.flags.float16 and self.device.type == "cuda"
-        with torch.autocast("cuda", enabled=amp_enabled):
-            model_out = self.model_net.forward(
-                env_state=obs_input,
-                done=done,
-                actions=action_seq,
-                state=state,
-                future_env_state=next_input,
-                training=True,
-            )
-        reward_loss = None
-        if getattr(model_out, "rs", None) is not None:
-            predicted_rewards = model_out.rs[0]
-            if predicted_rewards.ndim == 2:
-                predicted_rewards = predicted_rewards[:, 0]
-            reward_loss = F.mse_loss(predicted_rewards.float(), rewards.float())
+                self.refresh_actor()
+            except Exception:
+                pass
+        actor_device = next(self.actor_net.parameters()).device
 
-        margin_loss = None
-        pvp_loss = None
+        # Align actions so env.current_human_action() returns action_{t+1} for obs_t
+        actions_seq_env = torch.cat(
+            [actions_seq_full[:, 1:], actions_seq_full[:, -1:]], dim=1
+        )
 
-        # Optional policy-based margin / PVP losses for model_net (IcoPro-style)
-        if getattr(model_out, "policy", None) is not None and self.model_net.discrete_action:
-            logits = model_out.policy[0].float()
-            # ensure 2D [B, num_actions]
-            if logits.dim() == 4:
-                logits = logits[:, 0]
-            if logits.dim() == 3:
-                logits = logits[:, 0, :]
-            human_actions = actions
-
-            if self.bc_margin_coef > 0.0:
-                margin_tensor = torch.full(
-                    (human_actions.shape[0],),
-                    self.bc_margin,
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-                margin_loss = dqfd_margin_loss(logits, human_actions, margin_tensor)
-
-            if self.bc_pvp_coef > 0.0:
-                with torch.no_grad():
-                    pred_actions = torch.argmax(logits, dim=-1)
-                q_human = logits.gather(1, human_actions.unsqueeze(1)).squeeze(1)
-                q_agent = logits.gather(1, pred_actions.unsqueeze(1)).squeeze(1)
-                pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
-                diff = (pred_actions != human_actions).float()
-                if diff.sum() > 0:
-                    pvp_neg = F.mse_loss(diff * q_agent, diff * (-torch.ones_like(q_agent)))
-                else:
-                    pvp_neg = torch.zeros_like(pvp_pos)
-                pvp_loss = pvp_pos + pvp_neg
-
-        if reward_loss is None and margin_loss is None and pvp_loss is None:
+        batch_size, seq_total = actions_seq_env.shape
+        target_real_steps = max(seq_total - 1, 0)
+        if target_real_steps <= 0:
             return None
 
-        total_loss = torch.zeros((), device=self.device)
-        metrics = {}
-        if reward_loss is not None:
-            total_loss = total_loss + self.bc_model_coef * reward_loss
-            metrics["reward_loss"] = reward_loss
-        if margin_loss is not None:
-            total_loss = total_loss + self.bc_margin_coef * margin_loss
-            metrics["margin_loss"] = margin_loss
-        if pvp_loss is not None:
-            total_loss = total_loss + self.bc_pvp_coef * pvp_loss
-            metrics["pvp_loss"] = pvp_loss
+        obs_np = (obs_seq_full.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+        if rewards_seq_full is not None:
+            rewards_np = rewards_seq_full.cpu().numpy().astype(np.float32)
+        else:
+            rewards_np = np.zeros((batch_size, seq_total), dtype=np.float32)
+        actions_np = actions_seq_env.cpu().numpy().astype(np.int64)
 
-        metrics["total_loss"] = total_loss
-        return metrics
+        planner = self._ensure_bc_planner(obs_np, rewards_np, actions_np)
+        if hasattr(planner, "enable_grad"):
+            planner.enable_grad = True
+
+        states, info = planner.reset(self.model_net)
+
+        env_out = util.init_env_out(
+            states,
+            info,
+            self.flags,
+            dim_actions=self.actor_net.dim_actions,
+            tuple_action=self.actor_net.tuple_action,
+        )
+
+        def _to_actor(x):
+            return x.to(actor_device) if torch.is_tensor(x) else x
+
+        env_out = env_out._replace(
+            real_states=_to_actor(env_out.real_states),
+            tree_reps=_to_actor(env_out.tree_reps),
+            xs=_to_actor(env_out.xs) if env_out.xs is not None else None,
+            hs=_to_actor(env_out.hs) if env_out.hs is not None else None,
+            done=_to_actor(env_out.done),
+            real_done=_to_actor(env_out.real_done),
+            truncated_done=_to_actor(env_out.truncated_done),
+            last_pri=_to_actor(env_out.last_pri),
+            last_reset=_to_actor(env_out.last_reset),
+            reward=_to_actor(env_out.reward),
+            step_status=_to_actor(env_out.step_status),
+        )
+
+        actor_state = self.actor_net.initial_state(
+            batch_size=batch_size, device=actor_device
+        )
+
+        pending_xs = [None] * batch_size
+        xs_loss_sum = torch.zeros((), device=self.device)
+        xs_loss_count = 0
+        real_steps_seen = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+
+        rec_t = int(getattr(planner, "rec_t", 1))
+        max_steps = max(1, target_real_steps * max(rec_t, 1))
+
+        for _ in range(max_steps):
+            with torch.no_grad():
+                actor_out, actor_state = self.actor_net(
+                    env_out, actor_state, compute_loss=False, greedy=False
+                )
+            if not self.actor_net.disable_thinker:
+                primary_action, reset_action = actor_out.action
+            else:
+                primary_action, reset_action = actor_out.action, None
+
+            states, reward, done, truncated, info = planner.step(
+                (
+                    primary_action.detach().cpu().numpy(),
+                    reset_action.detach().cpu().numpy()
+                    if reset_action is not None
+                    else np.zeros_like(primary_action.detach().cpu().numpy()),
+                ),
+                self.model_net,
+            )
+
+            step_status = info.get("step_status", None)
+            if step_status is None:
+                break
+            if not torch.is_tensor(step_status):
+                step_status = torch.tensor(step_status, device=self.device)
+
+            if states.get("xs", None) is not None:
+                last_im_mask = (step_status == 2)
+                if torch.any(last_im_mask):
+                    idxs = last_im_mask.nonzero(as_tuple=False).view(-1).tolist()
+                    for i in idxs:
+                        pending_xs[i] = states["xs"][i]
+
+            real_mask = (step_status == 0) | (step_status == 3)
+            if torch.any(real_mask):
+                idxs = real_mask.nonzero(as_tuple=False).view(-1).tolist()
+                for i in idxs:
+                    if real_steps_seen[i] >= target_real_steps:
+                        continue
+                    pred_x = pending_xs[i]
+                    if pred_x is None:
+                        continue
+                    target_x = states["real_states"][i]
+                    if target_x.dtype == torch.uint8:
+                        target_x = target_x.float() / 255.0
+                    else:
+                        target_x = target_x.float()
+                    xs_loss_sum = xs_loss_sum + F.mse_loss(pred_x, target_x, reduction="mean")
+                    xs_loss_count += 1
+                    pending_xs[i] = None
+                real_steps_seen[real_mask] += 1
+
+            env_out = util.create_env_out(
+                actor_out.action, states, reward, done, truncated, info, flags=self.flags
+            )
+            env_out = env_out._replace(
+                real_states=_to_actor(env_out.real_states),
+                tree_reps=_to_actor(env_out.tree_reps),
+                xs=_to_actor(env_out.xs) if env_out.xs is not None else None,
+                hs=_to_actor(env_out.hs) if env_out.hs is not None else None,
+                done=_to_actor(env_out.done),
+                real_done=_to_actor(env_out.real_done),
+                truncated_done=_to_actor(env_out.truncated_done),
+                last_pri=_to_actor(env_out.last_pri),
+                last_reset=_to_actor(env_out.last_reset),
+                reward=_to_actor(env_out.reward),
+                step_status=_to_actor(env_out.step_status),
+            )
+
+            if torch.all(real_steps_seen >= target_real_steps):
+                break
+
+        if xs_loss_count <= 0:
+            return None
+
+        xs_loss = xs_loss_sum / float(xs_loss_count)
+        total_loss = self.bc_model_coef * xs_loss
+
+        return {
+            "xs_loss": xs_loss,
+            "total_loss": total_loss,
+        }
 
     def _maybe_run_bc_update(self):
         """Optional supervised update of the model using behavioral data."""

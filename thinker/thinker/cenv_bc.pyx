@@ -271,6 +271,7 @@ cdef class cWrapper():
     cdef bool return_x
     cdef bool return_double
     cdef bool has_action_seq
+    cdef public bint enable_grad
 
     cdef bool im_enable    
     cdef int stat_mask_type
@@ -382,6 +383,7 @@ cdef class cWrapper():
         self.im_enable = flags.im_enable
         self.stat_mask_type = flags.stat_mask_type
         self.time = timing        
+        self.enable_grad = 1 if getattr(flags, "icopro_cenv_grad", False) else 0
         
         self.device = torch.device("cpu") if device is None else device        
         self.env = env  
@@ -512,6 +514,15 @@ cdef class cWrapper():
                 xs = torch.concat([root_xs, xs], dim=1)        
             assert xs is not None, "xs cannot be None"
             states["xs"] = xs
+            if self.enable_grad:
+                # Detach stored node xs to avoid retaining graphs across steps.
+                for i in range(self.env_n):
+                    encoded = <dict> self.cur_nodes[i][0].encoded
+                    if encoded is not None and "xs" in encoded and encoded["xs"] is not None:
+                        encoded["xs"] = encoded["xs"].detach()
+                    encoded = <dict> self.root_nodes[i][0].encoded
+                    if encoded is not None and "xs" in encoded and encoded["xs"] is not None:
+                        encoded["xs"] = encoded["xs"].detach()
 
         if self.return_h:
             hs = self.compute_model_out(self.cur_nodes, "hs")
@@ -907,13 +918,21 @@ cdef class cModelWrapper(cWrapper):
         if pass_model_action.size() > 0:
             if self.time:
                 block_start = timeit.default_timer()
-            with torch.no_grad():
+            if self.enable_grad:
                 pass_model_states = dict({md: torch.stack([ms[i] for ms in pass_model_states], dim=0)
                         for i, md in enumerate(self.model_states_keys)})
                 pass_model_action_py = torch.tensor(pass_model_action, dtype=torch.long, device=self.device).unsqueeze(-1)                
                 model_net_out_4 = model_net.forward_single(
                     state=pass_model_states,
                     action=pass_model_action_py)  
+            else:
+                with torch.no_grad():
+                    pass_model_states = dict({md: torch.stack([ms[i] for ms in pass_model_states], dim=0)
+                            for i, md in enumerate(self.model_states_keys)})
+                    pass_model_action_py = torch.tensor(pass_model_action, dtype=torch.long, device=self.device).unsqueeze(-1)                
+                    model_net_out_4 = model_net.forward_single(
+                        state=pass_model_states,
+                        action=pass_model_action_py)  
             rs_4 = model_net_out_4.rs[-1, :, 0].float().cpu().numpy()
             vs_4 = model_net_out_4.vs[-1, :, 0].float().cpu().numpy()
             logits_4_ = model_net_out_4.policy[-1].float()
