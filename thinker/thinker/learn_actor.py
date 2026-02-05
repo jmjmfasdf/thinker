@@ -718,45 +718,7 @@ class SActorLearner:
                     "rewards_seq": rewards_seq,
                     "sequence_starts": sequence_starts,
                 }
-        batch = self.bc_loader.get_paired_batch(batch_size=self.bc_batch_size)
-        if batch is None:
-            return None
-        device = self.device
-        obs = torch.from_numpy(batch["next_obs"]).float().to(device)
-        prev_obs = torch.from_numpy(batch["obs"]).float().to(device)
-        rewards = torch.from_numpy(
-            np.asarray(batch.get("rewards", np.zeros(obs.shape[0], dtype=np.float32)), dtype=np.float32)
-        ).to(device)
-        dones_np = batch.get("dones")
-        if dones_np is not None:
-            dones = torch.from_numpy(np.asarray(dones_np, dtype=np.float32)).to(device)
-        else:
-            dones = torch.zeros_like(rewards)
-        actions_np = np.asarray(batch["actions"])
-        if actions_np.ndim > 1 and actions_np.shape[-1] > 1:
-            actions_idx = actions_np.argmax(axis=-1)
-        else:
-            actions_idx = actions_np.reshape(-1)
-        actions = torch.from_numpy(actions_idx.astype(np.int64)).long().to(device)
-        prev_actions = torch.from_numpy(
-            np.asarray(batch.get("prev_actions", actions_idx), dtype=np.int64)
-        ).long().to(device)
-        action_probs = torch.from_numpy(batch["curr_action_onehot"]).float().to(device)
-        sequence_starts_np = batch.get("sequence_starts")
-        if sequence_starts_np is not None:
-            sequence_starts = torch.from_numpy(sequence_starts_np.astype(np.bool_)).to(device)
-        else:
-            sequence_starts = torch.ones_like(prev_actions, dtype=torch.bool)
-        return {
-            "obs": obs,
-            "prev_obs": prev_obs,
-            "actions": actions,
-            "rewards": rewards,
-            "dones": dones,
-            "prev_actions": prev_actions,
-            "sequence_starts": sequence_starts,
-            "action_probs": action_probs,
-        }
+        return None
 
     def _compute_bc_loss(self):
         if not self.bc_enabled or self.bc_loader is None:
@@ -767,36 +729,9 @@ class SActorLearner:
         batch = self._sample_bc_batch()
         if batch is None:
             return None
-        if "obs_seq" in batch:
-            return self._compute_bc_seq_loss(batch)
-        # Fallback: simple BC without planner when only paired batch is available
-        obs = batch["obs"]
-        human_actions = batch["actions"]
-        logits = self.actor_net.policy(self.actor_net.normalize(obs))
-        logits = logits.view(obs.shape[0], self.actor_net.dim_actions, self.actor_net.num_actions)
-        if logits.dim() == 3:
-            logits = logits[:, 0, :]
-        margin_tensor = torch.full((human_actions.shape[0],), self.bc_margin, dtype=torch.float32, device=self.device)
-        margin_loss = dqfd_margin_loss(logits, human_actions, margin_tensor)
-        # action difference loss: cross-entropy between logits and human action
-        action_diff_loss = F.cross_entropy(logits, human_actions)
-        kl_loss = torch.zeros((), device=self.device)
-        pvp_loss = torch.zeros((), device=self.device)
-        total_loss = (
-            self.bc_margin_coef * margin_loss
-            + self.bc_pvp_coef * pvp_loss
-            + self.bc_kl_coef * kl_loss
-            + self.bc_action_diff_coef * action_diff_loss
-        )
-        accuracy = float((torch.argmax(logits.detach(), dim=-1) == human_actions).float().mean().item())
-        return {
-            "total_loss": total_loss,
-            "margin_loss": margin_loss,
-            "action_diff_loss": action_diff_loss,
-            "pvp_loss": pvp_loss,
-            "kl_loss": kl_loss,
-            "accuracy": accuracy,
-        }
+        if "obs_seq" not in batch:
+            return None
+        return self._compute_bc_seq_loss(batch)
 
     def _maybe_run_bc_update(self):
         if not self.bc_enabled or self.bc_loader is None or self.bc_optimizer is None:

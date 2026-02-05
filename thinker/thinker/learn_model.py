@@ -304,6 +304,8 @@ class SModelLearner:
         self.bc_step = 0
         self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
         self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
+        # Reuse actor batch_length for sequence BC when available.
+        self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
         self.bc_model_coef = float(getattr(self.flags, "icopro_model_coef", 1.0))
         self.bc_model_kl_coef = float(getattr(self.flags, "icopro_model_kl_coef", 0.0))
         # Reuse IcoPro actor hyperparameters for model policy shaping
@@ -354,6 +356,41 @@ class SModelLearner:
     def _sample_bc_batch(self):
         if self.bc_loader is None:
             return None
+        if self.bc_seq_len > 1 and hasattr(self.bc_loader, "get_sequence_batch"):
+            seq_batch = self.bc_loader.get_sequence_batch(
+                batch_size=self.bc_batch_size,
+                sequence_length=self.bc_seq_len + 1,
+            )
+            if seq_batch is not None and "obs_seq" in seq_batch:
+                device = self.device
+                obs_seq = torch.from_numpy(seq_batch["obs_seq"]).float().to(device)
+                actions_seq = torch.from_numpy(
+                    np.asarray(seq_batch["actions_seq"], dtype=np.int64)
+                ).long().to(device)
+                rewards_seq = torch.from_numpy(
+                    np.asarray(
+                        seq_batch.get(
+                            "rewards_seq",
+                            np.zeros_like(seq_batch["actions_seq"], dtype=np.float32),
+                        ),
+                        dtype=np.float32,
+                    )
+                ).to(device)
+                sequence_starts = torch.from_numpy(
+                    np.asarray(
+                        seq_batch.get(
+                            "sequence_starts",
+                            np.ones(actions_seq.shape[0], dtype=np.bool_),
+                        ),
+                        dtype=np.bool_,
+                    )
+                ).to(device)
+                return {
+                    "obs_seq": obs_seq,
+                    "actions_seq": actions_seq,
+                    "rewards_seq": rewards_seq,
+                    "sequence_starts": sequence_starts,
+                }
         batch = self.bc_loader.get_paired_batch(batch_size=self.bc_batch_size)
         if batch is None:
             return None
@@ -387,11 +424,30 @@ class SModelLearner:
         batch = self._sample_bc_batch()
         if batch is None:
             return None
-        obs = batch["obs"]
-        next_obs = batch["next_obs"]
-        actions = batch["actions"]
-        rewards = batch["rewards"]
-        dones = batch["dones"]
+        if "obs_seq" in batch:
+            obs_seq = batch["obs_seq"]
+            actions_seq = batch["actions_seq"]
+            rewards_seq = batch.get("rewards_seq")
+            # Build transitions: obs_t -> obs_{t+1} with shifted actions (action_{t+1})
+            obs = obs_seq[:, :-1]
+            next_obs = obs_seq[:, 1:]
+            actions = actions_seq[:, :-1]
+            if rewards_seq is not None:
+                rewards = rewards_seq[:, 1:]
+            else:
+                rewards = torch.zeros_like(actions, dtype=torch.float32)
+            # Flatten sequences into a single batch
+            obs = obs.reshape(-1, *obs.shape[2:])
+            next_obs = next_obs.reshape(-1, *next_obs.shape[2:])
+            actions = actions.reshape(-1)
+            rewards = rewards.reshape(-1)
+            dones = torch.zeros_like(rewards)
+        else:
+            obs = batch["obs"]
+            next_obs = batch["next_obs"]
+            actions = batch["actions"]
+            rewards = batch["rewards"]
+            dones = batch["dones"]
         if getattr(self.model_net, "state_dtype_n", 0) == 0:
             obs_input = (obs * 255.0).clamp(0, 255).to(torch.uint8)
             next_input = (next_obs * 255.0).clamp(0, 255).to(torch.uint8)

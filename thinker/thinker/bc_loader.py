@@ -195,8 +195,8 @@ class FrameStackedBehavioralDataLoader:
     def get_sequence_batch(self, batch_size: int = 1, sequence_length: int = 2) -> Optional[Dict[str, np.ndarray]]:
         """
         Get a batch of frame-stack sequences for imitation learning.
-        Each observation stack uses consecutive frames with stride=1 between stacked observations,
-        and the human action is taken from the first frame of each stack.
+        Each observation stack uses consecutive frames with stride=1 between stacked observations.
+        The human action is shifted by +1 relative to the stack start so obs_t -> action_{t+1}.
 
         Args:
             batch_size: number of sequences to return
@@ -205,7 +205,7 @@ class FrameStackedBehavioralDataLoader:
         Returns:
             Dict with keys:
             - 'obs_seq': (B, L, C*stack_n, H, W) stacked observations (float/normalized)
-            - 'actions_seq': (B, L) discrete human actions (first frame of each stack)
+            - 'actions_seq': (B, L) discrete human actions (next action, i.e. index +1)
             - 'rewards_seq': (B, L) summed rewards per stack
             - 'sequence_starts': (B,) bool flags (all True; each sample is a fresh sequence)
         """
@@ -288,16 +288,20 @@ class FrameStackedBehavioralDataLoader:
         # first stack uses frames [start, start+stack_n-1], last stack starts at start+(L-1)
         # and uses up to start+(L-1)+(stack_n-1) => stack_n + L - 1 frames.
         frames_per_seq = self.frame_stack_n + sequence_length - 1
+        # For shifted actions: we need action indices up to start + sequence_length.
+        max_frame_offset = self.frame_stack_n + sequence_length - 2
+        max_action_offset = sequence_length
+        max_offset = max(max_frame_offset, max_action_offset)
         candidates: List[int] = []
         for start, end in self._enumerate_episode_spans(is_first, is_terminal):
-            max_start = end - frames_per_seq + 1
+            max_start = end - max_offset
             if max_start < start:
                 continue
             # Align stacks so each uses fresh frames (stride = frame_stack_n)
             s = start
             while s <= max_start:
-                window_end = s + frames_per_seq
-                if window_end <= len(images) and not np.any(is_terminal[s:window_end]):
+                window_end = s + max_offset + 1
+                if window_end <= len(images) and not np.any(is_terminal[s:window_end]) and not np.any(is_first[s + 1:window_end]):
                     candidates.append(s)
                 s += self.frame_stack_n
 
@@ -314,7 +318,8 @@ class FrameStackedBehavioralDataLoader:
                 # shift stacked observations by 1 frame each step
                 stack_start = start_idx + t
                 obs_seq.append(self._create_forward_stack(images, stack_start))
-                actions_seq.append(self._action_index(actions[stack_start]))
+                action_idx = stack_start + 1
+                actions_seq.append(self._action_index(actions[action_idx]))
                 rewards_seq.append(
                     float(np.sum(rewards[stack_start : stack_start + self.frame_stack_n]))
                 )
