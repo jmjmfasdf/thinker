@@ -15,6 +15,8 @@ import thinker.util as util
 import gc
 from collections import namedtuple
 from thinker.bc_loader import FrameStackedBehavioralDataLoader
+from thinker.dataset_env import BehaviorSequenceVectorEnv
+from thinker.cenv_bc import cModelWrapper as BCCModelWrapper
 
 def dqfd_margin_loss(q_values: torch.Tensor, actions: torch.Tensor, margin: torch.Tensor) -> torch.Tensor:
     if q_values.ndim != 2:
@@ -304,6 +306,13 @@ class SModelLearner:
         self.bc_step = 0
         self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
         self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
+        self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
+        # Cached planner/env for IcoPro BC sequence playback (tree carry)
+        self.bc_planner = None
+        self.bc_planner_env = None
+        self.bc_planner_batch_size = 0
+        self.bc_planner_seq_len = 0
+        self.bc_planner_device = None
         # Reuse actor batch_length for sequence BC when available.
         self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
         self.bc_model_coef = float(getattr(self.flags, "icopro_model_coef", 1.0))
@@ -352,6 +361,80 @@ class SModelLearner:
         self.bc_optimizer = torch.optim.Adam(self.model_net.vp_net.parameters(), lr=lr)
         self.bc_enabled = True
         self._logger.info(f"IcoPro model data loader initialised with {len(self.bc_loader.data_files)} files (subjects={subjects}, game_id={game_id}).")
+
+    def _ensure_bc_planner(
+        self,
+        obs_seq_np: np.ndarray,
+        rewards_seq_np: np.ndarray,
+        actions_seq_np: np.ndarray,
+    ):
+        """Reuse a cModelWrapper planner for BC sequence playback to keep tree carry."""
+        batch_size, seq_len = actions_seq_np.shape
+        model_device = self.device
+        rebuild = (
+            self.bc_planner is None
+            or self.bc_planner_env is None
+            or self.bc_planner_batch_size != batch_size
+            or self.bc_planner_seq_len != seq_len
+            or self.bc_planner_device != model_device
+        )
+        if rebuild:
+            if self.bc_planner is not None and hasattr(self.bc_planner, "close"):
+                try:
+                    self.bc_planner.close()
+                except Exception:
+                    pass
+            base_env = BehaviorSequenceVectorEnv(
+                obs_seq=obs_seq_np,
+                rewards_seq=rewards_seq_np,
+                actions_seq=actions_seq_np,
+                num_actions=self.model_net.num_actions,
+            )
+            planner = BCCModelWrapper(
+                env=base_env,
+                env_n=batch_size,
+                flags=self.flags,
+                model_net=self.model_net,
+                device=model_device,
+                timing=False,
+            )
+            self.bc_planner_env = base_env
+            self.bc_planner = planner
+            self.bc_planner_batch_size = batch_size
+            self.bc_planner_seq_len = seq_len
+            self.bc_planner_device = model_device
+        else:
+            try:
+                self.bc_planner_env.update_sequences(
+                    obs_seq_np, rewards_seq_np, actions_seq_np
+                )
+            except Exception:
+                if self.bc_planner is not None and hasattr(self.bc_planner, "close"):
+                    try:
+                        self.bc_planner.close()
+                    except Exception:
+                        pass
+                base_env = BehaviorSequenceVectorEnv(
+                    obs_seq=obs_seq_np,
+                    rewards_seq=rewards_seq_np,
+                    actions_seq=actions_seq_np,
+                    num_actions=self.model_net.num_actions,
+                )
+                planner = BCCModelWrapper(
+                    env=base_env,
+                    env_n=batch_size,
+                    flags=self.flags,
+                    model_net=self.model_net,
+                    device=model_device,
+                    timing=False,
+                )
+                self.bc_planner_env = base_env
+                self.bc_planner = planner
+                self.bc_planner_batch_size = batch_size
+                self.bc_planner_seq_len = seq_len
+                self.bc_planner_device = model_device
+
+        return self.bc_planner
 
     def _sample_bc_batch(self):
         if self.bc_loader is None:
@@ -412,6 +495,29 @@ class SModelLearner:
             rewards = rewards_seq[:, 1:]
         else:
             rewards = torch.zeros_like(actions, dtype=torch.float32)
+
+        # Ensure tree carry via cenv_bc sequence playback (no grad)
+        with torch.no_grad():
+            obs_np = (obs.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            if rewards_seq is not None:
+                rewards_np = rewards.cpu().numpy().astype(np.float32)
+            else:
+                rewards_np = np.zeros_like(actions.cpu().numpy(), dtype=np.float32)
+            actions_np = actions.cpu().numpy().astype(np.int64)
+            planner = self._ensure_bc_planner(obs_np, rewards_np, actions_np)
+            was_training = self.model_net.training
+            self.model_net.eval()
+            try:
+                states, info = planner.reset(self.model_net)
+                dummy_action = np.zeros((actions_np.shape[0],), dtype=np.int32)
+                dummy_reset = np.zeros_like(dummy_action)
+                for _ in range(actions_np.shape[1]):
+                    states, reward, done, truncated, info = planner.step(
+                        (dummy_action, dummy_reset), self.model_net
+                    )
+            finally:
+                if was_training:
+                    self.model_net.train()
         # Flatten sequences into a single batch
         obs = obs.reshape(-1, *obs.shape[2:])
         next_obs = next_obs.reshape(-1, *next_obs.shape[2:])
