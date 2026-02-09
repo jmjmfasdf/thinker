@@ -709,6 +709,12 @@ class SModelLearner:
             return None
 
         total_loss = metrics["total_loss"]
+        if not total_loss.requires_grad:
+            self._logger.warning(
+                "BC model loss has no grad; skipping update. "
+                "Check icopro_cenv_grad and cenv_bc rebuild."
+            )
+            return None
         self.bc_optimizer.zero_grad()
         total_loss.backward()
 

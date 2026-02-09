@@ -363,7 +363,7 @@ class DynamicModel(nn.Module):
 
     def forward(self, h, actions):
         x = h
-        if self.training and not self.disable_half_grad:
+        if self.training and not self.disable_half_grad and x.requires_grad:
             # no half-gradient for dreamer net
             x.register_hook(lambda grad: grad * 0.5)
         if not self.oned_input:

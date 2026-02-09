@@ -44,6 +44,7 @@ model_has_memory: false # whether to enable memory in model
 model_ordinal: false # whether to use ordinal representation in model's policy
 vp_fix_bootstrap: false # vp use fixed bootstrap target at the last unroll step
 icopro_model_coef: 1.0
+icopro_cenv_grad: true
 
 # wrapper for env
 discrete_k: -1 # bin used to discretize the action space; -1 for no discretizing
