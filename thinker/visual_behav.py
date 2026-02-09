@@ -694,6 +694,8 @@ def visualize(
         return_x=True,
         timing=True,
     )
+    if icopro_cenv_grad is not None:
+        env_kwargs["icopro_cenv_grad"] = icopro_cenv_grad
     if data_path:
         # Custom dataset env: disable envpool auto-creation
         flags.envpool = False
