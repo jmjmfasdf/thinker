@@ -658,6 +658,7 @@ def visualize(
     max_eps_n=-1,
     use_gpu=True,  # GPU 사용 여부 추가
     save_encoder_vectors=True,  # encoder 벡터 저장 옵션 추가
+    icopro_cenv_grad=None,
 ):        
     savedir = savedir.replace("__project__", __project__)
     ckpdir = os.path.join(savedir, xpid)      
@@ -667,6 +668,8 @@ def visualize(
 
     config_path = os.path.join(ckpdir, 'config_c.yaml')
     flags = util.create_flags(config_path, save_flags=False)
+    if icopro_cenv_grad is not None:
+        flags.icopro_cenv_grad = icopro_cenv_grad
     if seed < 0:
         seed = np.random.randint(10000)
     
@@ -1284,6 +1287,12 @@ if __name__ == "__main__":
         type=str,
         help="Path to behavioral dataset npz. If provided, build env from dataset.",
     )
+    parser.add_argument(
+        "--icopro_cenv_grad",
+        default=None,
+        type=lambda x: (str(x).lower() == "true"),
+        help="Override icopro_cenv_grad for visualization (true/false).",
+    )
     flags = parser.parse_args()    
     if flags.project: flags.savedir=flags.savedir.replace("__project__", flags.project)
     # allow max_steps alias
@@ -1303,4 +1312,5 @@ if __name__ == "__main__":
         max_eps_n=flags.max_eps,
         use_gpu=flags.use_gpu,
         save_encoder_vectors=flags.save_encoder_vectors,
+        icopro_cenv_grad=flags.icopro_cenv_grad,
     )
