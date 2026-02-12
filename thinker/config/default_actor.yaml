@@ -9,7 +9,7 @@ reward_clip: -1.0 # reward clipping; if positve, the reward is clipped within th
 # training setting
 train_actor: true # whether to train actor
 total_steps: 100000000 # total number of real steps to train 1e8
-actor_learning_rate: 0.0003 # actor learning rate
+actor_learning_rate: 0.0001 # actor learning rate
 actor_batch_size: 16 # actor batch size
 actor_unroll_len: 201 # unroll length used to update actor
 actor_use_rms: false # whether to use rms (default: adam) as optimizer

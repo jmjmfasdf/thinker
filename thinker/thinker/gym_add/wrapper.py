@@ -312,6 +312,27 @@ class VectorWrap(WrapperExtended):
         }        
         self.keys_to_keep = ["real_done", "cost"] # all other info will be discarded for efficiency
 
+    def current_human_action(self):
+        # Expose dataset-backed human actions to outer wrappers (e.g., cenv_bc).
+        # AsyncVectorEnv doesn't proxy custom methods, so use its call API if available.
+        if hasattr(self.env, "call"):
+            try:
+                res = self.env.call("current_human_action")
+                return np.asarray(res, dtype=np.int64).reshape(-1)
+            except Exception:
+                pass
+        if hasattr(self.env, "call_async") and hasattr(self.env, "call_wait"):
+            try:
+                self.env.call_async("current_human_action")
+                res = self.env.call_wait()
+                return np.asarray(res, dtype=np.int64).reshape(-1)
+            except Exception:
+                pass
+        try:
+            return self.env.current_human_action()
+        except Exception:
+            return None
+
     def reset(self, *args, **kwargs):
         env_id = kwargs.get("env_id", None)     
         reset_stat = kwargs.pop("reset_stat", False)
@@ -639,4 +660,3 @@ class DummyWrapper(gym.Wrapper):
     
 def dict_map(x, f):
     return {k:f(v) if v is not None else None for (k, v) in x.items()}    
-

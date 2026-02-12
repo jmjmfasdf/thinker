@@ -464,6 +464,7 @@ class SModelLearner:
             seq_batch = self.bc_loader.get_sequence_batch(
                 batch_size=self.bc_batch_size,
                 sequence_length=self.bc_seq_len + 1,
+                reward_mode="last",
             )
             if seq_batch is not None and "obs_seq" in seq_batch:
                 device = self.device

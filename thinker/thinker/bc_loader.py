@@ -192,7 +192,12 @@ class FrameStackedBehavioralDataLoader:
         stacked = np.concatenate(stacked_frames, axis=0)
         return stacked
     
-    def get_sequence_batch(self, batch_size: int = 1, sequence_length: int = 2) -> Optional[Dict[str, np.ndarray]]:
+    def get_sequence_batch(
+        self,
+        batch_size: int = 1,
+        sequence_length: int = 2,
+        reward_mode: str = "sum_stack",
+    ) -> Optional[Dict[str, np.ndarray]]:
         """
         Get a batch of frame-stack sequences for imitation learning.
         Each observation stack uses consecutive frames with stride=1 between stacked observations.
@@ -207,7 +212,9 @@ class FrameStackedBehavioralDataLoader:
             Dict with keys:
             - 'obs_seq': (B, L, C*stack_n, H, W) stacked observations (float/normalized)
             - 'actions_seq': (B, L) discrete human actions (most recent action at t)
-            - 'rewards_seq': (B, L) summed rewards over the last stack_n frames (t-3..t)
+            - 'rewards_seq': (B, L) rewards per step. If reward_mode="sum_stack", each
+              reward is the sum over the last stack_n frames (t-3..t). If reward_mode="last",
+              each reward is the most recent frame reward (t).
             - 'sequence_starts': (B,) bool flags (all True; each sample is a fresh sequence)
         """
         if len(self.data_files) == 0:
@@ -231,6 +238,7 @@ class FrameStackedBehavioralDataLoader:
                 file_idx=file_idx,
                 num_samples=num_samples,
                 sequence_length=sequence_length,
+                reward_mode=reward_mode,
             )
             if seqs:
                 sequences.extend(seqs)
@@ -269,7 +277,11 @@ class FrameStackedBehavioralDataLoader:
             self.current_data = None
 
     def _sample_nonoverlap_sequences_from_file(
-        self, file_idx: int, num_samples: int, sequence_length: int
+        self,
+        file_idx: int,
+        num_samples: int,
+        sequence_length: int,
+        reward_mode: str = "sum_stack",
     ) -> Optional[List[Dict[str, np.ndarray]]]:
         """Sample stacked sequences from a single file (stack starts slide by 1 frame within a sequence)."""
         if file_idx >= len(self.data_files):
@@ -307,6 +319,9 @@ class FrameStackedBehavioralDataLoader:
         if not candidates:
             return None
 
+        if reward_mode not in ("sum_stack", "last"):
+            raise ValueError(f"Unsupported reward_mode: {reward_mode}")
+
         sampled = random.sample(candidates, min(num_samples, len(candidates)))
         sequences: List[Dict[str, np.ndarray]] = []
         for start_idx in sampled:
@@ -318,10 +333,13 @@ class FrameStackedBehavioralDataLoader:
                 stack_end = start_idx + t
                 obs_seq.append(self._create_frame_stack(images, stack_end))
                 actions_seq.append(self._action_index(actions[stack_end]))
-                reward_start = max(0, stack_end - (self.frame_stack_n - 1))
-                rewards_seq.append(
-                    float(np.sum(rewards[reward_start : stack_end + 1]))
-                )
+                if reward_mode == "last":
+                    rewards_seq.append(float(rewards[stack_end]))
+                else:
+                    reward_start = max(0, stack_end - (self.frame_stack_n - 1))
+                    rewards_seq.append(
+                        float(np.sum(rewards[reward_start : stack_end + 1]))
+                    )
             sequences.append(
                 {
                     "obs_seq": np.stack(obs_seq, axis=0),

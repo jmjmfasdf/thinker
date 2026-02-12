@@ -19,7 +19,6 @@ from thinker.actor_net import ActorNet
 import thinker.util as util
 import gym
 from thinker.dataset_env import BehaviorDatasetVectorEnv
-from thinker.cenv_bc import cModelWrapper as BCCModelWrapper
 
 def plot_gym_env_out(x, ax=None, title=None):
     if ax is None:
@@ -282,24 +281,23 @@ def _onehot_action(action_idx, num_actions):
     onehot[action_idx] = 1
     return onehot
 
-def _coerce_action_idx(value):
-    if value is None:
-        return None
-    if torch.is_tensor(value):
-        value = value.detach().cpu().reshape(-1)
-        if value.numel() == 0:
-            return None
-        return int(value[0].item())
-    arr = np.asarray(value).reshape(-1)
-    if arr.size == 0:
-        return None
-    return int(arr[0])
-
 def _extract_action_onehots(info, num_actions):
     if info is None or not isinstance(info, dict):
         return None, None
-    human_idx = _coerce_action_idx(info.get("human_action"))
-    thinker_idx = _coerce_action_idx(info.get("thinker_action"))
+    def _to_int(value):
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            value = value.detach().cpu().reshape(-1)
+            if value.numel() == 0:
+                return None
+            return int(value[0].item())
+        arr = np.asarray(value).reshape(-1)
+        if arr.size == 0:
+            return None
+        return int(arr[0])
+    human_idx = _to_int(info.get("human_action"))
+    thinker_idx = _to_int(info.get("thinker_action"))
     return _onehot_action(human_idx, num_actions), _onehot_action(thinker_idx, num_actions)
 
 def _stack_onehots(onehots, num_actions):
@@ -658,7 +656,6 @@ def visualize(
     max_eps_n=-1,
     use_gpu=True,  # GPU 사용 여부 추가
     save_encoder_vectors=True,  # encoder 벡터 저장 옵션 추가
-    icopro_cenv_grad=None,
 ):        
     savedir = savedir.replace("__project__", __project__)
     ckpdir = os.path.join(savedir, xpid)      
@@ -668,8 +665,6 @@ def visualize(
 
     config_path = os.path.join(ckpdir, 'config_c.yaml')
     flags = util.create_flags(config_path, save_flags=False)
-    if icopro_cenv_grad is not None:
-        flags.icopro_cenv_grad = icopro_cenv_grad
     if seed < 0:
         seed = np.random.randint(10000)
     
@@ -680,7 +675,6 @@ def visualize(
     else:
         device = torch.device("cpu")
         print("Using CPU for visualization")
-    dataset_env = None
     
     env_kwargs = dict(
         env_n=1,
@@ -695,14 +689,10 @@ def visualize(
         return_x=True,
         timing=True,
     )
-    if icopro_cenv_grad is not None:
-        env_kwargs["icopro_cenv_grad"] = icopro_cenv_grad
     if data_path:
         # Custom dataset env: disable envpool auto-creation
         flags.envpool = False
         env_kwargs["envpool"] = False
-        # Use BC wrapper so dataset human actions are used on real steps.
-        env_kwargs["core_wrapper"] = BCCModelWrapper
         data = np.load(os.path.abspath(os.path.expanduser(data_path)))
         images = data["image"]
         actions = data["action"]
@@ -722,7 +712,6 @@ def visualize(
             grayscale=flags.grayscale,
             num_actions=num_actions,
         )
-        dataset_env = base_env
         env = Env(env_fn=lambda: base_env, **env_kwargs)
         render = False
         if max_eps_n <= 0:
@@ -1009,13 +998,6 @@ def visualize(
                 reward_to_log = 0.0
             if status_value == 0:
                 human_action_oh, thinker_action_oh = _extract_action_onehots(info, env.num_actions)
-                if human_action_oh is None and dataset_env is not None:
-                    try:
-                        human_idx = dataset_env.current_human_action()
-                    except Exception:
-                        human_idx = None
-                    if human_idx is not None:
-                        human_action_oh = _onehot_action(int(human_idx), env.num_actions)
             else:
                 human_action_oh, thinker_action_oh = None, None
             video_stats["status"].append(status_value)
@@ -1299,12 +1281,6 @@ if __name__ == "__main__":
         type=str,
         help="Path to behavioral dataset npz. If provided, build env from dataset.",
     )
-    parser.add_argument(
-        "--icopro_cenv_grad",
-        default=None,
-        type=lambda x: (str(x).lower() == "true"),
-        help="Override icopro_cenv_grad for visualization (true/false).",
-    )
     flags = parser.parse_args()    
     if flags.project: flags.savedir=flags.savedir.replace("__project__", flags.project)
     # allow max_steps alias
@@ -1324,5 +1300,4 @@ if __name__ == "__main__":
         max_eps_n=flags.max_eps,
         use_gpu=flags.use_gpu,
         save_encoder_vectors=flags.save_encoder_vectors,
-        icopro_cenv_grad=flags.icopro_cenv_grad,
     )
