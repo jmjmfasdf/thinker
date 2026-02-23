@@ -529,6 +529,25 @@ class SActorLearner:
         all_pred_actions = []
         all_human_actions = []
 
+        grouped_action_specs = []
+        grouped_action_maps = []
+        if self.actor_net.num_actions == 6:
+            # action mapping: NOOP=0, FIRE=1, RIGHT=2, LEFT=3, RIGHTFIRE=4, LEFTFIRE=5
+            grouped_action_specs = [
+                ([0, 1], [3, 5], [2, 4]),  # NOOP+FIRE / LEFT+LEFTFIRE / RIGHT+RIGHTFIRE
+                ([0, 3, 2], [1, 5, 4]),  # NOOP+LEFT+RIGHT / FIRE+LEFTFIRE+RIGHTFIRE
+            ]
+            for groups in grouped_action_specs:
+                group_map = torch.full(
+                    (self.actor_net.num_actions,),
+                    -1,
+                    dtype=torch.long,
+                    device=actor_device,
+                )
+                for group_idx, indices in enumerate(groups):
+                    group_map[torch.tensor(indices, device=actor_device)] = group_idx
+                grouped_action_maps.append(group_map)
+
         for t in range(seq_len):
             actor_out, actor_state = self.actor_net(
                 env_out, actor_state, compute_loss=False, greedy=False
@@ -626,8 +645,16 @@ class SActorLearner:
                 else:
                     pvp_neg = torch.zeros_like(pvp_pos)
                 pvp_losses.append(pvp_pos + pvp_neg)
-            # action difference loss: cross-entropy between logits and human action
+            # action difference loss: base CE plus grouped CE (disentangled action groups)
             step_diff = F.cross_entropy(logits_step, human_actions)
+            if grouped_action_specs:
+                for groups, group_map in zip(grouped_action_specs, grouped_action_maps):
+                    group_logits = torch.stack(
+                        [torch.logsumexp(logits_step[:, idxs], dim=1) for idxs in groups],
+                        dim=1,
+                    )
+                    group_targets = group_map[human_actions]
+                    step_diff = step_diff + F.cross_entropy(group_logits, group_targets)
             action_diff_losses.append(step_diff)
 
         margin_loss = (
