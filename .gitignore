@@ -11,6 +11,11 @@ wandb
 *.pyd
 *.pth
 *.so
+*.slurm
+*.err
+*.out
+train_mlp_from_npy.py
+workcache/
 .vscode
 sokoban/build
 sokoban/gym_sokoban.egg-info
