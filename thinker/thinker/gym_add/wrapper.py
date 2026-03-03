@@ -164,11 +164,43 @@ class AtariPreprocessingExtended(wrappers.AtariPreprocessing):
     def reset(self, *args, **kwargs):
         observation, info = super().reset(*args, **kwargs)        
         info['real_done'] = False
+        info["latest_frame_reward"] = np.float32(0.0)
         return observation, info
 
     def step(self, action, *args, **kwargs):
-        observation, total_reward, terminated, truncated, info = super().step(action, *args, **kwargs)        
+        # Keep AtariPreprocessing semantics while exposing the most recent
+        # internal frame reward (not the frame-skip sum) for logging.
+        total_reward, terminated, truncated, info = 0.0, False, False, {}
+        latest_frame_reward = 0.0
+
+        for t in range(self.frame_skip):
+            _, reward, terminated, truncated, info = self.env.step(action)
+            total_reward += reward
+            latest_frame_reward = reward
+            self.game_over = terminated
+
+            if self.terminal_on_life_loss:
+                new_lives = self.ale.lives()
+                terminated = terminated or new_lives < self.lives
+                self.game_over = terminated
+                self.lives = new_lives
+
+            if terminated or truncated:
+                break
+            if t == self.frame_skip - 2:
+                if self.grayscale_obs:
+                    self.ale.getScreenGrayscale(self.obs_buffer[1])
+                else:
+                    self.ale.getScreenRGB(self.obs_buffer[1])
+            elif t == self.frame_skip - 1:
+                if self.grayscale_obs:
+                    self.ale.getScreenGrayscale(self.obs_buffer[0])
+                else:
+                    self.ale.getScreenRGB(self.obs_buffer[0])
+
+        observation = self._get_obs()
         info['real_done'] = (self.lives == 0) | truncated
+        info["latest_frame_reward"] = np.float32(latest_frame_reward)
         return observation, total_reward, terminated, truncated, info
 
     def quick_save(self):
@@ -310,7 +342,7 @@ class VectorWrap(WrapperExtended):
             "episode_return": np.zeros(self.num_envs, dtype=np.float32),
             "episode_step": np.zeros(self.num_envs, dtype=np.int64),
         }        
-        self.keys_to_keep = ["real_done", "cost"] # all other info will be discarded for efficiency
+        self.keys_to_keep = ["real_done", "cost", "latest_frame_reward"] # all other info will be discarded for efficiency
 
     def current_human_action(self):
         # Expose dataset-backed human actions to outer wrappers (e.g., cenv_bc).
@@ -347,6 +379,7 @@ class VectorWrap(WrapperExtended):
 
         info = {key: info[key] for key in self.keys_to_keep if key in info}
         info["real_done"] = np.zeros(self.num_envs if env_id is None else len(env_id), dtype=bool) 
+        info["latest_frame_reward"] = np.zeros(self.num_envs if env_id is None else len(env_id), dtype=np.float32)
         info["episode_return"] = self.episode_return[env_id] if env_id is not None else self.episode_return
         info["episode_step"] = self.episode_step[env_id] if env_id is not None else self.episode_step
         return observation, info
@@ -406,6 +439,8 @@ class VectorWrap(WrapperExtended):
             reward = np.clip(reward, -self.reward_clip, +self.reward_clip)
 
         # Info 정리
+        if "latest_frame_reward" not in info:
+            info["latest_frame_reward"] = reward.astype(np.float32)
         info = {key: info[key] for key in self.keys_to_keep if key in info}
         info["episode_return"] = episode_return[env_id] if env_id is not None else episode_return
         info["episode_step"] = episode_step[env_id] if env_id is not None else episode_step

@@ -1,4 +1,5 @@
 import time
+import math
 import timeit
 import os
 import numpy as np
@@ -548,7 +549,11 @@ class SActorLearner:
                     group_map[torch.tensor(indices, device=actor_device)] = group_idx
                 grouped_action_maps.append(group_map)
 
-        for t in range(seq_len):
+        rec_t = max(1, int(getattr(self.flags, "rec_t", 1)))
+        total_steps = seq_len * rec_t
+        real_step_idx = 0
+
+        for t in range(total_steps):
             actor_out, actor_state = self.actor_net(
                 env_out, actor_state, compute_loss=False, greedy=False
             )
@@ -623,10 +628,30 @@ class SActorLearner:
                 logits_step = logits_step[:, 0]
             if logits_step.dim() == 3:
                 logits_step = logits_step[:, 0, :]
-            human_actions = human_actions_seq[:, t]
-            all_human_actions.append(human_actions)
-            pred_actions = torch.argmax(logits_step.detach(), dim=-1)
-            all_pred_actions.append(pred_actions)
+
+            # Only score real steps (status 0) and advance the human-action index.
+            step_status = env_out.step_status[-1]
+            real_mask = step_status == 0
+            if not torch.any(real_mask):
+                continue
+            if real_step_idx >= seq_len:
+                break
+            human_actions = human_actions_seq[:, real_step_idx]
+            real_step_idx += 1
+
+            # Accuracy: use sampled actions on real steps only.
+            sampled_actions = primary_action.detach()
+            if sampled_actions.dim() > 1:
+                sampled_actions = sampled_actions[:, 0]
+            sampled_actions = sampled_actions.to(dtype=human_actions.dtype)
+            all_human_actions.append(human_actions[real_mask])
+            all_pred_actions.append(sampled_actions[real_mask])
+
+            # Losses are computed only on real steps.
+            logits_step = logits_step[real_mask]
+            human_actions = human_actions[real_mask]
+            if logits_step.numel() == 0:
+                continue
 
             margin_tensor = torch.full(
                 (human_actions.shape[0],),
@@ -636,6 +661,7 @@ class SActorLearner:
             )
             margin_losses.append(dqfd_margin_loss(logits_step, human_actions, margin_tensor))
             if self.bc_pvp_coef > 0.0:
+                pred_actions = torch.argmax(logits_step.detach(), dim=-1)
                 q_human = logits_step.gather(1, human_actions.unsqueeze(1)).squeeze(1)
                 q_agent = logits_step.gather(1, pred_actions.unsqueeze(1)).squeeze(1)
                 pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
@@ -646,15 +672,19 @@ class SActorLearner:
                     pvp_neg = torch.zeros_like(pvp_pos)
                 pvp_losses.append(pvp_pos + pvp_neg)
             # action difference loss: base CE plus grouped CE (disentangled action groups)
-            step_diff = F.cross_entropy(logits_step, human_actions)
+            step_diff = F.cross_entropy(logits_step, human_actions) / math.log(6.0)
             if grouped_action_specs:
-                for groups, group_map in zip(grouped_action_specs, grouped_action_maps):
+                group_divs = (math.log(3.0), math.log(2.0))
+                for group_idx, (groups, group_map) in enumerate(
+                    zip(grouped_action_specs, grouped_action_maps)
+                ):
+                    div = group_divs[group_idx] if group_idx < len(group_divs) else 1.0
                     group_logits = torch.stack(
                         [torch.logsumexp(logits_step[:, idxs], dim=1) for idxs in groups],
                         dim=1,
                     )
                     group_targets = group_map[human_actions]
-                    step_diff = step_diff + F.cross_entropy(group_logits, group_targets)
+                    step_diff = step_diff + F.cross_entropy(group_logits, group_targets) / div
             action_diff_losses.append(step_diff)
 
         margin_loss = (
@@ -714,7 +744,7 @@ class SActorLearner:
             seq_batch = self.bc_loader.get_sequence_batch(
                 batch_size=self.bc_batch_size,
                 sequence_length=self.bc_seq_len + 1,
-                reward_mode="last",
+                reward_mode="sum_stack",
             )
             if seq_batch is not None and "obs_seq" in seq_batch:
                 device = self.device

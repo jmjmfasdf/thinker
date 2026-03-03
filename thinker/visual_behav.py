@@ -201,6 +201,20 @@ def _extract_cur_reward(info):
         return np.nan
     return float(value.reshape(-1)[0])
 
+def _extract_latest_frame_reward(info, fallback=0.0):
+    if info is None or "latest_frame_reward" not in info or info["latest_frame_reward"] is None:
+        return float(fallback)
+
+    value = info["latest_frame_reward"]
+    if torch.is_tensor(value):
+        value = value.detach().cpu().reshape(-1)
+        return value[0].item() if value.numel() > 0 else float(fallback)
+
+    value = np.asarray(value)
+    if value.size == 0:
+        return float(fallback)
+    return float(value.reshape(-1)[0])
+
 def _extract_real_reward(reward):
     if reward is None:
         return 0.0
@@ -947,8 +961,13 @@ def visualize(
 
         tree_reps = env.decode_tree_reps(env_out.tree_reps)
         cur_episode_return = _extract_episode_return(env_out.episode_return)
-        real_reward_value = (
+        fallback_real_reward = (
             cur_episode_return - prev_episode_return if last_real_step_flag else 0.0
+        )
+        real_reward_value = (
+            _extract_latest_frame_reward(info, fallback=fallback_real_reward)
+            if last_real_step_flag
+            else 0.0
         )
         prev_episode_return = cur_episode_return
         last_reward_to_log = _extract_last_reward(env_out.reward)
