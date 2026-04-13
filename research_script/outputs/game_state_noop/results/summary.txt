@@ -1,0 +1,15 @@
+============================================================
+Analysis 3: Game State Feature × NOOP — Summary
+============================================================
+
+Pong Mixed-Effects LPM (n=50,000)
+  paddle_dist           β=+0.0448  SE=0.0015  z=+30.05  p=0.0000  ***
+  score_diff            β=+0.0122  SE=0.0015  z=+7.93  p=0.0000  ***
+  subject Var           β=+0.0000  SE=nan  z=+nan  p=nan  ns
+
+SpaceInvaders Mixed-Effects LPM (n=50,000)
+  enemy_count           β=-0.0084  SE=0.0026  z=-3.26  p=0.0011  **
+  enemies_y             β=+0.0072  SE=0.0026  z=+2.79  p=0.0053  **
+  player_x              β=-0.0346  SE=0.0023  z=-15.19  p=0.0000  ***
+  num_lives             β=+0.0083  SE=0.0023  z=+3.57  p=0.0004  ***
+  subject Var           β=+0.0000  SE=nan  z=+nan  p=nan  ns

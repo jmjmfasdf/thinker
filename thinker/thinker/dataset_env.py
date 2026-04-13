@@ -100,6 +100,7 @@ class BehaviorDatasetVectorEnv:
         obs = self._build_stack(self._logical_indices[self._pos])
         info = {
             "real_done": False,
+            "latest_frame_reward": np.float32(0.0),
             "episode_return": 0.0,
             "episode_step": 0,
         }
@@ -118,15 +119,17 @@ class BehaviorDatasetVectorEnv:
             reward = 0.0
             done = True
             truncated = True
-            info = {"real_done": True}
+            info = {"real_done": True, "latest_frame_reward": np.float32(0.0)}
             return obs, reward, done, truncated, info
 
         idx = self._logical_indices[self._pos]
         obs = self._build_stack(idx)
 
-        # Compute reward as sum over the segment that produced this obs
+        # Gym reward follows the stacked segment sum, but we also expose the
+        # latest frame reward so downstream logging can record t-th reward.
         seg_lo, seg_hi = self._segment_reward_range[self._pos]
         reward_val = float(np.sum(self._rewards[seg_lo:seg_hi]))
+        latest_reward_val = float(self._rewards[seg_hi - 1]) if seg_hi > seg_lo else 0.0
 
         # Determine termination at this step
         term_idx = self._segment_terminal_idx[self._pos]
@@ -141,7 +144,10 @@ class BehaviorDatasetVectorEnv:
                 self._pos = next_pos
                 obs = self._build_stack(self._logical_indices[self._pos])
         
-        info = {"real_done": bool(done)}
+        info = {
+            "real_done": bool(done),
+            "latest_frame_reward": np.float32(latest_reward_val),
+        }
         return np.expand_dims(obs, axis=0), reward_val, done, truncated, info
 
     # ---------------------- Save/Load for imagination ----------------------

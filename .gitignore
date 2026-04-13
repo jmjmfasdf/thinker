@@ -47,3 +47,14 @@ data_spaceinvaders/
 data_pong/
 thinker/train.slurm
 thinker/visual_behav.slurm
+*.err
+*.out
+*.slurm
+analysis_outputs-1/
+analysis_outputs-2/
+analysis_outputs-3/
+analysis_outputs-4/
+analysis_outputs-5/
+analysis_outputs-6/
+analysis_outputs/
+./claude
