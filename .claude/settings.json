@@ -56,7 +56,16 @@
       "Bash(bash submit_agents.sh)",
       "Bash(squeue -o '%.10i %.20j %.8T %.10M %R' --name=gpu_monitor_bmlgd1,gpu_monitor_bmlgd10,gpu_monitor_bmlgd11,gpu_monitor_bmlgs4,gpu_monitor_bmlnx1)",
       "Bash(python3 -c 'import json,sys; d=json.load\\(open\\('\\\\''__TRACKED_VAR__'\\\\''\\)\\); print\\(f\"  GPUs: {len\\(d.get\\('\\\\''gpus'\\\\'',[]\\)\\)}  CPU: {d.get\\('\\\\''cpu_pct'\\\\''\\)}%  RAM: {d.get\\('\\\\''ram_used_mb'\\\\'',0\\)/1024:.1f}/{d.get\\('\\\\''ram_total_mb'\\\\'',1\\)/1024:.1f}GB\"\\)')",
-      "Bash(srun --nodelist=bmlgd10 --partition=rtx5090 --ntasks=1 --cpus-per-task=1 --mem=128M --time=0:01:00 nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader,nounits)"
+      "Bash(srun --nodelist=bmlgd10 --partition=rtx5090 --ntasks=1 --cpus-per-task=1 --mem=128M --time=0:01:00 nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader,nounits)",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/pip list *)",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python3 -c ' *)",
+      "Bash(python3 -)",
+      "Bash(python3 -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(pip show *)",
+      "Bash(python -c \"import pandas; print\\('pandas ok'\\)\")",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python -c \"import pandas; import numpy; print\\('ok'\\)\")",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python -)",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python3 -)"
     ],
     "additionalDirectories": [
       "/home/jmme425/gpu_log"

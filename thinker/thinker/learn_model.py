@@ -306,6 +306,7 @@ class SModelLearner:
         self.bc_enabled = False
         self.bc_optimizer = None
         self.bc_step = 0
+        self._pending_bc_metrics = None
         self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
         self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
         self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
@@ -698,9 +699,9 @@ class SModelLearner:
             "total_loss": total_loss,
         }
 
-    def _maybe_run_bc_update(self):
-        """Optional supervised update of the model using behavioral data."""
-        if not self.bc_enabled or self.bc_loader is None or self.bc_optimizer is None:
+    def _try_compute_bc_metrics(self):
+        """Compute BC loss so it can be merged into the main vp_net loss."""
+        if not self.bc_enabled or self.bc_loader is None:
             return None
         self.bc_step += 1
         if self.bc_step % self.bc_supervised_freq != 0:
@@ -712,21 +713,19 @@ class SModelLearner:
         total_loss = metrics["total_loss"]
         if not total_loss.requires_grad:
             self._logger.warning(
-                "BC model loss has no grad; skipping update. "
+                "BC model loss has no grad; skipping integration. "
                 "Check icopro_cenv_grad and cenv_bc rebuild."
             )
             return None
-        self.bc_optimizer.zero_grad()
-        total_loss.backward()
+        return metrics
 
-        if getattr(self.flags, "model_grad_norm_clipping", 0.0) > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                self.model_net.vp_net.parameters(),
-                self.flags.model_grad_norm_clipping,
-            )
-
-        self.bc_optimizer.step()
-
+    def _maybe_run_bc_update(self):
+        """BC update is integrated into the shared vp_net optimizer step."""
+        metrics = self._pending_bc_metrics
+        self._pending_bc_metrics = None
+        if metrics is None:
+            return None
+        total_loss = metrics["total_loss"]
         out = {"total_loss": float(total_loss.detach().cpu().item())}
         for k, v in metrics.items():
             if k == "total_loss":
@@ -786,6 +785,10 @@ class SModelLearner:
             )
         if self.timing is not None:
             self.timing.time("compute_losses_p")
+        bc_metrics = self._try_compute_bc_metrics()
+        if bc_metrics is not None:
+            losses_p["total_loss_p"] = losses_p["total_loss_p"] + bc_metrics["total_loss"]
+        self._pending_bc_metrics = bc_metrics
         total_norm_p = self.gradient_step(
             losses_p["total_loss_p"], self.optimizer_p, self.scheduler_p, self.scaler_p
         )

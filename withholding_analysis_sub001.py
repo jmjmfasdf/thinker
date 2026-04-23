@@ -562,6 +562,14 @@ def summarize_action_distributions(df_real: pd.DataFrame) -> pd.DataFrame:
         t_counts = np.bincount(g["thinker_action"].to_numpy(dtype=int), minlength=n_actions)
         h_noop = h_counts[0] / max(h_counts.sum(), 1)
         t_noop = t_counts[0] / max(t_counts.sum(), 1)
+        # JSD excluding NOOP (action 0) — used in Fig 2-1B
+        h_no_noop = h_counts[1:]
+        t_no_noop = t_counts[1:]
+        jsd_no_noop = (
+            js_divergence_1d(h_no_noop, t_no_noop)
+            if h_no_noop.sum() > 0 and t_no_noop.sum() > 0
+            else float("nan")
+        )
         rows.append(
             {
                 "file": file_id,
@@ -570,6 +578,7 @@ def summarize_action_distributions(df_real: pd.DataFrame) -> pd.DataFrame:
                 "thinker_noop_prop": float(t_noop),
                 "noop_gap": float(h_noop - t_noop),
                 "jsd_human_thinker": float(js_divergence_1d(h_counts, t_counts)),
+                "jsd_no_noop": float(jsd_no_noop),
             }
         )
     return pd.DataFrame(rows).sort_values("file").reset_index(drop=True)
@@ -591,60 +600,30 @@ def plot_figure1(df_real: pd.DataFrame, action_summary: pd.DataFrame, out_path: 
     h_dist = h_counts / max(h_counts.sum(), 1.0)
     t_dist = t_counts / max(t_counts.sum(), 1.0)
 
-    fig = plt.figure(figsize=(20, 4.8))
-    gs = fig.add_gridspec(1, 4, width_ratios=[0.9, 1.25, 1.0, 1.0])
+    fig = plt.figure(figsize=(10, 4.8))
+    gs = fig.add_gridspec(1, 2)
 
-    # Panel 1A: withholding bout schematic (research framing)
-    ax_s = fig.add_subplot(gs[0, 0])
-    ax_s.plot([0, 1], [0, 0], color="black", lw=1.5)
-    ax_s.plot([0.25, 0.65], [0, 0], color="#ffd166", lw=9, solid_capstyle="butt")
-    ax_s.scatter([0.25, 0.65, 0.8], [0, 0, 0], color=["#ef476f", "#ef476f", "#06d6a0"], s=65)
-    ax_s.text(0.25, 0.08, "지연 시작", ha="center")
-    ax_s.text(0.65, 0.08, "지연 종료", ha="center")
-    ax_s.text(0.8, 0.08, "행동 실행", ha="center")
-    ax_s.set_xlim(0, 1)
-    ax_s.set_ylim(-0.2, 0.25)
-    ax_s.set_axis_off()
-    ax_s.set_title("Figure 1A: Withholding bout schematic")
-
-    # Panel 1B: action distribution bar chart
-    ax1 = fig.add_subplot(gs[0, 1])
+    # Panel 2-1A: action distribution bar chart
+    ax1 = fig.add_subplot(gs[0, 0])
     x = np.arange(n_actions)
     w = 0.38
     ax1.bar(x - w / 2, h_dist, width=w, label="Human", color="#1f77b4")
-    ax1.bar(x + w / 2, t_dist, width=w, label="Thinker", color="#ff7f0e")
+    ax1.bar(x + w / 2, t_dist, width=w, label="IL Thinker", color="#ff7f0e")
     ax1.axvspan(-0.5, 0.5, color="#ffd166", alpha=0.2, lw=0)
     ax1.set_xticks(x)
     ax1.set_xlabel("Action ID")
     ax1.set_ylabel("Selection proportion (real steps)")
-    ax1.set_title("Figure 1B: Action distribution (NOOP highlighted)")
+    ax1.set_title("Fig 2-1A: Action distribution of IL thinker")
     ax1.legend(loc="upper right", frameon=False)
     ax1.grid(axis="y", alpha=0.3)
 
-    # Panel 1C: episode-level paired NOOP
-    ax2 = fig.add_subplot(gs[0, 2])
-    x_pair = [0, 1]
-    for _, r in action_summary.iterrows():
-        ax2.plot(
-            x_pair,
-            [r["thinker_noop_prop"], r["human_noop_prop"]],
-            color="gray",
-            alpha=0.6,
-            lw=1.0,
-        )
-    ax2.scatter(np.full(len(action_summary), 0), action_summary["thinker_noop_prop"], s=18, color="#ff7f0e")
-    ax2.scatter(np.full(len(action_summary), 1), action_summary["human_noop_prop"], s=18, color="#1f77b4")
-    ax2.set_xticks(x_pair, ["Thinker", "Human"])
-    ax2.set_ylabel("NOOP proportion")
-    ax2.set_title("Figure 1C: Episode-level paired NOOP")
-    ax2.grid(axis="y", alpha=0.3)
-
-    # Panel 1D: residual distribution gap (NOOP gap vs JSD)
-    ax3 = fig.add_subplot(gs[0, 3])
-    ax3.scatter(action_summary["noop_gap"], action_summary["jsd_human_thinker"], s=28, color="#2a9d8f")
+    # Panel 2-1B: residual distribution gap (NOOP gap vs JSD, NOOP excluded from JSD)
+    ax3 = fig.add_subplot(gs[0, 1])
+    jsd_col = "jsd_no_noop" if "jsd_no_noop" in action_summary.columns else "jsd_human_thinker"
+    ax3.scatter(action_summary["noop_gap"], action_summary[jsd_col], s=28, color="#2a9d8f")
     ax3.set_xlabel("NOOP gap (Human - Thinker)")
-    ax3.set_ylabel("JSD(Human, Thinker)")
-    ax3.set_title("Figure 1D: Residual distribution gap")
+    ax3.set_ylabel("JSD(Human, Thinker) — non-NOOP actions")
+    ax3.set_title("Fig 2-1B: Residual distribution gap")
     ax3.grid(alpha=0.3)
 
     fig.tight_layout()
@@ -701,28 +680,28 @@ def plot_figure2(
         ax.set_title(title)
         ax.grid(alpha=0.3)
 
-    # Panel 2A: onset-aligned temporal profile (was 2B)
+    # Panel 2-2A: onset-aligned temporal profile
     ax_a = fig.add_subplot(gs[0, 0])
-    _plot_anchor(ax_a, "onset", "Figure 2A: Onset-aligned temporal profile")
+    _plot_anchor(ax_a, "onset", "Fig 2-2A: Onset-aligned temporal profile")
     ax_a.legend(frameon=False, fontsize=9)
 
-    # Panel 2B: commit-aligned temporal profile (was 2C)
+    # Panel 2-2B: commit-aligned temporal profile
     ax_b = fig.add_subplot(gs[0, 1])
-    _plot_anchor(ax_b, "commit", "Figure 2B: Commit-aligned temporal profile")
+    _plot_anchor(ax_b, "commit", "Fig 2-2B: Commit-aligned temporal profile")
 
-    # Panel 2C: bout survival by pre-uncertainty (was 2D)
+    # Panel 2-2C: bout survival by pre-uncertainty (2 bins: Low / High)
     ax_c = fig.add_subplot(gs[0, 2])
     if len(prepost) > 0:
         ent_col = f"{uncertainty_metric}_pre"
         if ent_col not in prepost.columns:
             ent_col = "entropy_actor_pre"
         ent = prepost[ent_col].to_numpy(dtype=float)
-        q1, q2 = np.nanquantile(ent, [1 / 3, 2 / 3])
-        bins = np.digitize(ent, bins=[q1, q2], right=True)
-        labels = {0: "Low uncertainty", 1: "Mid uncertainty", 2: "High uncertainty"}
+        med = np.nanquantile(ent, 0.5)
+        bins = np.digitize(ent, bins=[med], right=True)
+        labels = {0: "Low uncertainty", 1: "High uncertainty"}
         max_len = int(bouts["length_real_steps"].max())
         x = np.arange(1, max_len + 1)
-        for b in [0, 1, 2]:
+        for b in [0, 1]:
             lens = prepost.loc[bins == b, "length_real_steps"].to_numpy(dtype=int)
             if len(lens) == 0:
                 continue
@@ -730,7 +709,7 @@ def plot_figure2(
             ax_c.plot(x, surv, lw=2, label=labels[b])
         ax_c.set_xlabel("Bout length (real NOOP steps)")
         ax_c.set_ylabel("Survival probability")
-        ax_c.set_title("Figure 2C: Bout survival by pre-uncertainty")
+        ax_c.set_title("Fig 2-2C: Bout survival by pre-uncertainty")
         ax_c.grid(alpha=0.3)
         ax_c.legend(frameon=False)
     else:

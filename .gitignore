@@ -58,3 +58,5 @@ analysis_outputs-5/
 analysis_outputs-6/
 analysis_outputs/
 ./claude
+logs_past/
+test_past/

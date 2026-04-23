@@ -246,6 +246,7 @@ class SActorLearner:
         self.action_prior_ema = None
         self.action_prior_ema_beta = float(getattr(self.flags, "action_prior_ema", 0.05))
         self.bc_step = 0
+        self._pending_bc_metrics = None
         self.bc_batch_size = max(
             1, int(getattr(self.flags, "icopro_batch_size", 32))
         )
@@ -791,23 +792,27 @@ class SActorLearner:
             return None
         return self._compute_bc_seq_loss(batch)
 
-    def _maybe_run_bc_update(self):
-        if not self.bc_enabled or self.bc_loader is None or self.bc_optimizer is None:
+    def _try_compute_bc_metrics(self):
+        """BC loss를 RL total_loss와 합산하기 위해 계산한다.
+        bc_supervised_freq 주기에 해당하는 step에서만 실제로 계산하고,
+        아닌 경우 None을 반환한다. 반환된 metrics의 'total_loss'는 gradient가
+        살아 있는 tensor이므로 바로 RL total_loss에 더할 수 있다."""
+        if not self.bc_enabled or self.bc_loader is None:
             return None
         self.bc_step += 1
         if self.bc_step % self.bc_supervised_freq != 0:
             return None
-        metrics = self._compute_bc_loss()
+        return self._compute_bc_loss()
+
+    def _maybe_run_bc_update(self):
+        """BC update를 RL optimizer와 통합한 이후에는 별도 backward/step을
+        수행하지 않는다. compute_losses()에서 이미 합산된 loss로 한 번에
+        backward가 완료되었으므로, 여기서는 logging용 stats만 반환한다."""
+        metrics = self._pending_bc_metrics
+        self._pending_bc_metrics = None
         if metrics is None:
             return None
         total_loss = metrics["total_loss"]
-        self.bc_optimizer.zero_grad()
-        total_loss.backward()
-        if self.flags.actor_grad_norm_clipping > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.actor_net.parameters(), self.flags.actor_grad_norm_clipping
-            )
-        self.bc_optimizer.step()
         out = {
             "total_loss": total_loss.detach().cpu().item(),
             "margin_loss": metrics["margin_loss"].detach().cpu().item(),
@@ -1461,8 +1466,19 @@ class SActorLearner:
                     if avg_kl_loss > self.flags.ppo_kl_targ:
                         self.ppo_early_stop = True
                 self.actor_net.kl_beta = torch.clamp(self.actor_net.kl_beta, 1e-6, 1e3)
-            self.kl_losses.append(kl_loss.item())            
+            self.kl_losses.append(kl_loss.item())
             losses["kl_loss"] = np.mean(self.kl_losses)
+
+        # BC loss를 RL total_loss에 합산한다 (first_iter에서만 실행).
+        # bc_supervised_freq 주기에 해당하지 않으면 None이 반환되어 합산이 skip된다.
+        # 이렇게 하면 RL과 BC gradient가 단일 backward에서 올바르게 합산되어
+        # 두 optimizer의 순차 update로 인한 oscillation을 제거한다.
+        if first_iter:
+            bc_metrics = self._try_compute_bc_metrics()
+            if bc_metrics is not None:
+                total_loss = total_loss + bc_metrics["total_loss"]
+            self._pending_bc_metrics = bc_metrics
+
         losses["total_loss"] = total_loss
 
         return losses, train_actor_out
