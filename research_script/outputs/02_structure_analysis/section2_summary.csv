@@ -1,0 +1,2 @@
+subject,game,n_bouts,mean_length,median_length,cross2,n_short,n_long,pct_long,mean_entropy_onset_short,mean_entropy_onset_long,mean_entropy_commit_short,mean_entropy_commit_long,mean_margin_commit_short,mean_margin_commit_long,mean_q_gap_onset_short,mean_q_gap_onset_long
+sub001,2,2196,8.369307832422587,4.0,26,2078,118,0.05373406193078324,0.90017406198642,0.8779840121849558,1.0272638127648375,0.9346459420126904,0.3905088578220749,0.5405074756334285,1.399083429597129,0.9421344981923446

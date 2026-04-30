@@ -3,16 +3,17 @@
 ---
 
 ## Section 1 — Behavioral Phenomenon
-**목적**: 인간의 행동 보류(NOOP)가 passive omission이 아닌 체계적·선택적 현상임을 *행동 데이터만으로* 확립한다. 이후 섹션의 계산적·기능적 해석을 위한 토대가 되는 C1 claim을 성립시킨다.
+**목적**: 인간의 행동 보류(NOOP)가 passive omission이 아니라 *시간 구조와 reward relevance를 가진 행동 현상*임을 행동 데이터만으로 정리한다. 이후 섹션의 계산적·기능적 해석을 위한 descriptive foundation, 즉 C1 claim의 현재 구현 버전을 성립시킨다.
 
-**방법 (5개 층위)**:
-- **1-1** Human vs. IL thinker action distribution 비교 — imitation 후에도 남는 residual NOOP gap 정량화
-- **1-2** N=6 피험자 수준 robustness 확인 — ICC, effect size, NOOP ratio ↔ performance null result, withholding-preceded episode reward
-- **1-3** Pong·SpaceInvaders 두 게임 간 방향 일관성 검증 — game-specific artifact 기각
-- **1-4** Fatigue(에피소드 위치 분석) 및 perseveration(lag-1 AC) 대안 설명 배제
-- **1-5** Bout length KM survival curve vs. 지수분포 귀무 기준선 — Cross1/Cross2 교차 지점 도출
+**방법 (6개 층위)**:
+- **1-1** Withholding bout schematic + action distribution — subject별 action repertoire와 reference thinker profile 정리
+- **1-2** N=6 subject-level robustness 확인 — effect size, NOOP ratio ↔ performance null, meta-analytic direction consistency, ICC 보조 계산
+- **1-3** Reward comparison by subject and episode — withholding-preceded vs. not-preceded episode mean reward 비교
+- **1-4** Episode-level NOOP ratio vs. withholding benefit — quantity-null 재확인
+- **1-5** Fatigue 및 단순 serial dependency 대안 설명 배제 — episode-position density + lag-1 AC
+- **1-6** Bout survival curve vs. exponential baseline — random omission 귀무가설 기각
 
-**목표 결과**: IL thinker는 NOOP *빈도*를 모방하지만 uncertainty-contingent *selectivity*는 human에서만 나타남. 6/6 피험자에서 일관된 bout의 비-random 구조 확인 → C1 성립.
+**목표 결과**: 인간의 NOOP 사용은 subject와 game 전반에 걸쳐 일관되며, 총량 자체는 성과를 예측하지 않지만 reward-linked deployment와 비-random bout structure는 분명하다. Fatigue 설명은 약하고, survival 구조는 memoryless omission과 다르다 → C1 성립.
 
 ---
 
@@ -97,21 +98,19 @@
 | Section | 분석 항목 | Figure | 상태 |
 |---------|-----------|--------|------|
 | 1-1 | Withholding bout schematic | **Fig 1-1A** (`fig_1-1_A_withholding_schematic.png`) | ✅ Done |
-| 1-1 | Action distribution: human vs. **IL thinker** (bar chart), pretrained thinker 별도 대조군 | **Fig 1-1B** (`fig_1-1_B_action_distribution.png`) | ✅ Done |
+| 1-1 | Action distribution: S1–S6 + non-IL thinker reference profile | **Fig 1-1B** (`fig_1-1_B_action_distribution.png`) | ✅ Done |
 | 1-2 | Subject-level NOOP proportion scatter (피험자×게임) + Cohen's d vs chance | **Fig 1-2A** (`fig_1-2_individual_differences.png` Panel A) | ✅ Done |
-| 1-2 | Session reliability: ICC across days per subject × game (bar chart) | **Fig 1-2B** (`fig_1-2_individual_differences.png` Panel B) | ✅ Done |
-| 1-2 | NOOP ratio ↔ performance scatter: null result 확인 (dual-axis, Pong/SI) | **Fig 1-2C** (`fig_1-2_individual_differences.png` Panel C) | ✅ Done |
-| 1-2 | Episode-level reward: withholding-preceded vs. not (6 subjects × 2 games, 일관된 유의성) | **Fig 1-2D** (`fig_1-2_reward_subject_episode.png`) | ✅ Done |
-| 1-2 | NOOP ratio ~ withholding benefit scatter (episode-level, null + benefit>0 consistent) | **Fig 1-2E** (`fig_1-2_noopratio_postnoop_reward.png`) | ✅ Done |
-| 1-3 | Paired comparison: Pong vs SpaceInvaders NOOP proportion (paired lines) | **Fig 1-3A** (`fig_1-3_cross_game.png` Panel A) | ✅ Done |
-| 1-3 | NOOP bout survival function per game (Kaplan-Meier style) | **Fig 1-3B** (`fig_1-3_cross_game.png` Panel B) | ✅ Done |
-| 1-3 | Meta-analytic direction check: 피험자별 NOOP above chance (Pong vs SI scatter) | **Fig 1-3C** (`fig_1-3_cross_game.png` Panel C) | ✅ Done |
-| 1-4 | Episode-position NOOP density: 20-bin 연속 + 3분할 shading (fatigue 배제) | **Fig 1-4A** (`fig_1-4_alternative_exclusion.png` Panel A) | ✅ Done |
-| 1-4 | Episode 3분할(early/mid/late) 별 NOOP proportion bar chart + 통계 | **Fig 1-4B** (`fig_1-4_alternative_exclusion.png` Panel B) | ✅ Done |
-| 1-4 | Lag-1 NOOP autocorrelation: boxplot + subject means per game (perseveration 확인) | **Fig 1-4C** (`fig_1-4_alternative_exclusion.png` Panel C) | ✅ Partial |
-| 1-5 | NOOP bout survival curve: KM per subject × game + exponential baseline | **Fig 1-5** (`fig_1-5_survival_by_subject.png`) | ✅ Done |
+| 1-2 | Session reliability: ICC across days per subject × game | Supplementary table (`1-2_icc_by_subject_game.csv`) | ✅ Done |
+| 1-2 | NOOP ratio ↔ performance scatter: null result 확인 (dual-axis, Pong/SI) | **Fig 1-2B** (`fig_1-2_individual_differences.png` Panel B) | ✅ Done |
+| 1-2 | Meta-analytic direction check: 피험자별 NOOP above chance (Pong vs SI scatter) | **Fig 1-2C** (`fig_1-2_individual_differences.png` Panel C) | ✅ Done |
+| 1-3 | Episode-level reward: withholding-preceded vs. not, by subject × game | **Fig 1-3** (`fig_1-3_reward_subject_episode.png`) | ✅ Done |
+| 1-3 | Cross-game summary tables: paired test, bout length summary, direction CSV | `1-3_bout_lengths.csv`, `1-3_effect_direction.csv` | ✅ Done |
+| 1-4 | NOOP ratio ~ withholding benefit scatter (episode-level) | **Fig 1-4** (`fig_1-4_noopratio_postnoop_reward.png`) | ✅ Done |
+| 1-5 | Episode-position NOOP density: 20-bin 연속 곡선 (fatigue 배제) | **Fig 1-5A** (`fig_1-5_alternative_exclusion.png` Panel A) | ✅ Done |
+| 1-5 | Episode 3분할(early/mid/late) summary statistics | Supplementary table (`1-4_episode_position_thirds.csv`) | ✅ Done |
+| 1-5 | Lag-1 NOOP autocorrelation: boxplot + subject means per game | **Fig 1-5B** (`fig_1-5_alternative_exclusion.png` Panel B) | ✅ Done (descriptive) |
+| 1-6 | NOOP bout survival curve: KM per subject × game + exponential baseline | **Fig 1-6** (`fig_1-6_survival_by_subject.png`) | ✅ Done |
 | 1-1 | Uncertainty-conditional NOOP rate: human vs. IL thinker per entropy bin (selectivity 차이 정량화) | — | 🔲 New (Section 3 연결) |
-| 2-1 | Residual distribution gap: human vs. IL thinker NOOP gap(+3.05pp) + JSD(0.005) — sub001 ses04 확인됨 | **Fig 1-1D** | ✅ Done (1-1에서 이동) |
 | 2-1 | Bout length ~ uncertainty regression (thinker entropy/q_gap, 모델 데이터 필요) | — | 🔲 New |
 | 2-1 | Bout length ~ post-action quality | — | 🔲 New |
 | 2-2 | Onset-aligned temporal profile | **Fig 2A** | ✅ Done |

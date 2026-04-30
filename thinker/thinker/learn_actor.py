@@ -240,7 +240,6 @@ class SActorLearner:
         self.bc_loader = None
         self.bc_model_net = None
         self.bc_policy_adapter = None
-        self.bc_optimizer = None
         self.bc_enabled = False
         self.action_prior = None
         self.action_prior_ema = None
@@ -250,17 +249,7 @@ class SActorLearner:
         self.bc_batch_size = max(
             1, int(getattr(self.flags, "icopro_batch_size", 32))
         )
-        self.bc_supervised_freq = max(
-            1, int(getattr(self.flags, "icopro_supervised_freq", 1))
-        )
         self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
-        self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
-        self.bc_action_diff_coef = float(
-            getattr(self.flags, "icopro_action_diff_coef", 1.0)
-        )
-        self.bc_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
-        self.bc_tree_coef = float(getattr(self.flags, "icopro_tree_coef", 0.0))
-        self.bc_kl_coef = float(getattr(self.flags, "icopro_actor_kl_coef", 0.0))
         self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
         self.bc_noop_window = collections.deque(maxlen=150)
         # Cached planner/env for IcoPro BC to avoid repeated cModelWrapper
@@ -324,11 +313,6 @@ class SActorLearner:
                 action_prior, dtype=torch.float32, device=self.device
             )
             self._logger.info("Loaded human action prior for RL regularizer.")
-        lr = float(getattr(self.flags, "icopro_actor_lr", 0.0))
-        if lr <= 0:
-            self._logger.info("icopro_actor_lr <= 0; supervised actor updates disabled.")
-            return
-        self.bc_optimizer = torch.optim.Adam(self.actor_net.parameters(), lr=lr)
         self.bc_enabled = True
         self._logger.info(f"IcoPro actor data loader initialised with {len(self.bc_loader.data_files)} files (subjects={subjects}, game_id={game_id}).")
 
@@ -661,17 +645,16 @@ class SActorLearner:
                 device=actor_device,
             )
             margin_losses.append(dqfd_margin_loss(logits_step, human_actions, margin_tensor))
-            if self.bc_pvp_coef > 0.0:
-                pred_actions = torch.argmax(logits_step.detach(), dim=-1)
-                q_human = logits_step.gather(1, human_actions.unsqueeze(1)).squeeze(1)
-                q_agent = logits_step.gather(1, pred_actions.unsqueeze(1)).squeeze(1)
-                pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
-                diff = (pred_actions != human_actions).float()
-                if diff.sum() > 0:
-                    pvp_neg = F.mse_loss(diff * q_agent, diff * (-torch.ones_like(q_agent)))
-                else:
-                    pvp_neg = torch.zeros_like(pvp_pos)
-                pvp_losses.append(pvp_pos + pvp_neg)
+            pred_actions = torch.argmax(logits_step.detach(), dim=-1)
+            q_human = logits_step.gather(1, human_actions.unsqueeze(1)).squeeze(1)
+            q_agent = logits_step.gather(1, pred_actions.unsqueeze(1)).squeeze(1)
+            pvp_pos = F.mse_loss(q_human, torch.ones_like(q_human))
+            diff = (pred_actions != human_actions).float()
+            if diff.sum() > 0:
+                pvp_neg = F.mse_loss(diff * q_agent, diff * (-torch.ones_like(q_agent)))
+            else:
+                pvp_neg = torch.zeros_like(pvp_pos)
+            pvp_losses.append(pvp_pos + pvp_neg)
             # action difference loss: base CE plus grouped CE (disentangled action groups)
             step_diff = F.cross_entropy(logits_step, human_actions) / math.log(6.0)
             if grouped_action_specs:
@@ -705,12 +688,7 @@ class SActorLearner:
             else torch.zeros((), device=actor_device)
         )
 
-        total_loss = (
-            self.bc_margin_coef * margin_loss
-            + self.bc_pvp_coef * pvp_loss
-            + self.bc_kl_coef * kl_loss
-            + self.bc_action_diff_coef * action_diff_loss
-        )
+        total_loss = margin_loss + pvp_loss + kl_loss + action_diff_loss
 
         if all_pred_actions and all_human_actions:
             pred_cat = torch.cat(all_pred_actions, dim=0)
@@ -794,14 +772,11 @@ class SActorLearner:
 
     def _try_compute_bc_metrics(self):
         """BC loss를 RL total_loss와 합산하기 위해 계산한다.
-        bc_supervised_freq 주기에 해당하는 step에서만 실제로 계산하고,
-        아닌 경우 None을 반환한다. 반환된 metrics의 'total_loss'는 gradient가
-        살아 있는 tensor이므로 바로 RL total_loss에 더할 수 있다."""
+        반환된 metrics의 'total_loss'는 gradient가 살아 있는 tensor이므로
+        바로 RL total_loss에 더할 수 있다."""
         if not self.bc_enabled or self.bc_loader is None:
             return None
         self.bc_step += 1
-        if self.bc_step % self.bc_supervised_freq != 0:
-            return None
         return self._compute_bc_loss()
 
     def _maybe_run_bc_update(self):
@@ -1469,15 +1444,12 @@ class SActorLearner:
             self.kl_losses.append(kl_loss.item())
             losses["kl_loss"] = np.mean(self.kl_losses)
 
-        # BC loss를 RL total_loss에 합산한다 (first_iter에서만 실행).
-        # bc_supervised_freq 주기에 해당하지 않으면 None이 반환되어 합산이 skip된다.
-        # 이렇게 하면 RL과 BC gradient가 단일 backward에서 올바르게 합산되어
-        # 두 optimizer의 순차 update로 인한 oscillation을 제거한다.
-        if first_iter:
-            bc_metrics = self._try_compute_bc_metrics()
-            if bc_metrics is not None:
-                total_loss = total_loss + bc_metrics["total_loss"]
-            self._pending_bc_metrics = bc_metrics
+        # BC loss를 RL total_loss에 항상 합산한다.
+        # 이렇게 하면 RL과 BC gradient가 단일 backward에서 올바르게 합산된다.
+        bc_metrics = self._try_compute_bc_metrics()
+        if bc_metrics is not None:
+            total_loss = total_loss + bc_metrics["total_loss"]
+        self._pending_bc_metrics = bc_metrics
 
         losses["total_loss"] = total_loss
 

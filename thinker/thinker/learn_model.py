@@ -304,11 +304,9 @@ class SModelLearner:
     def _init_bc_components(self):
         self.bc_loader = None
         self.bc_enabled = False
-        self.bc_optimizer = None
         self.bc_step = 0
         self._pending_bc_metrics = None
         self.bc_batch_size = max(1, int(getattr(self.flags, "icopro_batch_size", 32)))
-        self.bc_supervised_freq = max(1, int(getattr(self.flags, "icopro_supervised_freq", 1)))
         self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
         # Cached planner/env for IcoPro BC sequence playback (tree carry)
         self.bc_planner = None
@@ -318,13 +316,6 @@ class SModelLearner:
         self.bc_planner_device = None
         # Reuse actor batch_length for sequence BC when available.
         self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
-        self.bc_model_coef = float(getattr(self.flags, "icopro_model_coef", 1.0))
-        self.bc_model_kl_coef = float(getattr(self.flags, "icopro_model_kl_coef", 0.0))
-        # Reuse IcoPro actor hyperparameters for model policy shaping
-        self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
-        self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
-        self.bc_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
-
         data_path = getattr(self.flags, "icopro_data_path", "")
         if not data_path:
             return
@@ -357,11 +348,10 @@ class SModelLearner:
             self._logger.warning("IcoPro model data loader found no files; disabling supervised model loss.")
             self.bc_loader = None
             return
-        lr = float(getattr(self.flags, "icopro_model_lr", 0.0))
-        if lr <= 0:
-            self._logger.warning("icopro_model_lr <= 0; supervised model updates disabled.")
+        if not self.flags.dual_net:
+            self._logger.warning("IcoPro model xs loss requires dual_net/sr_net; disabling supervised model loss.")
+            self.bc_loader = None
             return
-        self.bc_optimizer = torch.optim.Adam(self.model_net.vp_net.parameters(), lr=lr)
         self.bc_enabled = True
         self._logger.info(f"IcoPro model data loader initialised with {len(self.bc_loader.data_files)} files (subjects={subjects}, game_id={game_id}).")
 
@@ -692,20 +682,17 @@ class SModelLearner:
             return None
 
         xs_loss = xs_loss_sum / float(xs_loss_count)
-        total_loss = self.bc_model_coef * xs_loss
 
         return {
             "xs_loss": xs_loss,
-            "total_loss": total_loss,
+            "total_loss": xs_loss,
         }
 
     def _try_compute_bc_metrics(self):
-        """Compute BC loss so it can be merged into the main vp_net loss."""
+        """Compute BC xs loss so it can be merged into the main sr_net loss."""
         if not self.bc_enabled or self.bc_loader is None:
             return None
         self.bc_step += 1
-        if self.bc_step % self.bc_supervised_freq != 0:
-            return None
         metrics = self._compute_bc_loss()
         if metrics is None:
             return None
@@ -720,7 +707,7 @@ class SModelLearner:
         return metrics
 
     def _maybe_run_bc_update(self):
-        """BC update is integrated into the shared vp_net optimizer step."""
+        """BC update is integrated into the shared sr_net optimizer step."""
         metrics = self._pending_bc_metrics
         self._pending_bc_metrics = None
         if metrics is None:
@@ -761,6 +748,7 @@ class SModelLearner:
             self.timing.time("convert_data")
 
         amp_enabled = self.flags.float16 and self.device.type == "cuda"
+        bc_metrics = None
         if self.flags.dual_net:
             torch.autograd.set_detect_anomaly(False)
             # compute losses for model_net
@@ -770,6 +758,12 @@ class SModelLearner:
                 )
             if self.timing is not None:
                 self.timing.time("compute_losses_m")
+            bc_metrics = self._try_compute_bc_metrics()
+            if bc_metrics is not None:
+                losses_m["total_loss_m"] = (
+                    losses_m["total_loss_m"] + bc_metrics["total_loss"]
+                )
+            self._pending_bc_metrics = bc_metrics
             total_norm_m = self.gradient_step(
                 losses_m["total_loss_m"], self.optimizer_m, self.scheduler_m, self.scaler_m
             )
@@ -779,16 +773,13 @@ class SModelLearner:
             losses_m = {}
             total_norm_m = torch.zeros(1, device=self.device)
             pred_xs = None
+            self._pending_bc_metrics = None
         with torch.autocast("cuda", enabled=amp_enabled):
             losses_p, priorities = self.compute_losses_p(
                 train_model_out, target, is_weights, pred_xs
             )
         if self.timing is not None:
             self.timing.time("compute_losses_p")
-        bc_metrics = self._try_compute_bc_metrics()
-        if bc_metrics is not None:
-            losses_p["total_loss_p"] = losses_p["total_loss_p"] + bc_metrics["total_loss"]
-        self._pending_bc_metrics = bc_metrics
         total_norm_p = self.gradient_step(
             losses_p["total_loss_p"], self.optimizer_p, self.scheduler_p, self.scaler_p
         )
@@ -869,6 +860,8 @@ class SModelLearner:
                     stats["icopro/model/policy_loss"] = self.latest_icopro_model_stats["policy_loss"]
                 if "state_loss" in self.latest_icopro_model_stats:
                     stats["icopro/model/state_loss"] = self.latest_icopro_model_stats["state_loss"]
+                if "xs_loss" in self.latest_icopro_model_stats:
+                    stats["icopro/model/xs_loss"] = self.latest_icopro_model_stats["xs_loss"]
                 if "done_loss" in self.latest_icopro_model_stats:
                     stats["icopro/model/done_loss"] = self.latest_icopro_model_stats["done_loss"]
                 if "margin_loss" in self.latest_icopro_model_stats:

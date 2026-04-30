@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Behavioral analysis — Sections 1-1, 1-2, 1-3, 1-4 of the research plan.
+Behavioral analysis for the figure set in research plan 01.
 
-1-1 : Withholding bout schematic
-1-2 : Individual differences and subject-level consistency
-1-3 : Cross-game generalization (Pong vs Space Invaders)
-1-4 : Alternative explanation exclusion (fatigue, autocorrelation)
+Figures generated here:
+1-1 : Withholding bout schematic + action distribution
+1-2 : Individual differences
+1-3 : Reward comparison by subject and episode
+1-4 : NOOP ratio vs post-NOOP reward benefit
+1-5 : Alternative explanation exclusion
+1-6 : NOOP bout survival analysis
+1-7 : Short vs Long bout distribution from behavior-only data
 
 Input  : ../behavioral_data_block_old/sub_{1-6}/game_{1,2}/day_{1-4}/block_N/*.npz
-Output : ../research_script/outputs/behavioral_analysis/
+Output : ../research_script/outputs/01_behavioral_analysis/
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ from scipy import stats
 ROOT = Path(__file__).parent.parent
 DATA_ROOT = ROOT / "behavioral_data_block_old"
 THINKER_ROOT = DATA_ROOT / "thinker"
-OUT_DIR = Path(__file__).parent / "outputs" / "behavioral_analysis"
+OUT_DIR = Path(__file__).parent / "outputs" / "01_behavioral_analysis"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 FIG_DIR = OUT_DIR / "figures"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,8 +60,22 @@ WITH_COLOR = "#2ca02c"
 NON_COLOR = "#d62728"
 LINE_COLOR = "#7f7f7f"
 MEAN_COLOR = "#111111"
-RIGHT_AXIS_COLOR = "#1f4e79"
+RIGHT_AXIS_COLOR = NON_COLOR
 RIGHT_AXIS_GAMES = {2}
+GAME_COLORS = {1: WITH_COLOR, 2: NON_COLOR}
+GAME_NAME_COLORS = {GAMES[game]: GAME_COLORS[game] for game in GAMES}
+SUBJECT_COLORS = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+]
+SUBJECT_COLOR_MAP = {
+    subject: SUBJECT_COLORS[idx]
+    for idx, subject in enumerate(SUBJECTS)
+}
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +94,7 @@ def save_withholding_schematic(out_path: Path) -> None:
     ax.set_xlim(0, 1)
     ax.set_ylim(-0.2, 0.25)
     ax.set_axis_off()
-    ax.set_title("1-1: Withholding bout schematic")
+    ax.set_title("1-1A: Withholding bout schematic")
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
@@ -384,7 +402,7 @@ def plot_reward_subject_episode_panel(
             ha="center",
             va="bottom",
             fontsize=9,
-            fontweight="bold",
+            color=GAME_COLORS[game_id],
         )
 
         if len(game_rows) == 0:
@@ -533,7 +551,7 @@ def save_reward_subject_episode_figure(
         bbox_to_anchor=(0.5, 0.98),
     )
     fig.suptitle(
-        "1-2 Reward comparison: Pong and SpaceInvaders by subject and episode",
+        "1-3 Reward comparison: Pong and SpaceInvaders by subject and episode",
         y=1.03,
         fontsize=15,
     )
@@ -730,12 +748,12 @@ def plot_action_distribution_subjects_vs_thinker(
 ) -> None:
     entity_order = [f"S{i}" for i in range(1, 7)] + ["Thinker"]
     entity_colors = {
-        "S1": "#4C78A8",
-        "S2": "#72B7B2",
-        "S3": "#54A24B",
-        "S4": "#EECA3B",
-        "S5": "#E45756",
-        "S6": "#B279A2",
+        "S1": SUBJECT_COLORS[0],
+        "S2": SUBJECT_COLORS[1],
+        "S3": SUBJECT_COLORS[2],
+        "S4": SUBJECT_COLORS[3],
+        "S5": SUBJECT_COLORS[4],
+        "S6": SUBJECT_COLORS[5],
         "Thinker": "#222222",
     }
 
@@ -803,6 +821,181 @@ def compute_bouts(actions: np.ndarray) -> List[int]:
     return bouts
 
 
+def _km_survival_from_lengths(lengths: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    lengths = np.sort(np.asarray(lengths, dtype=int))
+    if lengths.size == 0:
+        return np.array([], dtype=int), np.array([], dtype=float)
+    max_t = int(lengths.max())
+    x = np.arange(1, max_t + 1)
+    survival = np.array([(lengths >= t).mean() for t in x], dtype=float)
+    return x, survival
+
+
+def estimate_cross2_from_lengths(lengths: Sequence[int]) -> int:
+    """Estimate Cross2 from a bout-length survival curve and exponential null."""
+    arr = np.asarray(lengths, dtype=int)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 1
+    if arr.size < 5:
+        return max(int(np.percentile(arr, 95)), 1)
+
+    lam = 1.0 / max(float(np.mean(arr)), EPS)
+    x, km = _km_survival_from_lengths(arr)
+    exp_base = np.exp(-lam * x)
+    km_above = km > exp_base
+
+    if km_above[0]:
+        cross1_candidates = np.where(~km_above)[0]
+        cross1_idx = int(cross1_candidates[0]) if cross1_candidates.size > 0 else len(km) - 1
+    else:
+        cross1_idx = 0
+
+    search_start = cross1_idx + 1
+    if search_start >= len(km):
+        return max(int(np.percentile(arr, 95)), 1)
+
+    cross2_candidates = np.where(km_above[search_start:])[0]
+    if cross2_candidates.size == 0:
+        return max(int(np.percentile(arr, 95)), 1)
+    return int(x[search_start + cross2_candidates[0]])
+
+
+def annotate_short_long_bouts(df_bouts: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Add subject × game Cross2 split labels to behavior-only bout lengths."""
+    if df_bouts.empty:
+        detail_cols = list(df_bouts.columns) + ["cross2", "bout_class"]
+        summary_cols = [
+            "subject",
+            "game",
+            "game_name",
+            "n_bouts",
+            "cross2",
+            "n_short",
+            "n_long",
+            "pct_long",
+        ]
+        return pd.DataFrame(columns=detail_cols), pd.DataFrame(columns=summary_cols)
+
+    detail = df_bouts.copy()
+    cross2_map: Dict[Tuple[str, int], int] = {}
+    summary_rows: List[Dict[str, object]] = []
+
+    for (subject, game), group in detail.groupby(["subject", "game"], sort=True):
+        lengths = group["bout_length"].to_numpy(dtype=int)
+        cross2 = estimate_cross2_from_lengths(lengths)
+        cross2_map[(str(subject), int(game))] = cross2
+        is_long = lengths >= cross2
+        summary_rows.append(
+            {
+                "subject": subject,
+                "game": int(game),
+                "game_name": str(group["game_name"].iloc[0]),
+                "n_bouts": int(len(lengths)),
+                "cross2": int(cross2),
+                "n_short": int(np.sum(~is_long)),
+                "n_long": int(np.sum(is_long)),
+                "pct_long": float(np.mean(is_long)) if len(is_long) > 0 else np.nan,
+            }
+        )
+
+    detail["cross2"] = [
+        cross2_map[(str(row.subject), int(row.game))]
+        for row in detail.itertuples(index=False)
+    ]
+    detail["bout_class"] = np.where(
+        detail["bout_length"].to_numpy(dtype=int) >= detail["cross2"].to_numpy(dtype=int),
+        "Long",
+        "Short",
+    )
+    summary = pd.DataFrame(summary_rows).sort_values(["subject", "game"]).reset_index(drop=True)
+    return detail, summary
+
+
+def save_short_long_bout_distribution_figure(
+    bout_detail: pd.DataFrame,
+    bout_summary: pd.DataFrame,
+    out_path: Path,
+) -> None:
+    """Save behavior-only Fig 1-7 for all subjects and both games."""
+    fig, axes = plt.subplots(len(GAMES), len(SUBJECTS), figsize=(18, 7.2), sharey="row")
+
+    game_max = {
+        game: max(
+            int(bout_detail.loc[bout_detail["game"] == game, "bout_length"].max())
+            if np.any(bout_detail["game"] == game)
+            else 2,
+            2,
+        )
+        for game in GAMES
+    }
+
+    for row_idx, (game, game_name) in enumerate(GAMES.items()):
+        max_len = game_max[game]
+        bins = np.unique(np.round(np.logspace(0, np.log10(max_len), 28)).astype(int))
+        bins = np.r_[bins, max_len + 1]
+        bins = np.unique(bins)
+
+        for col_idx, subject in enumerate(SUBJECTS):
+            ax = axes[row_idx, col_idx]
+            sub = bout_detail[
+                (bout_detail["subject"] == subject) &
+                (bout_detail["game"] == game)
+            ]
+            summary_row = bout_summary[
+                (bout_summary["subject"] == subject) &
+                (bout_summary["game"] == game)
+            ]
+
+            if sub.empty or summary_row.empty:
+                ax.set_axis_off()
+                continue
+
+            cross2 = int(summary_row.iloc[0]["cross2"])
+            short_lengths = sub.loc[sub["bout_class"] == "Short", "bout_length"].to_numpy(dtype=int)
+            long_lengths = sub.loc[sub["bout_class"] == "Long", "bout_length"].to_numpy(dtype=int)
+
+            ax.hist(
+                short_lengths,
+                bins=bins,
+                color="#1f77b4",
+                alpha=0.72,
+                label="Short",
+            )
+            ax.hist(
+                long_lengths,
+                bins=bins,
+                color="#ff7f0e",
+                alpha=0.72,
+                label="Long",
+            )
+            ax.axvline(cross2, color="#222222", lw=1.0, ls=":", alpha=0.8)
+            ax.set_xscale("log")
+            ax.set_xlim(1, max_len)
+            ax.grid(axis="y", alpha=0.25)
+            ax.set_title(
+                f"S{subject_sort_key(subject)} {game_name}\n"
+                f"Cross2={cross2}, long={int(summary_row.iloc[0]['n_long'])}",
+                fontsize=9,
+                color=GAME_COLORS[game],
+            )
+            if row_idx == len(GAMES) - 1:
+                ax.set_xlabel("Bout length")
+            if col_idx == 0:
+                ax.set_ylabel("Count")
+
+    handles = [
+        Line2D([0], [0], color="#1f77b4", lw=7, alpha=0.72, label="Short (< Cross2)"),
+        Line2D([0], [0], color="#ff7f0e", lw=7, alpha=0.72, label="Long (>= Cross2)"),
+        Line2D([0], [0], color="#222222", lw=1.0, ls=":", label="Cross2"),
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.01))
+    fig.suptitle("1-7: Short vs Long NOOP bout distribution by subject and game", y=1.05, fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def compute_lag1_autocorr(actions: np.ndarray) -> float:
     """Lag-1 autocorrelation of the is_noop binary sequence."""
     x = (actions == NOOP_ACTION).astype(float)
@@ -813,6 +1006,163 @@ def compute_lag1_autocorr(actions: np.ndarray) -> float:
     if denom < EPS:
         return np.nan
     return float(np.dot(x_centered[:-1], x_centered[1:]) / denom)
+
+
+def extract_censored_bouts(actions: np.ndarray) -> List[Tuple[int, bool]]:
+    """Return NOOP bout lengths for one episode with episode-end censoring."""
+    bouts: List[Tuple[int, bool]] = []
+    in_bout = False
+    bout_len = 0
+
+    for action in np.asarray(actions, dtype=int).reshape(-1):
+        if action == NOOP_ACTION:
+            if not in_bout:
+                in_bout = True
+                bout_len = 1
+            else:
+                bout_len += 1
+        else:
+            if in_bout:
+                bouts.append((bout_len, False))
+            in_bout = False
+            bout_len = 0
+
+    if in_bout:
+        bouts.append((bout_len, True))
+    return bouts
+
+
+def bouts_for_subject_game(
+    episodes: Sequence[Dict],
+    subject: str,
+    game: int,
+) -> List[Tuple[int, bool]]:
+    bouts: List[Tuple[int, bool]] = []
+    for ep in episodes:
+        if ep["subject"] != subject or int(ep["game"]) != game:
+            continue
+        bouts.extend(extract_censored_bouts(np.asarray(ep["actions"], dtype=int)))
+    return bouts
+
+
+def kaplan_meier_survival(
+    bouts: Sequence[Tuple[int, bool]],
+    t_max: int | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return stepwise Kaplan-Meier survival estimate for bout lengths."""
+    if not bouts:
+        return np.array([], dtype=int), np.array([], dtype=float)
+
+    lengths = np.asarray([length for length, _ in bouts], dtype=int)
+    events = np.asarray([not censored for _, censored in bouts], dtype=bool)
+
+    if t_max is None:
+        t_max = int(np.percentile(lengths, 99))
+    t_max = max(int(t_max), 1)
+
+    times = np.arange(1, t_max + 1, dtype=int)
+    survival = np.ones(len(times), dtype=float)
+    s = 1.0
+
+    for i, t in enumerate(times):
+        n_at_risk = int(np.sum(lengths >= t))
+        n_events = int(np.sum((lengths == t) & events))
+        if n_at_risk > 0:
+            s *= (1.0 - (n_events / n_at_risk))
+        survival[i] = s
+
+    return times, survival
+
+
+def exponential_baseline(
+    bouts: Sequence[Tuple[int, bool]],
+    times: np.ndarray,
+) -> np.ndarray:
+    uncensored = [length for length, censored in bouts if not censored]
+    if not uncensored:
+        uncensored = [length for length, _ in bouts]
+    mean_length = float(np.mean(uncensored))
+    return np.exp(-times / max(mean_length, EPS))
+
+
+def print_survival_summary(episodes: Sequence[Dict]) -> None:
+    print(f"{'Sub':>4} {'Game':>14} {'N_bouts':>8} {'Censored%':>10} {'Mean_len':>9} {'Median_len':>11}")
+    print("-" * 62)
+    for subject in SUBJECTS:
+        subject_num = subject_sort_key(subject)
+        for game_id, game_name in GAMES.items():
+            bouts = bouts_for_subject_game(episodes, subject, game_id)
+            if not bouts:
+                continue
+            lengths = np.asarray([length for length, _ in bouts], dtype=float)
+            n_censored = sum(censored for _, censored in bouts)
+            print(
+                f"{subject_num:>4} {game_name:>14} {len(bouts):>8} "
+                f"{100 * n_censored / len(bouts):>9.1f}% "
+                f"{np.mean(lengths):>9.1f} {np.median(lengths):>11.1f}"
+            )
+
+
+def save_survival_by_subject_figure(
+    episodes: Sequence[Dict],
+    out_path: Path,
+    t_max_by_game: Dict[int, int] | None = None,
+) -> None:
+    if t_max_by_game is None:
+        t_max_by_game = {1: 150, 2: 80}
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    axes_flat = axes.flatten()
+
+    for ax, subject in zip(axes_flat, SUBJECTS):
+        for game_id, game_name in GAMES.items():
+            bouts = bouts_for_subject_game(episodes, subject, game_id)
+            if not bouts:
+                continue
+
+            times, survival = kaplan_meier_survival(
+                bouts,
+                t_max=t_max_by_game.get(game_id),
+            )
+            if len(times) == 0:
+                continue
+
+            baseline = exponential_baseline(bouts, times)
+            color = GAME_COLORS[game_id]
+            ax.plot(times, survival, color=color, lw=2, label=game_name)
+            ax.plot(
+                times,
+                baseline,
+                color=color,
+                lw=1.2,
+                ls="--",
+                alpha=0.55,
+                label=f"{game_name} exp. baseline",
+            )
+
+        ax.set_title(f"S{subject_sort_key(subject)}", fontsize=11)
+        ax.set_xlabel("Bout length (steps)", fontsize=9)
+        ax.set_ylabel("P(surviving)", fontsize=9)
+        ax.set_ylim(0, 1.05)
+        ax.legend(fontsize=7, loc="upper right")
+        ax.spines[["top", "right"]].set_visible(False)
+
+    fig.text(
+        0.5,
+        0.01,
+        "Solid: KM estimate  |  Dashed: Exponential baseline (random omission null)",
+        ha="center",
+        fontsize=9,
+        color="gray",
+    )
+    fig.suptitle(
+        "1-6: NOOP Bout Survival Function by Subject\n"
+        "Pong vs SpaceInvaders - deviation from exponential = planned delay",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def icc_1k(values_by_session: Dict) -> float:
@@ -884,8 +1234,8 @@ plot_action_distribution_subjects_vs_thinker(
     out_path=FIG_DIR / "fig_1-1_B_action_distribution.png",
 )
 print("Saved 1-1_action_distribution_subject_thinker.csv")
-print("Saved fig_1-1_action_distribution.png")
-save_withholding_schematic(FIG_DIR / "fig_1-1_withholding_schematic.png")
+print("Saved fig_1-1_B_action_distribution.png")
+save_withholding_schematic(FIG_DIR / "fig_1-1_A_withholding_schematic.png")
 print("Saved fig_1-1_A_withholding_schematic.png")
 
 # ---------------------------------------------------------------------------
@@ -895,15 +1245,15 @@ print("\n=== Section 1-2: Individual differences ===")
 
 episode_reward_summary = build_reward_episode_summary(all_episodes, k_future=REWARD_K)
 if len(episode_reward_summary) == 0:
-    raise RuntimeError("No episode-level reward summary could be computed for fig_1-2_reward_subject_episode.png")
+    raise RuntimeError("No episode-level reward summary could be computed for fig_1-3_reward_subject_episode.png")
 episode_reward_stats = summarize_reward_episode_subject_stats(episode_reward_summary)
 save_reward_subject_episode_figure(
     episode_summary=episode_reward_summary,
     episode_subject_stats=episode_reward_stats,
-    out_path=FIG_DIR / "fig_1-2_reward_subject_episode.png",
+    out_path=FIG_DIR / "fig_1-3_reward_subject_episode.png",
     k_future=REWARD_K,
 )
-print("Saved fig_1-2_reward_subject_episode.png")
+print("Saved fig_1-3_reward_subject_episode.png")
 
 # --- 1-2a : Subject × Game NOOP proportion ---
 subj_game = (
@@ -975,45 +1325,82 @@ df_cohend.to_csv(OUT_DIR / "1-2_cohens_d_vs_chance.csv", index=False)
 print("\nCohen's d vs chance NOOP:")
 print(df_cohend.to_string(index=False))
 
+# Shared cross-game summaries reused in fig 1-2C and the section 1-3 tables.
+pong_noop = df_ep[df_ep["game"] == 1].groupby("subject")["noop_prop"].mean()
+si_noop = df_ep[df_ep["game"] == 2].groupby("subject")["noop_prop"].mean()
+t_stat, p_paired = stats.ttest_rel(pong_noop.values, si_noop.values)
+
+direction_rows = []
+for sub in SUBJECTS:
+    pv = float(df_ep[(df_ep["subject"] == sub) & (df_ep["game"] == 1)]["noop_prop"].mean())
+    sv = float(df_ep[(df_ep["subject"] == sub) & (df_ep["game"] == 2)]["noop_prop"].mean())
+    direction_rows.append(
+        {
+            "subject": sub,
+            "pong_noop": pv,
+            "si_noop": sv,
+            "pong_above_chance": pv > CHANCE_NOOP,
+            "si_above_chance": sv > CHANCE_NOOP,
+        }
+    )
+df_dir = pd.DataFrame(direction_rows)
+
 # --- Figure 1-2 ---
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
 # Panel A: subject-level NOOP proportion per game
 ax = axes[0]
-colors = {"Pong": "#1f77b4", "SpaceInvaders": "#ff7f0e"}
-for game, gname in GAMES.items():
-    vals = df_ep[df_ep["game"] == game].groupby("subject")["noop_prop"].mean().values
-    xs = np.arange(len(SUBJECTS))
-    ax.scatter(xs + (0 if game == 1 else 0.2), vals, label=gname,
-               color=colors[gname], s=50, zorder=3)
-ax.axhline(CHANCE_NOOP, color="gray", ls="--", lw=1.2, label="Chance (1/6)")
-ax.set_xticks(np.arange(len(SUBJECTS)) + 0.1)
+x = np.arange(len(SUBJECTS))
+offset = 0.16
+for idx, sub in enumerate(SUBJECTS):
+    subject_color = SUBJECT_COLOR_MAP[sub]
+    p_val = float(pong_noop.get(sub, np.nan))
+    s_val = float(si_noop.get(sub, np.nan))
+    if np.isfinite(p_val) and np.isfinite(s_val):
+        ax.plot(
+            [x[idx] - offset, x[idx] + offset],
+            [p_val, s_val],
+            color=subject_color,
+            lw=1.2,
+            alpha=0.45,
+            zorder=1,
+        )
+    if np.isfinite(p_val):
+        ax.scatter(
+            x[idx] - offset,
+            p_val,
+            s=62,
+            marker="o",
+            facecolor=subject_color,
+            zorder=3,
+        )
+    if np.isfinite(s_val):
+        ax.scatter(
+            x[idx] + offset,
+            s_val,
+            s=62,
+            marker="s",
+            facecolor=subject_color,
+            zorder=3,
+        )
+ax.axhline(CHANCE_NOOP, color="gray", ls="--", lw=1.2)
+ax.set_xticks(x)
 ax.set_xticklabels([f"S{i+1}" for i in range(len(SUBJECTS))])
 ax.set_ylabel("Mean NOOP proportion")
 ax.set_title("1-2A: Subject-level NOOP proportion")
-ax.legend(fontsize=8, frameon=False)
+ax.legend(
+    handles=[
+        Line2D([0], [0], marker="o", color="none", markerfacecolor=GAME_COLORS[1], markeredgecolor="none", markersize=7, label="Pong"),
+        Line2D([0], [0], marker="s", color="none", markerfacecolor=GAME_COLORS[2], markeredgecolor="none", markersize=7, label="SpaceInvaders"),
+        Line2D([0], [0], color="gray", lw=1.2, ls="--", label="Chance (1/6)"),
+    ],
+    fontsize=8,
+    frameon=False,
+)
 ax.grid(axis="y", alpha=0.3)
 
-# Panel B: ICC per subject × game (bar chart)
-ax = axes[1]
-icc_pivot = df_icc.pivot(index="subject", columns="game", values="icc").fillna(0)
-x = np.arange(len(SUBJECTS))
-w = 0.38
-for i, gname in enumerate(["Pong", "SpaceInvaders"]):
-    if gname in icc_pivot.columns:
-        ax.bar(x + i * w - w / 2, icc_pivot[gname].values, width=w,
-               label=gname, color=colors[gname], alpha=0.8)
-ax.axhline(0, color="black", lw=0.8)
-ax.axhline(0.75, color="gray", ls=":", lw=1.2, label="Good reliability (0.75)")
-ax.set_xticks(x)
-ax.set_xticklabels([f"S{i+1}" for i in range(len(SUBJECTS))])
-ax.set_ylabel("ICC (sessions as raters)")
-ax.set_title("1-2B: Session reliability (ICC)")
-ax.legend(fontsize=8, frameon=False)
-ax.grid(axis="y", alpha=0.3)
-
-# Panel C: NOOP ratio vs performance scatter (dual y-axis: SI left, Pong right)
-ax_si = axes[2]
+# Panel B: NOOP ratio vs performance scatter (dual y-axis: SI left, Pong right)
+ax_si = axes[1]
 ax_pong = ax_si.twinx()
 
 for game, gname in GAMES.items():
@@ -1024,44 +1411,95 @@ for game, gname in GAMES.items():
     sub_agg["sub_label"] = sub_agg["subject"].str.extract(r"(\d+)").astype(int).apply(lambda x: f"S{x[0]}", axis=1)
 
     if game == 2:  # SpaceInvaders → left axis
-        ax_si.scatter(sub_agg["mean_noop"], sub_agg["mean_score"],
-                      label=gname, color=colors[gname], s=55, zorder=3)
+        for _, row in sub_agg.iterrows():
+            subject_color = SUBJECT_COLOR_MAP[str(row["subject"])]
+            ax_si.scatter(
+                row["mean_noop"],
+                row["mean_score"],
+                s=68,
+                marker="o",
+                facecolor=subject_color,
+                zorder=3,
+            )
+            ax_si.annotate(
+                row["sub_label"],
+                (row["mean_noop"], row["mean_score"]),
+                textcoords="offset points",
+                xytext=(4, 4),
+                fontsize=7,
+                color=subject_color,
+            )
         coef = np.polyfit(sub_agg["mean_noop"], sub_agg["mean_score"], deg=1)
         xx = np.linspace(sub_agg["mean_noop"].min(), sub_agg["mean_noop"].max(), 50)
-        ax_si.plot(xx, np.polyval(coef, xx), color=colors[gname], lw=1.5, ls="--", alpha=0.7)
-        for _, row in sub_agg.iterrows():
-            ax_si.annotate(row["sub_label"], (row["mean_noop"], row["mean_score"]),
-                           textcoords="offset points", xytext=(4, 4), fontsize=7,
-                           color=colors[gname])
+        ax_si.plot(xx, np.polyval(coef, xx), color=GAME_COLORS[2], lw=1.5, ls="--", alpha=0.8)
     else:  # Pong → right axis
-        ax_pong.scatter(sub_agg["mean_noop"], sub_agg["mean_score"],
-                        label=gname, color=colors[gname], s=55, zorder=3, marker="s")
+        for _, row in sub_agg.iterrows():
+            subject_color = SUBJECT_COLOR_MAP[str(row["subject"])]
+            ax_pong.scatter(
+                row["mean_noop"],
+                row["mean_score"],
+                s=68,
+                marker="s",
+                facecolor=subject_color,
+                zorder=3,
+            )
+            ax_pong.annotate(
+                row["sub_label"],
+                (row["mean_noop"], row["mean_score"]),
+                textcoords="offset points",
+                xytext=(4, -10),
+                fontsize=7,
+                color=subject_color,
+            )
         coef = np.polyfit(sub_agg["mean_noop"], sub_agg["mean_score"], deg=1)
         xx = np.linspace(sub_agg["mean_noop"].min(), sub_agg["mean_noop"].max(), 50)
-        ax_pong.plot(xx, np.polyval(coef, xx), color=colors[gname], lw=1.5, ls="--", alpha=0.7)
-        for _, row in sub_agg.iterrows():
-            ax_pong.annotate(row["sub_label"], (row["mean_noop"], row["mean_score"]),
-                             textcoords="offset points", xytext=(4, -10), fontsize=7,
-                             color=colors[gname])
+        ax_pong.plot(xx, np.polyval(coef, xx), color=GAME_COLORS[1], lw=1.5, ls="--", alpha=0.8)
 
 ax_si.set_xlabel("Mean NOOP proportion")
-ax_si.set_ylabel("Mean episode score (SpaceInvaders)", color=colors["SpaceInvaders"])
-ax_pong.set_ylabel("Mean episode score (Pong)", color=colors["Pong"])
-ax_si.tick_params(axis="y", labelcolor=colors["SpaceInvaders"])
-ax_pong.tick_params(axis="y", labelcolor=colors["Pong"])
-ax_si.set_title("1-2C: NOOP ratio ↔ performance (expected null)")
-# Combined legend
-handles_si, labels_si = ax_si.get_legend_handles_labels()
-handles_p, labels_p = ax_pong.get_legend_handles_labels()
+ax_si.set_ylabel("Mean episode score (SpaceInvaders)", color=GAME_COLORS[2])
+ax_pong.set_ylabel("Mean episode score (Pong)", color=GAME_COLORS[1])
+ax_si.tick_params(axis="y", labelcolor=GAME_COLORS[2])
+ax_pong.tick_params(axis="y", labelcolor=GAME_COLORS[1])
+ax_si.set_title("1-2B: NOOP ratio ↔ performance")
 ax_si.legend(
-    handles_si + handles_p,
-    labels_si + labels_p,
+    handles=[
+        Line2D([0], [0], marker="o", color=GAME_COLORS[2], markerfacecolor=GAME_COLORS[2], markeredgecolor="none", markersize=7, lw=1.5, ls="--", label="SpaceInvaders"),
+        Line2D([0], [0], marker="s", color=GAME_COLORS[1], markerfacecolor=GAME_COLORS[1], markeredgecolor="none", markersize=7, lw=1.5, ls="--", label="Pong"),
+    ],
     fontsize=8,
     frameon=False,
-    loc="upper center",
-    bbox_to_anchor=(0.43, 1.02),
+    loc="upper right",
 )
 ax_si.grid(alpha=0.3)
+
+# Panel C: per-subject NOOP above chance in both games (meta-analytic)
+ax = axes[2]
+all_above_p = (df_dir["pong_noop"] - CHANCE_NOOP).to_numpy(dtype=float)
+all_above_s = (df_dir["si_noop"] - CHANCE_NOOP).to_numpy(dtype=float)
+pad_x = max(float(np.ptp(all_above_p)) * 0.35, 0.02)
+pad_y = max(float(np.ptp(all_above_s)) * 0.35, 0.02)
+for _, row in df_dir.iterrows():
+    above_p = float(row["pong_noop"] - CHANCE_NOOP)
+    above_s = float(row["si_noop"] - CHANCE_NOOP)
+    subject = str(row["subject"])
+    subject_color = SUBJECT_COLOR_MAP[subject]
+    ax.scatter(above_p, above_s, color=subject_color, s=68, zorder=3)
+    ax.annotate(
+        f"S{subject_sort_key(subject)}",
+        (above_p, above_s),
+        textcoords="offset points",
+        xytext=(5, 4),
+        fontsize=8,
+        color=subject_color,
+    )
+ax.axhline(0, color="black", lw=0.8, ls="--")
+ax.axvline(0, color="black", lw=0.8, ls="--")
+ax.set_xlim(float(np.min(all_above_p)) - pad_x, float(np.max(all_above_p)) + pad_x)
+ax.set_ylim(float(np.min(all_above_s)) - pad_y, float(np.max(all_above_s)) + pad_y)
+ax.set_xlabel("Pong NOOP above chance", color=GAME_COLORS[1])
+ax.set_ylabel("SpaceInvaders NOOP above chance", color=GAME_COLORS[2])
+ax.set_title("1-2C: Meta-analytic direction check")
+ax.grid(alpha=0.3)
 
 fig.tight_layout()
 fig.savefig(FIG_DIR / "fig_1-2_individual_differences.png", dpi=200)
@@ -1074,10 +1512,6 @@ print("\nSaved fig_1-2_individual_differences.png")
 # ---------------------------------------------------------------------------
 print("\n=== Section 1-3: Cross-game generalization ===")
 
-# --- Paired subject-level NOOP: Pong vs SI ---
-pong_noop = df_ep[df_ep["game"] == 1].groupby("subject")["noop_prop"].mean()
-si_noop = df_ep[df_ep["game"] == 2].groupby("subject")["noop_prop"].mean()
-t_stat, p_paired = stats.ttest_rel(pong_noop.values, si_noop.values)
 print(f"Pong mean NOOP: {pong_noop.mean():.3f}  SI mean NOOP: {si_noop.mean():.3f}")
 print(f"Paired t-test: t={t_stat:.3f}, p={p_paired:.4f}")
 
@@ -1101,90 +1535,13 @@ bout_stats = df_bouts.groupby("game_name")["bout_length"].describe()
 print("\nBout length statistics:")
 print(bout_stats.to_string())
 
-# --- Effect direction consistency check ---
-direction_rows = []
-for sub in SUBJECTS:
-    pv = df_ep[(df_ep["subject"] == sub) & (df_ep["game"] == 1)]["noop_prop"].mean()
-    sv = df_ep[(df_ep["subject"] == sub) & (df_ep["game"] == 2)]["noop_prop"].mean()
-    direction_rows.append({
-        "subject": sub,
-        "pong_noop": pv,
-        "si_noop": sv,
-        "pong_above_chance": pv > CHANCE_NOOP,
-        "si_above_chance": sv > CHANCE_NOOP,
-    })
-df_dir = pd.DataFrame(direction_rows)
 df_dir.to_csv(OUT_DIR / "1-3_effect_direction.csv", index=False)
 print("\nNOOP above chance per subject:")
 print(df_dir.to_string(index=False))
-
-# --- Figure 1-3 ---
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-# Panel A: paired Pong vs SI NOOP proportion
-ax = axes[0]
-for sub in SUBJECTS:
-    p_val = pong_noop[sub] if sub in pong_noop else np.nan
-    s_val = si_noop[sub] if sub in si_noop else np.nan
-    ax.plot([0, 1], [p_val, s_val], color="gray", lw=1.2, alpha=0.7)
-ax.scatter(np.zeros(len(pong_noop)), pong_noop.values, color="#1f77b4", s=55, zorder=3, label="Pong")
-ax.scatter(np.ones(len(si_noop)), si_noop.values, color="#ff7f0e", s=55, zorder=3, label="SpaceInvaders")
-for i, sub in enumerate(SUBJECTS):
-    p_val = pong_noop[sub] if sub in pong_noop.index else np.nan
-    s_val = si_noop[sub] if sub in si_noop.index else np.nan
-    label = f"S{i+1}"
-    if not np.isnan(p_val):
-        ax.annotate(label, (0, p_val), textcoords="offset points",
-                    xytext=(-18, 0), fontsize=7, color="#1f77b4", va="center")
-    if not np.isnan(s_val):
-        ax.annotate(label, (1, s_val), textcoords="offset points",
-                    xytext=(5, 0), fontsize=7, color="#ff7f0e", va="center")
-ax.axhline(CHANCE_NOOP, color="gray", ls="--", lw=1.2, label="Chance (1/6)")
-ax.set_xticks([0, 1], ["Pong", "SpaceInvaders"])
-ax.set_ylabel("Mean NOOP proportion")
-ax.set_title(f"1-3A: Paired comparison\n(t={t_stat:.2f}, p={p_paired:.3f})")
-ax.legend(fontsize=8, frameon=False)
-ax.grid(axis="y", alpha=0.3)
-
-# Panel B: bout length survival functions per game
-ax = axes[1]
-for game, gname in GAMES.items():
-    lens = df_bouts[df_bouts["game"] == game]["bout_length"].values
-    max_len = max(lens.max(), 1)
-    x = np.arange(1, min(max_len + 1, 51))
-    surv = np.array([(lens >= t).mean() for t in x])
-    ax.plot(x, surv, lw=2, label=gname, color=colors[gname])
-ax.set_xlabel("Bout length (steps)")
-ax.set_ylabel("Survival probability")
-ax.set_title("1-3B: NOOP bout survival per game")
-ax.legend(fontsize=8, frameon=False)
-ax.grid(alpha=0.3)
-
-# Panel C: per-subject NOOP above chance in both games (meta-analytic)
-ax = axes[2]
-all_above_p = [row["pong_noop"] - CHANCE_NOOP for _, row in df_dir.iterrows()]
-all_above_s = [row["si_noop"] - CHANCE_NOOP for _, row in df_dir.iterrows()]
-pad_x = (max(all_above_p) - min(all_above_p)) * 0.35
-pad_y = (max(all_above_s) - min(all_above_s)) * 0.35
-for i, row in df_dir.iterrows():
-    above_p = row["pong_noop"] - CHANCE_NOOP
-    above_s = row["si_noop"] - CHANCE_NOOP
-    ax.scatter(above_p, above_s, color="steelblue", s=60, zorder=3)
-    ax.annotate(f"S{i+1}", (above_p, above_s), textcoords="offset points",
-                xytext=(5, 4), fontsize=8)
-ax.axhline(0, color="black", lw=0.8, ls="--")
-ax.axvline(0, color="black", lw=0.8, ls="--")
-ax.set_xlim(min(all_above_p) - pad_x, max(all_above_p) + pad_x)
-ax.set_ylim(min(all_above_s) - pad_y, max(all_above_s) + pad_y)
-ax.set_xlabel("Pong NOOP above chance")
-ax.set_ylabel("SpaceInvaders NOOP above chance")
-ax.set_title("1-3C: Meta-analytic direction check\n(both games consistent?)")
-ax.grid(alpha=0.3)
-
-fig.tight_layout()
-fig.savefig(FIG_DIR / "fig_1-3_cross_game.png", dpi=200)
-plt.close(fig)
-print("\nSaved fig_1-3_cross_game.png")
+print(
+    "\nSkipped fig_1-3_cross_game.png "
+    "(meta-analytic direction check moved into fig_1-2_individual_differences.png)."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1227,7 +1584,7 @@ for game, gname in GAMES.items():
     g_data = df_pos[df_pos["game"] == game].copy()
     g_data["third"] = pd.cut(g_data["norm_pos"], bins=[0, 1/3, 2/3, 1],
                               labels=["early", "mid", "late"], include_lowest=True)
-    means_by_third = g_data.groupby("third")["is_noop"].mean()
+    means_by_third = g_data.groupby("third", observed=False)["is_noop"].mean()
     early = g_data[g_data["third"] == "early"]["is_noop"].values
     late = g_data[g_data["third"] == "late"]["is_noop"].values
     stat, p = stats.mannwhitneyu(early, late, alternative="two-sided")
@@ -1274,15 +1631,20 @@ for game, gname in GAMES.items():
     print(f"{gname}: mean AC = {ac_vals.mean():.3f} ± {ac_vals.std():.3f}  "
           f"(t={t:.2f}, p={p:.4f}, N={len(ac_vals)})")
 
-# --- Figure 1-4 ---
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+# --- Figure 1-5 ---
+fig, axes = plt.subplots(1, 2, figsize=(11.5, 5))
 
 # Panel A: episode-position NOOP density (continuous + 3 thirds)
 ax = axes[0]
 for game, gname in GAMES.items():
     sub_data = pos_summary[pos_summary["game_name"] == gname]
-    ax.plot(sub_data["pos_bin_center"], sub_data["is_noop"],
-            lw=2, label=gname, color=colors[gname])
+    ax.plot(
+        sub_data["pos_bin_center"],
+        sub_data["is_noop"],
+        lw=2,
+        label=gname,
+        color=GAME_COLORS[game],
+    )
 ax.axhline(CHANCE_NOOP, color="gray", ls="--", lw=1.2, label="Chance (1/6)")
 # Shade thirds
 for x_start, label in [(0, "early"), (1/3, "mid"), (2/3, "late")]:
@@ -1292,64 +1654,60 @@ for x_start, label in [(0, "early"), (1/3, "mid"), (2/3, "late")]:
     ax.text(x_start + 1/6, 0.01, label, ha="center", fontsize=8, color="gray")
 ax.set_xlabel("Normalized episode position (0=start, 1=end)")
 ax.set_ylabel("NOOP probability")
-ax.set_title("1-4A: Episode-position NOOP density\n(uniform/state-dep → not fatigue)")
+ax.set_title("1-5A: Episode-position NOOP density\n(uniform/state-dep -> not fatigue)")
 ax.legend(fontsize=8, frameon=False)
 ax.grid(alpha=0.3)
 
-# Panel B: NOOP proportions across thirds (bar chart)
+# Panel B: lag-1 autocorrelation distribution per game
 ax = axes[1]
-thirds_labels = ["early", "mid", "late"]
-x = np.arange(3)
-w = 0.38
-for gi, (game, gname) in enumerate(GAMES.items()):
-    g_data = df_pos[df_pos["game"] == game].copy()
-    g_data["third"] = pd.cut(g_data["norm_pos"], bins=[0, 1/3, 2/3, 1],
-                              labels=thirds_labels, include_lowest=True)
-    means = g_data.groupby("third")["is_noop"].mean()
-    ax.bar(x + gi * w - w / 2, [means.get(t, 0) for t in thirds_labels],
-           width=w, label=gname, color=colors[gname], alpha=0.8)
-ax.axhline(CHANCE_NOOP, color="gray", ls="--", lw=1.2)
-ax.set_xticks(x)
-ax.set_xticklabels(thirds_labels)
-ax.set_ylabel("Mean NOOP proportion")
-ax.set_title("1-4B: NOOP by episode third\n(fatigue → late spike expected)")
-ax.legend(fontsize=8, frameon=False)
-ax.grid(axis="y", alpha=0.3)
-
-# Panel C: lag-1 autocorrelation distribution per game
-ax = axes[2]
+rng = np.random.default_rng(0)
 for game, gname in GAMES.items():
     ac_vals = df_ac[df_ac["game"] == game]["lag1_autocorr"].values
-    subject_means = df_ac[df_ac["game"] == game].groupby("subject")["lag1_autocorr"].mean().values
     x_pos = 0 if game == 1 else 1
-    ax.boxplot(ac_vals, positions=[x_pos], widths=0.3, showfliers=False,
-               patch_artist=True,
-               boxprops=dict(facecolor=colors[gname], alpha=0.5))
-    ax.scatter(np.full(len(subject_means), x_pos) + np.random.uniform(-0.06, 0.06, len(subject_means)),
-               subject_means, color=colors[gname], s=55, zorder=3)
+    ax.boxplot(
+        ac_vals,
+        positions=[x_pos],
+        widths=0.3,
+        showfliers=False,
+        patch_artist=True,
+        boxprops=dict(facecolor=GAME_COLORS[game], edgecolor=GAME_COLORS[game], alpha=0.35),
+        medianprops=dict(color=GAME_COLORS[game], linewidth=1.4),
+        whiskerprops=dict(color=GAME_COLORS[game]),
+        capprops=dict(color=GAME_COLORS[game]),
+    )
+    subject_means = (
+        df_ac[df_ac["game"] == game]
+        .groupby("subject")["lag1_autocorr"]
+        .mean()
+        .sort_index()
+    )
+    for subject, mean_ac in subject_means.items():
+        ax.scatter(
+            x_pos + rng.uniform(-0.06, 0.06),
+            mean_ac,
+            color=SUBJECT_COLOR_MAP[str(subject)],
+            s=58,
+            zorder=3,
+        )
 ax.axhline(0, color="black", lw=0.8, ls="--")
 ax.set_xticks([0, 1], ["Pong", "SpaceInvaders"])
 ax.set_ylabel("Lag-1 autocorrelation")
-ax.set_title("1-4C: NOOP lag-1 autocorrelation\n(high AC → perseveration)")
+ax.set_title("1-5B: NOOP lag-1 autocorrelation\n(high AC -> perseveration)")
 ax.grid(axis="y", alpha=0.3)
 
 fig.tight_layout()
-fig.savefig(FIG_DIR / "fig_1-4_alternative_exclusion.png", dpi=200)
+fig.savefig(FIG_DIR / "fig_1-5_alternative_exclusion.png", dpi=200)
 plt.close(fig)
-print("\nSaved fig_1-4_alternative_exclusion.png")
+print("\nSaved fig_1-5_alternative_exclusion.png")
 
 
 # ---------------------------------------------------------------------------
-# 1-2 (new) : NOOP ratio ~ post-NOOP action k-step reward scatter
+# 1-4 : NOOP ratio ~ post-NOOP action k-step reward scatter
 # Each dot = one episode; color = subject; subplot per game
 # X: episode NOOP proportion
 # Y: mean k-step reward of post-NOOP actions in that episode
 # ---------------------------------------------------------------------------
-print("\n=== Section 1-2 (new): NOOP ratio ~ post-NOOP reward scatter ===")
-
-SUBJECT_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"
-]
+print("\n=== Figure 1-4: NOOP ratio ~ post-NOOP reward scatter ===")
 
 def compute_noop_ratio_reward_scatter(episodes, k_future=REWARD_K):
     """
@@ -1433,7 +1791,7 @@ for ax_idx, (game_id, game_name) in enumerate(GAMES.items()):
         ax.scatter(
             sub_df["noop_prop"].mean(),
             sub_df["reward_difference"].mean(),
-            color=color, s=90, edgecolors="black", linewidths=0.8, zorder=4,
+            color=color, s=90, zorder=4,
             marker="D",
         )
         all_x.extend(sub_df["noop_prop"].tolist())
@@ -1452,21 +1810,53 @@ for ax_idx, (game_id, game_name) in enumerate(GAMES.items()):
     ax.axhline(0, color="gray", lw=0.9, ls="--", alpha=0.7)
     ax.set_xlabel("Episode NOOP ratio", fontsize=10)
     ax.set_ylabel(f"Post-NOOP − non-NOOP reward (k={REWARD_K})", fontsize=10)
-    ax.set_title(f"1-2 (new): {game_name}\nNOOP ratio ~ withholding benefit", fontsize=10)
+    ax.set_title(
+        f"{game_name}\nNOOP ratio ~ withholding benefit",
+        fontsize=10,
+        color=GAME_COLORS[game_id],
+    )
     ax.legend(fontsize=7, loc="upper right", ncol=2, frameon=False)
     ax.grid(alpha=0.25)
     ax.spines[["top", "right"]].set_visible(False)
 
 fig.suptitle(
-    f"NOOP ratio vs. withholding benefit (k={REWARD_K}) per episode\n"
-    "Y = post-NOOP reward − non-NOOP reward  |  Dots = episodes, diamonds = subject mean",
-    fontsize=11, fontweight="bold",
+    f"1-4: NOOP ratio vs. withholding benefit (k={REWARD_K}) per episode",
+    fontsize=11,
 )
-fig.tight_layout()
-out_path = FIG_DIR / "fig_1-2_noopratio_postnoop_reward.png"
+fig.tight_layout(rect=[0, 0, 1, 0.94])
+out_path = FIG_DIR / "fig_1-4_noopratio_postnoop_reward.png"
 fig.savefig(out_path, dpi=200, bbox_inches="tight")
 plt.close(fig)
 print(f"Saved {out_path.name}")
+
+
+# ---------------------------------------------------------------------------
+# 1-6 : NOOP bout survival analysis
+# ---------------------------------------------------------------------------
+print("\n=== Figure 1-6: NOOP bout survival analysis ===")
+print_survival_summary(all_episodes)
+save_survival_by_subject_figure(
+    episodes=all_episodes,
+    out_path=FIG_DIR / "fig_1-6_survival_by_subject.png",
+)
+print("Saved fig_1-6_survival_by_subject.png")
+
+
+# ---------------------------------------------------------------------------
+# 1-7 : Short vs Long NOOP bout distribution
+# ---------------------------------------------------------------------------
+print("\n=== Figure 1-7: Short vs Long NOOP bout distribution ===")
+bout_split_detail, bout_split_summary = annotate_short_long_bouts(df_bouts)
+bout_split_detail.to_csv(OUT_DIR / "1-7_bout_short_long_detail.csv", index=False)
+bout_split_summary.to_csv(OUT_DIR / "1-7_bout_short_long_summary.csv", index=False)
+save_short_long_bout_distribution_figure(
+    bout_detail=bout_split_detail,
+    bout_summary=bout_split_summary,
+    out_path=FIG_DIR / "fig_1-7_short_long_bout_distribution.png",
+)
+print("Saved 1-7_bout_short_long_detail.csv")
+print("Saved 1-7_bout_short_long_summary.csv")
+print("Saved fig_1-7_short_long_bout_distribution.png")
 
 
 # ---------------------------------------------------------------------------

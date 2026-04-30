@@ -1,0 +1,32 @@
+model,predictor,standardized_log_odds
+Elapsed only,log_elapsed_noop_steps,-0.3304218428485297
+Actor entropy,log_elapsed_noop_steps,-0.2426323527722876
+Actor entropy,entropy_actor,0.46669374826891663
+Prev-s2 tree,log_elapsed_noop_steps,-0.3186093763980554
+Prev-s2 tree,q_gap_prev_s2,-0.012755438961569466
+Prev-s2 tree,rollout_spread_prev_s2,0.09221870735121278
+Actor + prev-s2 tree,log_elapsed_noop_steps,-0.23959957995543166
+Actor + prev-s2 tree,entropy_actor,0.4613185741610362
+Actor + prev-s2 tree,q_gap_prev_s2,-0.006887258353719855
+Actor + prev-s2 tree,rollout_spread_prev_s2,0.041404497977540866
+Imag search summary,log_elapsed_noop_steps,-0.30289435904426426
+Imag search summary,q_gap_imag_mean,-0.06592295977125594
+Imag search summary,q_gap_imag_final,-0.01899778326347558
+Imag search summary,q_gap_imag_slope,-0.2136054681117573
+Imag search summary,rollout_spread_imag_mean,0.12895139861748176
+Imag search summary,rollout_spread_imag_final,0.011075237879077592
+Imag search summary,rollout_spread_imag_slope,0.002107926688807782
+Imag search summary,imag_cur_action_change_rate,0.059945444444053815
+Imag search summary,imag_cur_action_entropy,-0.04086597456947449
+Actor + all search,log_elapsed_noop_steps,-0.2282221403987124
+Actor + all search,entropy_actor,0.47601769391239485
+Actor + all search,q_gap_prev_s2,-0.0078101425057946405
+Actor + all search,rollout_spread_prev_s2,-0.027955773341298455
+Actor + all search,q_gap_imag_mean,-0.05955516150267267
+Actor + all search,q_gap_imag_final,-0.007810142505794592
+Actor + all search,q_gap_imag_slope,-0.2136619638247534
+Actor + all search,rollout_spread_imag_mean,0.14168455751087242
+Actor + all search,rollout_spread_imag_final,-0.02795577334129864
+Actor + all search,rollout_spread_imag_slope,0.020994751110247737
+Actor + all search,imag_cur_action_change_rate,-0.018901046743264007
+Actor + all search,imag_cur_action_entropy,-0.014785050261114631

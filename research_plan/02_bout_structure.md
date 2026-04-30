@@ -1,118 +1,293 @@
 # 2. Bout Structure Analysis: NOOP의 시간적 구조와 내적 조직
 
-*리뷰어 관점: Planning의 행동적 signature는 단순한 비율이 아니라 시간적 구조에서 나타난다. 얼마나 긴 bout? 어떻게 시작하고 끝나는가? 이 구조가 computational demand를 반영하는가?*
+*리뷰어 관점: Planning의 행동적 signature는 단순한 NOOP 비율이 아니라 시간적 구조에서 나타난다. 얼마나 긴 bout인가? 어떻게 시작하고 끝나는가? 어떤 내부 상태가 commit timing과 연결되는가?*
 
-> **섹션 범위 정의**: Section 2는 NOOP bout의 *형태(shape)*를 기술한다 — 길이 분포, onset·commit 주변의 시간적 궤적, bout 내부의 전환 구조. Uncertainty 값은 bout 형태를 묘사하는 도구로 쓰이며, uncertainty가 NOOP를 *유발하는가*라는 인과 질문(→ Section 3)이나 withholding이 실제로 *도움이 되는가*라는 기능 질문(→ Section 4)은 다루지 않는다.
+> **섹션 범위 정의**: Section 2는 NOOP bout의 *형태(shape)*를 기술한다. 여기서는 bout length, onset/commit 주변 temporal profile, Short/Long bout 차이, NOOP onset에서 real action commit까지의 trajectory, 그리고 commit hazard를 분석한다. Uncertainty는 bout structure를 설명하는 지표로 사용하며, uncertainty가 NOOP를 *유발하는가*라는 인과 질문은 Section 3, withholding이 실제로 *도움이 되는가*라는 기능 질문은 Section 4에서 다룬다.
 
-## 2-1. Bout length distribution
+## 공통 정의
 
-### 핵심 질문
-- NOOP bout의 길이 분포는 무엇인가? (exponential vs. heavy-tailed → passive vs. active)
-- State-level computational demand (uncertainty, Q-gap)가 bout 길이를 예측하는가?
+현재 구현은 `research_script/02_structure_analysis.py`를 기준으로 한다.
 
----
+- **Real step**: `status == 0`인 row. 실제 환경 action이 실행된 step이다.
+- **NOOP bout**: real-step sequence에서 연속된 NOOP action 구간.
+- **Commit**: NOOP bout이 끝난 직후의 첫 non-NOOP real action.
+- **Short/Long 기준**: Section 1 survival 분석에서 얻은 subject × game별 `Cross2`를 사용한다. 현재 기본 데이터(`sub001`, `SpaceInvaders game 2`)에서는 `Cross2 = 26`이다.
+- **Actor metrics**: `entropy_actor`, `margin_actor`는 `status == 0` row의 actor policy에서 계산한다. 이 값은 방금 실행된 real action을 고른 policy의 uncertainty/confidence로 해석한다.
+- **Tree/search metrics**: real action이 실행된 `status == 0` row의 tree reps는 real action 이후 상태일 수 있으므로, decision-aligned tree metric은 바로 이전 `status == 2` row에서 가져온 `q_gap_prev_s2`, `rollout_spread_prev_s2`를 사용한다.
 
-## 2-2. Temporal profile around bout onset and commit
+현재 메인 figure는 다음과 같다.
 
-> **Framing**: 여기서 묻는 것은 "uncertainty의 시간적 모양이 어떻게 생겼는가"이다 — onset 전후, commit 전후에 entropy·margin이 어떤 궤적을 그리는지 기술(describe)한다. 이 패턴이 uncertainty-driven commitment를 *지지하는가*라는 해석은 Section 3-3에서 인과 검증과 함께 다룬다.
-
-### 확보된 결과 (sub001 ses04, N=2,196 bouts)
-
-**Commit-aligned (baseline 정규화: steps −6~−4 평균 기준):**
-| rel_step | Δentropy_actor | 유의성 |
-|----------|---------------|--------|
-| −6 ~ −4 | ≈ 0 (baseline) | ns |
-| −3 | +0.026 | *** |
-| −2 | +0.045 | *** |
-| −1 | +0.071 | *** |
-| **0 (commit)** | **+0.073 (peak)** | *** |
-| **+1** | **−0.081 (undershoot)** | *** |
-| +6 | −0.030 | *** |
-
-- Rise (−6→0): slope=+0.0147/step, t=17.89, p<0.001 ✅
-- Drop (0→+1): Δ=−0.154, t=28.73, p<0.001 ✅
-- margin_actor: 완벽한 거울 패턴 (slope=−0.0146, Drop Δ=+0.121, 모두 p<0.001) ✅
-- **Post-commit undershoot**: +1 이후 entropy가 pre-bout baseline 아래로 유지됨 → commit action이 game을 더 낮은 uncertainty 상태로 이동시킨다는 functional benefit의 간접 증거
-
-**Onset-aligned — "Onset Paradox" 발견:**
-- Pre-onset (−6→−1): entropy가 **하강** 추세 (slope=−0.0064/step, p=0.019)
-- onset(0) step: entropy **최저** (0.899, pre-onset −1의 0.904보다도 낮음; 차이 ns)
-- +1 (두 번째 NOOP): **+0.123 급등**, t=24.66, p<0.001 → 72.45%의 bout에서 확인
-- **결론**: NOOP onset은 entropy spike에 의해 트리거되지 않는다. 인간은 entropy가 낮아지는 순간에 withholding을 시작하고, bout 내부에서 entropy가 축적된다.
+| Figure | 파일 | 핵심 질문 |
+|--------|------|-----------|
+| 2-1C | `fig_2_1C_onset_entropy_bout_length.png` | Bout 시작 시 uncertainty가 bout length를 예측하는가? |
+| 2-2 | `fig_2_2_temporal_profiles.png` | Onset/commit 주변 actor uncertainty는 어떤 시간적 모양을 갖는가? |
+| 2-2.1 | `fig_2_2_1_temporal_profiles_short_long.png` | 2-2의 temporal profile이 Short/Long bout에서 다르게 나타나는가? |
+| 2-3 | `fig_2_3_short_long_metrics.png` | Actor policy metric과 prev-s2 tree metric이 Short/Long bout에서 어떻게 다른가? |
+| 2-4 | `fig_2_4_noop_commit_policy_trajectory.png` | NOOP onset부터 real action commit까지 actor policy가 어떻게 변하는가? |
+| 2-5 | `fig_2_5_commit_hazard.png` | Actor uncertainty와 search statistics가 commit timing을 얼마나 예측하는가? |
 
 ---
 
-**Cross2 기반 원리적 구분 (생존 분석 교차점 활용, sub001 SpaceInvaders Cross2 = 27 steps):**
+## 2-1. Bout Length Distribution and Onset Uncertainty
 
-위의 1–3/4–10/>10 구분은 임의적이다. Section 1-5의 KM 생존 분석에서 도출된 **Cross2 (KM 곡선이 지수 기준선을 다시 위로 교차하는 지점)**는 데이터 기반의 원리적 분리 기준을 제공한다: Cross2 미만은 지수 예측보다 빨리 종료되는 "common/medium" bout, Cross2 이상은 지수 예측보다 오래 살아남는 "heavy-tail strategic" bout.
+### 분석 목적
 
-**sub001 SpaceInvaders (Cross2=27, N=2,196):**
-| 유형 | N (%) | pre entropy | onset entropy | commit entropy | Δ entropy | commit margin | Q-gap at onset |
-|------|-------|-------------|--------------|----------------|-----------|---------------|----------------|
-| Short (<27 steps) | 2094 (95.4%) | 0.905 | 0.900 | **1.027** | **+0.122** | 0.391 | 1.399 |
-| Long (≥27 steps) | 102 (4.6%) | 0.877 | 0.869 | **0.920** | **+0.043** | **0.549** | **0.863** |
-| Δ (Long−Short) | — | −0.028 (ns) | −0.032 (ns) | **−0.108 (\*\*\*)** | **−0.080 (\*)** | **+0.158 (\*\*\*)** | **−0.536 (\*\*\*)** |
+NOOP bout 길이가 단순한 짧은 omission들의 집합인지, 아니면 일부 길게 지속되는 structured bout을 포함하는지 확인한다. 특히 bout onset의 actor entropy가 이후 bout length를 얼마나 설명하는지 본다.
 
-*통계: Welch t-test. commit entropy p=1.9e-7 ***, Δentropy p=0.024 *, commit margin p=5.3e-17 ***, Q-gap onset p=1.4e-4 ***.*
+### 구현
 
-**해석 (Cross2 기준):**
-- **Long bouts (≥27 steps, 4.6%)**:
-  - **Commit entropy가 유의하게 낮다** (0.920 vs 1.027, ***): 짧은 bout에 비해 행동 결정 시점의 불확실성이 낮음. 긴 기다림 끝에 더 확신에 찬 행동으로 이어짐.
-  - **Commit margin이 유의하게 높다** (0.549 vs 0.391, ***): 선택된 행동과 차선책 간의 차이가 더 크다 → 결정이 더 명확하고 단호함.
-  - **Onset 시 Q-gap이 유의하게 낮다** (0.863 vs 1.399, ***): NOOP을 시작하는 시점에 행동 가치 간 차이가 작다 → 행동 선택이 덜 긴박한 중립적 상태에서 긴 보류가 시작됨.
-  - **Δ entropy가 작다** (+0.043 vs +0.122, *): 짧은 bout에서는 bout 진행 중 entropy가 크게 증가하지만, 긴 bout에서는 entropy가 상대적으로 안정적으로 유지된다.
-- **Short bouts (<27 steps, 95.4%)**:
-  - Commit 시 entropy가 높고 (1.027), bout 중 entropy가 급증 (+0.122), commit margin이 낮다 (0.391).
-  - 진입 시 Q-gap이 크다 (1.399) → 행동 가치 대비가 뚜렷한 상황에서 시작되는 짧은 반응적 보류.
+`extract_noop_bouts`가 real-step table에서 NOOP bout을 추출하고, Section 1 output의 `Cross2`를 붙여 Short/Long class를 정의한다. `plot_fig_2_1c`는 bout onset의 `entropy_actor`와 `log(1 + bout_length)`의 관계를 그린다.
 
-**결론**: Cross2 기반 구분은 임의 기준선(>10)보다 두 유형의 질적 차이를 더 선명하게 분리한다 (commit margin: 0.496 vs 0.549). 두 가지 질적으로 다른 withholding 행동 유형:
-  - **Short bouts (crisis-response deliberation)**: 높은 entropy·Q-gap 맥락에서 시작 → bout 중 entropy 급증 → 비교적 낮은 confidence로 commit. 즉각적인 반응이 필요한 상황에서의 단기 보류.
-  - **Long bouts (strategic patient planning)**: 중립적 Q-gap 맥락에서 시작 → entropy 안정 유지 → 높은 confidence로 단호하게 commit. 적절한 시점을 기다리는 계획적 보류.
+### 대략적 결과
 
-이 이분법은 Section 1-5의 survival curve 교차 패턴(Cross2 이상에서 heavy tail)과 직접 대응되며, 두 유형이 하나의 Poisson 과정이 아닌 **혼합 메커니즘(mixture mechanism)**임을 행동 지표 수준에서 확인한다.
+현재 기본 데이터에서는 총 **2,196 bouts**가 추출된다.
 
-### 핵심 질문 (업데이트)
--  **Onset paradox로 기각**: onset 자체는 entropy spike가 아님. "무엇이 onset을 트리거하는가?"를 새로운 질문으로 재정식화
-- Commit 직전에 action confidence가 올라가는가? → **확인됨** (rise-and-fall 패턴 ✅)
-- Post-commit undershoot는 functional benefit을 반영하는가? → Section 4와 연결
+| 지표 | 값 |
+|------|----|
+| Mean bout length | 8.37 real steps |
+| Median bout length | 4 real steps |
+| Cross2 | 26 real steps |
+| Short bouts | 2,078개, 94.6% |
+| Long bouts | 118개, 5.4% |
 
-### 필요한 세부 연구
-- Real step 기준으로 onset/commit aligned temporal profile 추출 **[✅ Done → Figure 2B/2C]**
-- Rise-and-fall formal test (linear trend + paired t) **[✅ Done, 2196 bouts]**
-- **Onset trigger 메커니즘 규명**: entropy가 아니라면 무엇이 onset을 결정하는가? → game state (e.g., between-wave pause in SI), margin 절대값, 직전 action의 Q-value 등 **[NEW, 우선순위 높음]**
-- **Bout-internal entropy trajectory**: onset(+0) → commit(0) 사이에서 entropy가 단조 증가하는가, 아니면 일정 시점에서 saturate하는가? (긴 bout에서 중간 구간 검증) **[NEW → 2-3과 연결]**
-- **Short vs. Long bout의 commit-aligned profile 비교 figure**: 두 유형의 질적 차이를 시각화 **[NEW]**
+`fig_2_1C_onset_entropy_bout_length.png`에서 onset entropy와 bout length의 관계는 크지 않다. 기존 출력 기준으로는 약한 음의 관계가 관찰된다. 즉 긴 bout은 높은 entropy spike에서 시작한다기보다, 오히려 낮거나 안정적인 actor policy 상태에서 시작하는 경향이 있다.
+
+### 해석
+
+Bout length는 onset uncertainty 하나로 설명되지 않는다. 이 결과는 "uncertainty가 높아서 바로 NOOP가 시작된다"는 단순 모델보다, bout이 시작된 뒤 내부 과정에서 uncertainty와 confidence가 재조직된다는 해석을 지지한다.
 
 ---
 
-## 2-3. Sequential dependency and transitional structure *(신규)*
+## 2-2. Temporal Profiles Around Bout Onset and Commit
 
-*리뷰어 관점: Bout 내부 구조를 이해하면 active search vs. passive waiting을 구별하는 데 도움이 된다.*
+### 분석 목적
 
-> **Framing**: bout 내부에서 uncertainty가 어떻게 변하는지를 *묘사*한다. "단조감소 패턴 = active search 중"이라는 해석적 주장은 Section 3-3(인과 ordering, bout onset 이전 window)과 연결되며, 두 분석은 서로 다른 시간 창(bout 내부 vs. onset 이전)에서 같은 mechanism을 보완적으로 지지한다.
+NOOP bout의 시작과 끝 주변에서 actor uncertainty가 어떤 시간적 패턴을 갖는지 기술한다. 핵심은 두 가지다.
 
-### 핵심 질문
-- NOOP → NOOP 전환 확률 vs. Action → NOOP 전환 확률: 두 상태 간의 전환이 Markovian인가?
-- Bout 내에서 시간이 지남에 따라 uncertainty가 감소하는가?
-- 같은 bout 내에서 thinker가 내부적으로 action preference를 변경하는지 (cur_action의 변화)
+- Onset이 entropy spike와 함께 발생하는가?
+- Commit 직전과 직후에 policy uncertainty/confidence가 구조적으로 변하는가?
 
-### 필요한 세부 연구
-- **First-order transition matrix** (NOOP→NOOP, NOOP→act, act→NOOP, act→act) 계산 **[NEW]**
-- **Bout-internal uncertainty trajectory**: bout 시작 → 끝 방향으로 entropy가 단조감소하는가? **[NEW]**
-- **Cur_action stability within bouts**: bout 내에서 thinker가 선호하는 action이 바뀌는 비율 **[NEW]**
+### 구현
+
+`build_event_tables`가 각 bout의 onset 및 commit을 기준으로 `window_pre = 6`, `window_post = 6` real steps를 정렬한다. `plot_fig_2_2`는 actor entropy/margin의 onset-aligned, commit-aligned profile과 confidence gain 관련 panel을 그린다.
+
+여기서 `entropy_actor`는 `status == 0`의 actor policy에서 계산된 real-action decision metric이다.
+
+### 대략적 결과
+
+**Onset-aligned profile**
+
+- Onset 직전 entropy가 뚜렷하게 상승한다기보다, onset 주변에서는 entropy가 낮거나 안정적인 편이다.
+- Bout 내부로 들어간 뒤 entropy가 증가하는 패턴이 더 두드러진다.
+- 따라서 NOOP onset은 단순한 high-entropy trigger로 보기 어렵다.
+
+**Commit-aligned profile**
+
+- Commit에 가까워질수록 actor entropy가 상승하고, commit 직후에는 entropy가 떨어지는 rise-and-drop 패턴이 나타난다.
+- `margin_actor`는 대체로 entropy와 반대 방향으로 움직인다.
+- Commit 직후 entropy 감소는 real action이 uncertainty가 낮은 상태로 transition하는 것처럼 보이게 한다. 다만 기능적 이득 여부는 Section 4에서 control 분석이 필요하다.
+
+**Uncertainty vs. confidence gain**
+
+- Pre/onset uncertainty가 클수록 commit까지의 `-delta entropy`도 커지는 양의 관계가 보인다.
+- 즉 높은 uncertainty 상태에서 시작한 bout일수록 commit까지 entropy reduction 폭이 커진다.
+- 이 관계는 regression-to-mean 가능성이 있으므로, Section 2에서는 descriptive evidence로만 사용한다.
+
+### 해석
+
+2-2의 핵심은 **onset trigger와 commit resolution이 같은 현상이 아니라는 점**이다. Onset은 high-entropy spike가 아니지만, bout이 진행되고 commit이 가까워지는 동안 actor policy는 uncertainty/confidence의 재조직을 보인다.
 
 ---
 
-## 2-4. Within-session and across-session adaptation *(신규)*
+## 2-2.1. Short/Long Split Temporal Profiles
 
-*리뷰어 관점: Strategic postponement라면 task structure를 학습함에 따라 변해야 한다. Learning curve가 없다면 단순 habit이다.*
+### 분석 목적
 
-### 핵심 질문
-- Session 초반과 후반 사이에 NOOP 비율이 어떻게 변하는가?
-- 게임을 더 잘하게 될수록 (score 상승) NOOP 비율은 어떻게 변하는가?
-- Session 내에서 uncertainty-NOOP coupling이 강화되는가? (즉, strategic use가 정교해지는가)
+2-2의 temporal profile이 모든 bout에서 동일하게 나타나는지, 아니면 Cross2로 나뉜 Short/Long class에 따라 다른지 확인한다.
 
-### 필요한 세부 연구
-- **Episode-level NOOP ratio와 cumulative score의 상관** (sub-session learning curve) **[NEW]**
-- **Early vs. late episode half 비교**: uncertainty-NOOP 관계가 later half에서 더 강한가? **[NEW]**
-- **Cross-session comparison** (ses-01 → ses-04): NOOP 전략의 진화 추적 **[NEW]**
+### 구현
+
+`plot_fig_2_2_1_short_long`은 `fig_2_2_temporal_profiles.png`와 같은 종류의 subfigure를 Short bout과 Long bout으로 나누어 그린다. Short/Long 구분은 Section 1에서 얻은 `Cross2 = 26`을 사용한다.
+
+### 대략적 결과
+
+- Short bout은 onset 이후 entropy 증가와 commit 부근의 높은 entropy가 더 뚜렷하다.
+- Long bout은 평균 entropy가 더 낮고, commit 시점에서도 Short보다 낮은 entropy를 보인다.
+- Policy margin은 Long bout에서 더 높게 유지된다.
+- Uncertainty와 `-delta entropy`의 양의 관계는 Short/Long 모두에서 유지되는 쪽으로 보이지만, Long bout은 전체적으로 더 안정적인 policy regime에 가깝다.
+
+### 해석
+
+Short/Long은 단순히 같은 과정의 길이 차이가 아니라, 서로 다른 temporal regime일 가능성이 있다. Short bout은 빠른 uncertainty build-up과 commit으로, Long bout은 상대적으로 낮은 entropy와 높은 margin을 유지한 채 실행 시점을 기다리는 패턴으로 해석된다.
+
+---
+
+## 2-3. Short/Long Decision-Aligned Metrics
+
+### 분석 목적
+
+Short/Long bout 차이를 real-action actor policy와 search/tree statistics를 함께 사용해 비교한다. 중요한 점은 metric alignment다.
+
+- Actor entropy와 policy margin은 real action을 고른 `status == 0` actor policy에서 가져온다.
+- Q-gap과 rollout spread는 real action 직전의 `status == 2` tree reps, 즉 `prev_s2`에서 가져온다.
+
+이렇게 해야 real action commit을 만든 policy와 search statistics를 같은 decision point에 맞춰 비교할 수 있다.
+
+### 구현
+
+`compute_short_long_metric_tables`가 pre, onset, commit, delta phase별 metric을 Short/Long으로 요약한다. `plot_fig_2_3_short_long_metrics`는 다음 네 가지 panel을 그린다.
+
+- Entropy: `entropy_actor`
+- Policy margin: `margin_actor`
+- Q-gap: `q_gap_prev_s2`
+- Rollout spread: `rollout_spread_prev_s2`
+
+### 대략적 결과
+
+현재 기본 데이터의 핵심 수치는 다음과 같다.
+
+| Metric | Phase | Short | Long |
+|--------|-------|-------|------|
+| Actor entropy | onset | 0.900 | 0.878 |
+| Actor entropy | commit | 1.027 | 0.935 |
+| Policy margin | onset | 0.493 | 0.521 |
+| Policy margin | commit | 0.391 | 0.541 |
+| Prev-s2 Q-gap | onset | 0.131 | 0.107 |
+| Prev-s2 Q-gap | commit | 0.129 | 0.134 |
+| Prev-s2 rollout spread | onset | 0.547 | 0.515 |
+| Prev-s2 rollout spread | commit | 0.544 | 0.499 |
+
+Short bout은 commit 시 actor entropy가 높고 margin이 낮다. 반대로 Long bout은 commit 시 actor entropy가 낮고 margin이 높다. Prev-s2 tree metrics는 Short/Long 차이가 actor policy metric만큼 강하지 않다.
+
+### 해석
+
+가장 중요한 결과는 Long bout이 "더 불확실해서 오래 기다리는 bout"이 아니라는 점이다. Long bout은 오히려 real-action actor policy 기준으로 더 confident한 commit과 연결된다. 따라서 Long bout은 high-uncertainty prolongation이라기보다, **confident delay** 또는 **strategic waiting**에 가깝게 해석하는 것이 더 맞다.
+
+Prev-s2 tree metric의 효과가 약한 것은 최종 직전 tree snapshot 하나만으로는 bout 전체 search process를 충분히 대표하지 못한다는 뜻일 수 있다. 이 점이 2-5의 imaginary search summary 분석으로 이어진다.
+
+---
+
+## 2-4. NOOP Onset to Real Action Commit Policy Trajectory
+
+### 분석 목적
+
+각 NOOP bout에서 NOOP 시작부터 real action commit까지 actor policy가 어떻게 변하는지 직접 본다. Bout마다 길이가 다르므로 x축을 0에서 1로 정규화한다.
+
+이 분석은 다음 질문을 다룬다.
+
+- Short bout과 Long bout은 commit까지 같은 방향으로 policy가 변하는가?
+- Long bout은 단순히 entropy가 더 오래 누적되는 형태인가?
+- Commit 직전의 actor confidence가 bout class별로 어떻게 다르게 조직되는가?
+
+### 구현
+
+`compute_noop_commit_policy_trajectory`는 각 bout에서 onset부터 commit까지의 real steps를 모은다. 이후 `entropy_actor`, `margin_actor` trajectory를 50개 normalized position으로 보간한다. `plot_fig_2_4_noop_commit_policy_trajectory`는 Short/Long 평균 trajectory와 SEM band를 그린다.
+
+### 대략적 결과
+
+Short bout:
+
+- Entropy는 onset 약 **0.900**에서 commit 약 **1.027**로 증가한다.
+- Policy margin은 onset 약 **0.493**에서 commit 약 **0.391**로 감소한다.
+- 즉 빠르게 uncertainty가 증가하고 낮은 confidence로 commit하는 양상이다.
+
+Long bout:
+
+- Entropy는 onset 약 **0.878**에서 commit 약 **0.935**로 소폭 증가한다.
+- Policy margin은 onset 약 **0.521**에서 commit 약 **0.541**로 유지되거나 약간 증가한다.
+- 즉 오래 기다리지만 actor policy는 상대적으로 confident한 상태를 유지한다.
+
+### 해석
+
+2-4는 Short/Long 차이를 가장 직관적으로 보여준다. Short bout은 "uncertainty build-up 후 commit"에 가깝고, Long bout은 "낮은 entropy와 높은 margin을 유지한 채 commit timing을 기다리는 과정"에 가깝다.
+
+따라서 uncertainty와 `-delta entropy`의 양의 관계만 보면 "uncertainty가 높을수록 commit 시 entropy가 줄어든다"는 해석이 가능하지만, 2-4를 함께 보면 Long bout에서는 다른 측면이 보인다. Long bout은 높은 actor uncertainty를 오래 견디는 과정이 아니라, 비교적 confident한 policy 상태에서 withholding이 지속되는 regime일 수 있다.
+
+---
+
+## 2-5. Commit Hazard From Actor and Search Features
+
+### 분석 목적
+
+NOOP bout 내부의 각 real step에서 "다음 real step이 commit인가?"를 예측한다. 이를 통해 commit timing이 단순히 elapsed time으로 설명되는지, actor entropy가 추가 설명력을 갖는지, 그리고 tree/search process가 actor metric 너머의 정보를 제공하는지 본다.
+
+### 구현
+
+`compute_commit_hazard_table`은 NOOP bout 내부의 각 NOOP real step을 한 row로 만들고, target을 `commit_next`로 둔다. 모델 입력은 다음 계열로 나뉜다.
+
+- Elapsed only: `log_elapsed_noop_steps`
+- Actor: `entropy_actor`
+- Prev-s2 tree: `q_gap_prev_s2`, `rollout_spread_prev_s2`
+- Imag search summary: 직전 real step 이후 현재 real step 전까지의 `status == 2` imaginary process 요약
+  - `q_gap_imag_mean`, `q_gap_imag_final`, `q_gap_imag_slope`
+  - `rollout_spread_imag_mean`, `rollout_spread_imag_final`, `rollout_spread_imag_slope`
+  - `imag_cur_action_change_rate`, `imag_cur_action_entropy`
+
+`compute_commit_hazard_models`는 logistic model ablation을 수행하고, `plot_fig_2_5_commit_hazard`는 CV AUC, log-loss improvement, coefficient를 요약한다.
+
+### 대략적 결과
+
+현재 기본 데이터에서는 **18,379 NOOP real steps** 중 **2,196 steps**가 `commit_next = 1`이다.
+
+| Model | CV AUC | CV log loss | Elapsed 대비 log-loss 개선 |
+|-------|--------|-------------|----------------------------|
+| Elapsed only | 0.591 | 0.361 | 0.000 |
+| Actor entropy | 0.635 | 0.353 | 0.008 |
+| Prev-s2 tree | 0.592 | 0.361 | 0.000 |
+| Actor + prev-s2 tree | 0.635 | 0.353 | 0.008 |
+| Imag search summary | 0.599 | 0.359 | 0.002 |
+| Actor + all search | 0.639 | 0.351 | 0.010 |
+
+주요 coefficient 방향은 다음과 같다.
+
+- `entropy_actor`는 commit hazard와 양의 관계를 보인다.
+- `q_gap_prev_s2`와 `rollout_spread_prev_s2`만으로는 elapsed-only 대비 개선이 거의 없다.
+- Imaginary process 전체 요약은 단독으로는 작지만, actor entropy와 결합하면 가장 좋은 성능을 낸다.
+
+### 해석
+
+Commit timing은 최종 prev-s2 tree snapshot 하나보다 actor policy uncertainty에 더 강하게 연결된다. 다만 한 real step 사이에 약 40개 내외의 imaginary/search step이 존재하므로, search process를 단일 마지막 snapshot이 아니라 trajectory summary로 요약하면 약간의 추가 설명력이 생긴다.
+
+따라서 현재 결과는 다음 순서의 claim을 지지한다.
+
+1. Commit hazard의 가장 직접적인 behavioral correlate는 `entropy_actor`다.
+2. `q_gap_prev_s2`, `rollout_spread_prev_s2` 같은 final tree metric만으로는 약하다.
+3. Imaginary process 전체의 변화량과 다양성은 actor entropy 위에 작은 추가 정보를 제공한다.
+
+이 분석은 Section 3에서 vp net activation, sr net activation, tree reps를 이용한 richer predictive model로 확장할 수 있다.
+
+---
+
+## 보조 출력과 현재 해석상의 위치
+
+현재 스크립트는 메인 figure 외에도 다음 CSV를 저장한다.
+
+| CSV | 역할 |
+|-----|------|
+| `real_step_metrics.csv` | `status == 0` real-step 단위 metric table |
+| `noop_bouts.csv` | NOOP bout onset, commit, length, Short/Long annotation |
+| `event_prepost.csv` | onset/commit 주변 pre/onset/commit/delta event table |
+| `event_temporal.csv` | onset/commit 기준 windowed temporal table |
+| `short_long_event_metrics.csv` | Short/Long event-level metric |
+| `short_long_metric_summary.csv` | Short/Long phase별 평균 및 SEM |
+| `short_long_metric_tests.csv` | Short/Long 차이 test |
+| `noop_commit_policy_trajectory.csv` | 2-4 normalized trajectory source |
+| `commit_hazard_steps.csv` | 2-5 hazard model source table |
+| `commit_hazard_model_summary.csv` | 2-5 model ablation 결과 |
+| `commit_hazard_coefficients.csv` | 2-5 coefficient 요약 |
+
+`bout_internal_trajectory.csv`, `bout_action_stability.csv`, `bout_commit_dynamics.csv`, `episode_stats.csv`, `half_session_stats.csv`도 저장되지만 현재 메인 narrative에서는 보조 자료에 가깝다. 예전의 `fig_2_3_sequential_structure.png`와 `fig_2_4_session_adaptation.png`는 현재 Section 2 main figure에서 제외되었다.
+
+---
+
+## Section 2의 통합 해석
+
+현재 Section 2의 중심 결론은 다음과 같다.
+
+1. **NOOP bout은 길이상 혼합 구조를 갖는다.** 대부분은 Short bout이지만, Cross2 이상으로 이어지는 Long bout이 별도 regime처럼 보인다.
+2. **NOOP onset은 high-uncertainty spike가 아니다.** Onset entropy는 bout length를 강하게 예측하지 않고, 긴 bout은 오히려 낮은 entropy에서 시작하는 경향이 있다.
+3. **Commit 주변에서는 actor policy의 재조직이 보인다.** Entropy와 margin은 commit 전후로 뚜렷한 temporal profile을 가진다.
+4. **Short와 Long은 같은 과정의 길이 차이만은 아니다.** Short bout은 high-entropy, low-margin commit과 연결되고, Long bout은 lower-entropy, higher-margin commit과 연결된다.
+5. **Commit timing은 actor entropy가 가장 잘 설명한다.** Final prev-s2 tree metric만으로는 약하지만, imaginary search trajectory summary를 포함하면 actor entropy 위에 작은 추가 설명력이 생긴다.
+
+이 결과를 바탕으로 Section 3에서는 "어떤 내부 representation이 commit hazard와 bout class를 예측하는가?"를 묻고, Section 4에서는 "withholding이 실제 성과나 uncertainty reduction에 기능적으로 기여하는가?"를 검증한다.
