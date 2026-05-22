@@ -60,3 +60,6 @@ analysis_outputs/
 ./claude
 logs_past/
 test_past/
+research_script/outputs/
+research_script/__pycache__/
+cneuromod/

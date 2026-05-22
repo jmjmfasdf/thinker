@@ -250,6 +250,9 @@ class SActorLearner:
             1, int(getattr(self.flags, "icopro_batch_size", 32))
         )
         self.bc_margin = float(getattr(self.flags, "icopro_margin", 0.05))
+        self.bc_margin_coef = float(getattr(self.flags, "icopro_margin_coef", 1.0))
+        self.bc_pvp_coef = float(getattr(self.flags, "icopro_pvp_coef", 0.0))
+        self.bc_action_diff_coef = float(getattr(self.flags, "icopro_action_diff_coef", 1.0))
         self.bc_seq_len = max(1, int(getattr(self.flags, "batch_length", 1)))
         self.bc_noop_window = collections.deque(maxlen=150)
         # Cached planner/env for IcoPro BC to avoid repeated cModelWrapper
@@ -656,7 +659,7 @@ class SActorLearner:
                 pvp_neg = torch.zeros_like(pvp_pos)
             pvp_losses.append(pvp_pos + pvp_neg)
             # action difference loss: base CE plus grouped CE (disentangled action groups)
-            step_diff = F.cross_entropy(logits_step, human_actions) / math.log(6.0)
+            step_diff = F.cross_entropy(logits_step, human_actions) / math.log(self.actor_net.num_actions)
             if grouped_action_specs:
                 group_divs = (math.log(3.0), math.log(2.0))
                 for group_idx, (groups, group_map) in enumerate(
@@ -688,7 +691,12 @@ class SActorLearner:
             else torch.zeros((), device=actor_device)
         )
 
-        total_loss = margin_loss + pvp_loss + kl_loss + action_diff_loss
+        total_loss = (
+            self.bc_margin_coef * margin_loss
+            + self.bc_pvp_coef * pvp_loss
+            + kl_loss
+            + self.bc_action_diff_coef * action_diff_loss
+        )
 
         if all_pred_actions and all_human_actions:
             pred_cat = torch.cat(all_pred_actions, dim=0)

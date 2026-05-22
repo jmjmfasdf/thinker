@@ -65,7 +65,20 @@
       "Bash(python -c \"import pandas; print\\('pandas ok'\\)\")",
       "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python -c \"import pandas; import numpy; print\\('ok'\\)\")",
       "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python -)",
-      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python3 -)"
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python3 -)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import ast, sys; ast.parse\\(open\\('/home/jmme425/thinker/research_script/03_computational_interpretation.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/jmme425/thinker/research_script/03_computational_interpretation.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(/home/jmme425/miniconda3/bin/python -c ' *)",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\"; head -2 {}')",
+      "Bash(python3 -c \"import envpool; print\\(envpool.__version__\\)\")",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python -c \"import envpool; print\\(envpool.__version__\\)\")",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python -c \"import envpool; help\\(envpool.make\\)\")",
+      "Bash(/home/jmme425/miniconda3/envs/thinker/bin/python -c ' *)",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('/home/jmme425/thinker/logs/thinker/thinker-20260501-131948/meta.json'\\)\\); print\\('wrapper_type:', d.get\\('wrapper_type'\\)\\); print\\('name:', d.get\\('name'\\)\\); print\\('envpool:', d.get\\('envpool'\\)\\); print\\('rec_t:', d.get\\('rec_t'\\)\\); print\\('drc:', d.get\\('drc'\\)\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('/home/jmme425/thinker/logs/thinker/thinker-20260501-131948/meta.json'\\)\\); print\\(list\\(d.keys\\(\\)\\)[:20]\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('/home/jmme425/thinker/logs/thinker/thinker-20260501-131948/meta.json'\\)\\); args=d['args']; print\\('wrapper_type:', args.get\\('wrapper_type'\\)\\); print\\('name:', args.get\\('name'\\)\\); print\\('envpool:', args.get\\('envpool'\\)\\); print\\('rec_t:', args.get\\('rec_t'\\)\\); print\\('drc:', args.get\\('drc'\\)\\)\")",
+      "Bash(awk '{for\\(i=1;i<=NF;i++\\){if\\($i==\"Steps\"\\){print $\\(i+1\\); break}}}')"
     ],
     "additionalDirectories": [
       "/home/jmme425/gpu_log"

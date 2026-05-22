@@ -14,10 +14,15 @@ def create_envpool(name, flags, env_n=1):
     import envpool
     kwargs = dict(
         gray_scale=flags.grayscale,
-        episodic_life=True,        
+        episodic_life=True,
         stack_num=flags.frame_stack_n,
     )
-    env = EnvPoolWrap(envpool.make(name, env_type="gymnasium", num_envs=env_n, **kwargs), num_envs=env_n, **kwargs)
+    max_episode_steps = getattr(flags, 'max_episode_steps', 27000)
+    env = EnvPoolWrap(
+        envpool.make(name, env_type="gymnasium", num_envs=env_n, max_episode_steps=max_episode_steps, **kwargs),
+        num_envs=env_n,
+        **kwargs,
+    )
     return env
 
 def create_env_fn(name, flags):

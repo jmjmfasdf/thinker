@@ -42,7 +42,8 @@ def gather_metadata() -> Dict:
                 # is_dirty=repo.is_dirty(),
                 path=repo.git_dir,
             )
-        except git.InvalidGitRepositoryError:
+        except Exception as exc:
+            warnings.warn(f"Unable to gather git metadata: {exc}")
             git_data = None
     except ImportError:
         git_data = None

@@ -94,33 +94,29 @@ TARGET_SPECS = {
 
 CORE_FEATURES = [
     "entropy_actor",
-    "neg_q_gap",
     "search_jsd_actor_root",
-    "rollout_spread",
-    "neg_actor_policy_gap",
-    "branch_entropy",
+    "var_rollout_return",
+    "actor_policy_gap",
     "tree_width",
 ]
 
 TEMPORAL_FEATURES = [
     "entropy_actor",
-    "neg_q_gap",
     "search_jsd_actor_root",
-    "rollout_spread",
+    "var_rollout_return",
 ]
 
 FEATURE_LABELS = {
     "entropy_actor": "Actor entropy",
     "entropy_root_policy": "Root policy entropy",
     "entropy_cur_policy": "Current policy entropy",
-    "neg_q_gap": "Low Q gap",
     "q_gap": "Q gap",
-    "rollout_spread": "Rollout spread",
+    "neg_q_gap": "Low Q gap",
+    "var_rollout_return": "Var. Rollout Return",
     "search_jsd_actor_root": "Actor-root JSD",
     "search_jsd_actor_cur": "Actor-current JSD",
     "search_jsd_root_cur": "Root-current JSD",
-    "neg_actor_policy_gap": "Low actor margin",
-    "branch_entropy": "Branch entropy",
+    "actor_policy_gap": "Actor margin",
     "tree_width": "Tree width",
     "root_value": "Root value",
     "prev_reward_5": "Previous 5-step reward",
@@ -130,11 +126,10 @@ FEATURE_LABELS = {
 MODEL_SPECS = {
     "null": [],
     "actor_entropy": ["entropy_actor"],
-    "q_conflict": ["neg_q_gap"],
     "search_disagreement": ["search_jsd_actor_root"],
-    "rollout_spread": ["rollout_spread"],
-    "actor_margin": ["neg_actor_policy_gap"],
-    "branch_structure": ["branch_entropy", "tree_width"],
+    "var_rollout_return": ["var_rollout_return"],
+    "actor_margin": ["actor_policy_gap"],
+    "tree_structure": ["tree_width"],
     "full_uncertainty": CORE_FEATURES,
 }
 
@@ -360,11 +355,9 @@ def build_real_step_table(data: Dict[str, np.ndarray], meta: FileMeta) -> pd.Dat
     q_gap = top2_gap_rows(root_qs)
     cur_q_gap = top2_gap_rows(cur_qs)
     q_gap_max = top2_gap_rows(root_qs_max)
-    rollout_spread = np.abs(max_rollout_return - rollout_return)
     search_jsd_actor_root = js_divergence_rows(actor_probs, root_policy)
     search_jsd_actor_cur = js_divergence_rows(actor_probs, cur_policy)
     search_jsd_root_cur = js_divergence_rows(root_policy, cur_policy)
-    branch_entropy = entropy_rows(root_ns_prob)
     tree_width = np.sum(root_ns > EPS, axis=1).astype(float)
     actor_prob_human_all = chosen_values(actor_probs, human_action)
     actor_prob_thinker_all = chosen_values(actor_probs, thinker_action)
@@ -395,6 +388,17 @@ def build_real_step_table(data: Dict[str, np.ndarray], meta: FileMeta) -> pd.Dat
         prev_s2 = int(prev_s2_all[real_pos])
         if prev_s2 < 0 or prev_s2 >= t:
             prev_s2 = max(0, min(int(idx_global) - 1, t - 1))
+
+        # var_rollout_return: variance of rollout_return at the last status==2
+        # immediately before each reset (status==1 or 3) in this planning interval.
+        pre_reset_returns: List[float] = []
+        if between.size > 0:
+            reset_in_between = between[np.isin(status[between], [1, 3])]
+            for ri in reset_in_between:
+                s2_before = between[(between < ri) & (status[between] == 2)]
+                if len(s2_before) > 0:
+                    pre_reset_returns.append(float(rollout_return[s2_before[-1]]))
+        var_rollout_return = float(np.var(pre_reset_returns)) if len(pre_reset_returns) >= 2 else float("nan")
 
         status_counts = {
             f"n_status_{code}_since_prev_real": int(np.sum(status[between] == code))
@@ -428,19 +432,18 @@ def build_real_step_table(data: Dict[str, np.ndarray], meta: FileMeta) -> pd.Dat
             "entropy_root_policy": float(entropy_root_policy[idx_global]),
             "entropy_cur_policy": float(entropy_cur_policy[idx_global]),
             "actor_policy_gap": float(actor_policy_gap[idx_global]),
-            "neg_actor_policy_gap": float(-actor_policy_gap[idx_global]),
+            "actor_policy_gap": float(actor_policy_gap[idx_global]),
             "root_policy_gap": float(root_policy_gap[idx_global]),
             "cur_policy_gap": float(cur_policy_gap[idx_global]),
             "q_gap": float(q_gap[idx_global]),
             "neg_q_gap": float(-q_gap[idx_global]),
             "cur_q_gap": float(cur_q_gap[idx_global]),
             "q_gap_max": float(q_gap_max[idx_global]),
-            "rollout_spread": float(rollout_spread[idx_global]),
-            "search_jsd_actor_root": float(search_jsd_actor_root[idx_global]),
+            "var_rollout_return": var_rollout_return,
+            "search_jsd_actor_root": float(search_jsd_actor_root[prev_s2]),
             "search_jsd_actor_cur": float(search_jsd_actor_cur[idx_global]),
             "search_jsd_root_cur": float(search_jsd_root_cur[idx_global]),
-            "branch_entropy": float(branch_entropy[idx_global]),
-            "tree_width": float(tree_width[idx_global]),
+            "tree_width": float(tree_width[prev_s2]),
             "root_value": float(root_v[idx_global]),
             "cur_value": float(cur_v[idx_global]),
             "root_cur_value_delta": float(root_v[idx_global] - cur_v[idx_global]),
@@ -453,10 +456,6 @@ def build_real_step_table(data: Dict[str, np.ndarray], meta: FileMeta) -> pd.Dat
             "entropy_actor_prev_s2": float(entropy_actor[prev_s2]),
             "q_gap_prev_s2": float(q_gap[prev_s2]),
             "neg_q_gap_prev_s2": float(-q_gap[prev_s2]),
-            "rollout_spread_prev_s2": float(rollout_spread[prev_s2]),
-            "search_jsd_actor_root_prev_s2": float(search_jsd_actor_root[prev_s2]),
-            "branch_entropy_prev_s2": float(branch_entropy[prev_s2]),
-            "tree_width_prev_s2": float(tree_width[prev_s2]),
         }
         row.update(status_counts)
         rows.append(row)
@@ -996,18 +995,12 @@ def extract_noop_bouts(df: pd.DataFrame, target_name: str) -> pd.DataFrame:
                     "entropy_at_pre": float(g.loc[pre_pos, "entropy_actor"]),
                     "entropy_at_onset": float(g.loc[start_pos, "entropy_actor"]),
                     "entropy_at_commit": float(g.loc[commit_pos, "entropy_actor"]),
-                    "neg_q_gap_at_pre": float(g.loc[pre_pos, "neg_q_gap"]),
-                    "neg_q_gap_at_onset": float(g.loc[start_pos, "neg_q_gap"]),
-                    "neg_q_gap_at_commit": float(g.loc[commit_pos, "neg_q_gap"]),
-                    "rollout_spread_at_onset": float(g.loc[start_pos, "rollout_spread"]),
+                    "var_rollout_return_at_onset": float(g.loc[start_pos, "var_rollout_return"]),
                     "search_jsd_at_onset": float(g.loc[start_pos, "search_jsd_actor_root"]),
                     "tree_width_at_onset": float(g.loc[start_pos, "tree_width"]),
                     "prev_reward_5_at_onset": float(g.loc[start_pos, "prev_reward_5"]),
                     "entropy_change_pre_to_commit": float(
                         g.loc[commit_pos, "entropy_actor"] - g.loc[pre_pos, "entropy_actor"]
-                    ),
-                    "neg_q_gap_change_pre_to_commit": float(
-                        g.loc[commit_pos, "neg_q_gap"] - g.loc[pre_pos, "neg_q_gap"]
                     ),
                 }
             )
@@ -1018,8 +1011,7 @@ def run_bout_length_regression(bouts: pd.DataFrame) -> pd.DataFrame:
     rows: List[Dict[str, object]] = []
     predictors = [
         "entropy_at_onset",
-        "neg_q_gap_at_onset",
-        "rollout_spread_at_onset",
+        "var_rollout_return_at_onset",
         "search_jsd_at_onset",
         "tree_width_at_onset",
         "prev_reward_5_at_onset",
@@ -1196,8 +1188,7 @@ def run_onset_trigger_models(
 ) -> pd.DataFrame:
     features = [
         "entropy_actor",
-        "neg_q_gap",
-        "rollout_spread",
+        "var_rollout_return",
         "search_jsd_actor_root",
         "tree_width",
         "root_value",
@@ -1213,9 +1204,8 @@ def run_onset_trigger_models(
 
         for model_name, model_features in {
             "entropy_only": ["entropy_actor"],
-            "margin_only": ["neg_q_gap"],
             "reward_context": ["prev_reward_5", "root_value"],
-            "search_context": ["search_jsd_actor_root", "rollout_spread", "tree_width"],
+            "search_context": ["search_jsd_actor_root", "var_rollout_return", "tree_width"],
             "full_onset": features,
         }.items():
             sub = finite_model_frame(
@@ -1314,8 +1304,7 @@ def build_commitment_transition_rows(df: pd.DataFrame, target_name: str) -> pd.D
                         "commit_now": int(pos == commit),
                         "bout_age": int(pos - start),
                         "entropy_actor": float(g.loc[pos, "entropy_actor"]),
-                        "neg_q_gap": float(g.loc[pos, "neg_q_gap"]),
-                        "rollout_spread": float(g.loc[pos, "rollout_spread"]),
+                        "var_rollout_return": float(g.loc[pos, "var_rollout_return"]),
                         "search_jsd_actor_root": float(g.loc[pos, "search_jsd_actor_root"]),
                         "tree_width": float(g.loc[pos, "tree_width"]),
                     }
@@ -1333,19 +1322,17 @@ def run_commitment_trigger_models(
     coef_rows: List[Dict[str, object]] = []
     model_specs = {
         "duration_only": ["bout_age"],
-        "uncertainty_only": ["entropy_actor", "neg_q_gap", "rollout_spread", "search_jsd_actor_root"],
+        "uncertainty_only": ["entropy_actor", "var_rollout_return", "search_jsd_actor_root"],
         "duration_plus_uncertainty": [
             "bout_age",
             "entropy_actor",
-            "neg_q_gap",
-            "rollout_spread",
+            "var_rollout_return",
             "search_jsd_actor_root",
         ],
         "entropy_duration_interaction": [
             "bout_age",
             "entropy_actor",
-            "neg_q_gap",
-            "rollout_spread",
+            "var_rollout_return",
             "search_jsd_actor_root",
         ],
     }
@@ -1512,7 +1499,7 @@ def plot_uncertainty_coupling(bin_df: pd.DataFrame, out_path: Path) -> None:
                 label=target_name,
             )
         ax.set_title(FEATURE_LABELS.get(feat, feat), fontsize=10)
-        ax.set_xlabel("Feature bin mean")
+        ax.set_xlabel(FEATURE_LABELS.get(feat, feat))
         ax.set_ylabel("NOOP rate")
         ax.grid(alpha=0.25)
         ax.spines[["top", "right"]].set_visible(False)
@@ -1619,7 +1606,7 @@ def plot_temporal_ordering(
 
     ax = axes[0]
     for target_name in TARGET_SPECS:
-        for feat, ls in [("entropy_actor", "-"), ("neg_q_gap", "--")]:
+        for feat, ls in [("entropy_actor", "-"), ("search_jsd_actor_root", "--")]:
             sub = ar_df[(ar_df["target"] == target_name) & (ar_df["feature"] == feat)].sort_values("lag_order")
             if sub.empty:
                 continue
@@ -1644,7 +1631,7 @@ def plot_temporal_ordering(
 
     ax = axes[1]
     if not lagged_df.empty:
-        plot_lag = lagged_df[lagged_df["feature"].isin(["entropy_actor", "neg_q_gap"])].copy()
+        plot_lag = lagged_df[lagged_df["feature"].isin(["entropy_actor", "search_jsd_actor_root"])].copy()
         for target_name in TARGET_SPECS:
             sub = plot_lag[plot_lag["target"] == target_name]
             if sub.empty:
@@ -1675,7 +1662,7 @@ def plot_temporal_ordering(
     else:
         sub = pd.DataFrame()
     if not sub.empty:
-        keep_terms = ["z_entropy_actor", "z_bout_age", "z_entropy_actor:z_bout_age", "z_neg_q_gap"]
+        keep_terms = ["z_entropy_actor", "z_bout_age", "z_entropy_actor:z_bout_age", "z_search_jsd_actor_root"]
         sub = sub[sub["term"].isin(keep_terms)]
         labels = sub["term"].drop_duplicates().tolist()
         x = np.arange(len(labels), dtype=float)
@@ -1755,7 +1742,7 @@ def write_summary(
             )
             lines.append(f"- Strongest full-model standardized coefficients: {pretty}")
 
-        target_ar = ar_df[(ar_df["target"] == target_name) & (ar_df["feature"].isin(["entropy_actor", "neg_q_gap"]))]
+        target_ar = ar_df[(ar_df["target"] == target_name) & (ar_df["feature"].isin(["entropy_actor", "search_jsd_actor_root"]))]
         if not target_ar.empty:
             ar_pretty = ", ".join(
                 f"{FEATURE_LABELS.get(row.feature, row.feature)} k{int(row.lag_order)}={row.coef:+.3f}"
@@ -1847,7 +1834,7 @@ def run_analysis(args: argparse.Namespace) -> None:
     ar_df = run_ar_residual_tests(
         df,
         target_names=target_names,
-        features=["entropy_actor", "neg_q_gap"],
+        features=["entropy_actor", "search_jsd_actor_root"],
         max_lag=args.max_lag,
         max_rows=args.max_glm_rows,
         random_state=args.random_state,
@@ -1857,7 +1844,7 @@ def run_analysis(args: argparse.Namespace) -> None:
     lagged_df = run_lagged_precedence_tests(
         df,
         target_names=target_names,
-        features=["entropy_actor", "neg_q_gap", "search_jsd_actor_root", "rollout_spread"],
+        features=["entropy_actor", "search_jsd_actor_root", "var_rollout_return"],
         max_lag=args.max_lag,
         max_rows=args.max_glm_rows,
         random_state=args.random_state,

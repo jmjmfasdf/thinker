@@ -1586,12 +1586,20 @@ def run_section2(
     input_dir: Path,
     out_dir: Path,
     cross2_summary_path: Optional[Path] = None,
+    game_id: Optional[int] = None,
     window_pre: int = 6,
     window_post: int = 6,
 ) -> None:
     paths = sorted(input_dir.glob("*.npy"))
+    if game_id is not None:
+        game_label = normalize_game_id(game_id)
+        paths = [
+            p for p in paths
+            if normalize_game_id(parse_file_meta(p).game) == game_label
+        ]
     if not paths:
-        raise FileNotFoundError(f"No .npy files in: {input_dir}")
+        suffix = f" for game_id={game_id}" if game_id is not None else ""
+        raise FileNotFoundError(f"No .npy files{suffix} in: {input_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_real = []
@@ -1687,6 +1695,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cross2-summary", type=Path,
                    default=Path(__file__).parent / "outputs" / "01_behavioral_analysis" / "1-7_bout_short_long_summary.csv",
                    help="Optional subject×game Cross2 summary from Section 1 survival analysis")
+    p.add_argument("--game-id", type=int, default=None,
+                   help="Optional game filter, e.g. 1 for game1 files")
     p.add_argument("--window-pre", type=int, default=6, help="Temporal window before onset/commit")
     p.add_argument("--window-post", type=int, default=6, help="Temporal window after onset/commit")
     return p.parse_args()
@@ -1698,6 +1708,7 @@ def main() -> None:
         input_dir=args.input_dir,
         out_dir=args.out_dir,
         cross2_summary_path=args.cross2_summary,
+        game_id=args.game_id,
         window_pre=args.window_pre,
         window_post=args.window_post,
     )

@@ -438,7 +438,13 @@ def construct_tuple(x, **kwargs):
 
 
 def get_git_revision_hash():
-    return subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode("ascii").strip()
+    except Exception:
+        return None
 
 def enc(x, f_type=0):
     if f_type == 0:
