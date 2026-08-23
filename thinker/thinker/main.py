@@ -16,6 +16,17 @@ from thinker.gym_add.asyn_vector_env import AsyncVectorEnv
 import thinker.gym_add.wrapper as wrapper
 from thinker.cenv import cModelWrapper, cPerfectWrapper
 
+def get_ray_temp_dir():
+    ray_tmpdir = os.environ.get("RAY_TMPDIR")
+    if not ray_tmpdir and os.environ.get("SLURM_JOB_ID"):
+        user = os.environ.get("USER", "user")
+        ray_tmpdir = os.path.join(
+            "/tmp", f"ray_{user}_{os.environ['SLURM_JOB_ID']}"
+        )
+    if ray_tmpdir:
+        os.makedirs(ray_tmpdir, exist_ok=True)
+    return ray_tmpdir
+
 def ray_init(flags=None, **kwargs):
     # initialize resources for Thinker wrapper
     if flags is None:
@@ -25,9 +36,15 @@ def ray_init(flags=None, **kwargs):
 
     if not ray.is_initialized(): 
         object_store_memory = int(flags.ray_mem * 1024**3) if flags.ray_mem > 0 else None
-        ray.init(num_cpus=flags.ray_cpu if flags.ray_cpu > 0 else None,
-                 num_gpus=flags.ray_gpu if flags.ray_gpu > 0 else None,
-                 object_store_memory=object_store_memory)
+        ray_kwargs = {
+            "num_cpus": flags.ray_cpu if flags.ray_cpu > 0 else None,
+            "num_gpus": flags.ray_gpu if flags.ray_gpu > 0 else None,
+            "object_store_memory": object_store_memory,
+        }
+        ray_temp_dir = get_ray_temp_dir()
+        if ray_temp_dir:
+            ray_kwargs["_temp_dir"] = ray_temp_dir
+        ray.init(**ray_kwargs)
     model_buffer = ModelBuffer.options(num_cpus=1).remote(
             buffer_n = flags.model_buffer_n,
             max_rank = flags.self_play_n,

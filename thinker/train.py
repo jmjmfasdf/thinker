@@ -5,7 +5,7 @@ import torch
 from thinker.buffer import ActorBuffer, GeneralBuffer, SelfPlayBuffer
 from thinker.self_play import SelfPlayWorker
 from thinker.logger import LogWorker
-from thinker.main import ray_init
+from thinker.main import get_ray_temp_dir, ray_init
 from thinker import util
 import sys
 sys.path.append('/home/jmme425/thinker/thinker')
@@ -77,13 +77,18 @@ if __name__ == "__main__":
     flags = util.create_setting()
     _sync_flags_with_pretrained(flags, logger)
 
-    ray.init(
-            num_cpus=int(flags.ray_cpu) if flags.ray_cpu > 0 else None,
-            num_gpus=int(flags.ray_gpu) if flags.ray_gpu > 0 else None,
-            object_store_memory=int(flags.ray_mem * 1024**3)
-            if flags.ray_mem > 0
-            else None,
-        )
+    ray_kwargs = {
+        "num_cpus": int(flags.ray_cpu) if flags.ray_cpu > 0 else None,
+        "num_gpus": int(flags.ray_gpu) if flags.ray_gpu > 0 else None,
+        "object_store_memory": int(flags.ray_mem * 1024**3)
+        if flags.ray_mem > 0
+        else None,
+    }
+    ray_temp_dir = get_ray_temp_dir()
+    if ray_temp_dir:
+        logger.info(f"Using Ray temp dir {ray_temp_dir}")
+        ray_kwargs["_temp_dir"] = ray_temp_dir
+    ray.init(**ray_kwargs)
 
     num_gpus_available = torch.cuda.device_count()
     num_cpus_available = ray.cluster_resources()["CPU"]

@@ -2,7 +2,7 @@
 
 *관점: "단순히 NOOP을 많이 누른다"는 것 이상을 보여야 한다. 현재 `01_behavioral_analysis.py`가 실제로 생성하는 figure 흐름에 맞춰, 기술적 현상 정리부터 reward relevance, 대안 설명 배제, survival 구조까지 한 번에 연결한다.*
 
-> **현재 구현된 섹션 구조**: Section 1은 여섯 개의 figure 블록과 몇 개의 보조 CSV를 통해 C1(현상의 체계성)을 행동 데이터만으로 정리한다. 예전의 standalone cross-game figure는 더 이상 생성하지 않으며, 그 핵심인 direction check는 **Fig 1-2C**로 통합되었다.
+> **현재 구현된 섹션 구조**: Section 1은 일곱 개의 figure 블록과 몇 개의 보조 CSV를 통해 C1(현상의 체계성)을 행동 데이터만으로 정리한다. 예전의 standalone cross-game figure는 더 이상 생성하지 않으며, 그 핵심인 direction check는 **Fig 1-2C**로 통합되었다.
 >
 > - **1-1**: withholding bout schematic + action distribution
 > - **1-2**: individual differences, performance-null, cross-game direction consistency
@@ -10,6 +10,7 @@
 > - **1-4**: NOOP ratio vs. withholding benefit
 > - **1-5**: alternative explanation exclusion
 > - **1-6**: bout survival analysis
+> - **1-7**: behavior-only Short/Long bout split
 
 ---
 
@@ -178,6 +179,7 @@ Section 1-3과 1-4를 합치면 메시지가 분명해진다.
 
 ### 구현상 변화
 - 예전 `1-4B`였던 early/mid/late bar plot은 main figure에서 제거되었고, 수치는 `1-4_episode_position_thirds.csv`로 남긴 상태다.
+- 현재 스크립트의 보조 CSV 파일명(`1-4_episode_position_thirds.csv`, `1-4_noop_autocorrelation.csv`)은 legacy numbering을 유지하지만, main figure상 위치는 **Fig 1-5**다.
 
 ---
 
@@ -201,7 +203,7 @@ Section 1-3과 1-4를 합치면 메시지가 분명해진다.
 - 두 게임 모두 subject별 survival curve가 exponential baseline과 체계적으로 다르다.
 
 ### 문서상 정리
-예전 버전의 Cross1 / Cross2 교차 지점 추출은 별도 survival script에서 계산된 2차 분석이었다. 현재 `01_behavioral_analysis.py`의 통합 파이프라인은 **KM curve + exponential baseline + summary table**까지를 main result로 삼는다. 따라서 Section 1 문서에서도 이 범위까지만 핵심 claim으로 두는 것이 현재 구현과 가장 잘 맞는다.
+현재 `01_behavioral_analysis.py`의 Fig 1-6 파이프라인은 **KM curve + exponential baseline + subject × game summary table**을 main result로 삼는다. Cross2 기반 Short/Long 분할은 같은 스크립트 안에서 **Fig 1-7**로 별도 생성되므로, Fig 1-6의 핵심 claim은 "bout length survival이 exponential random-omission baseline과 다르다"는 지점에 한정하는 것이 가장 정확하다.
 
 #### 지수 기준선(Exponential Baseline)을 그리는 이유
 
@@ -219,51 +221,56 @@ Kaplan-Meier(KM) 추정법은 bout length 데이터로부터 비모수적(non-pa
 
 #### 확보된 결과 (N=6, human data only)
 
-**Fig 1-5 — KM survival curve per subject × game:**
+**Fig 1-6 — KM survival curve per subject × game:**
 - 6 subjects × 2 games, 각 피험자별 subplot, 지수분포 기준선(점선) 비교
 - Censoring rate: 0.1~0.6% (에피소드 종료로 인한 강제 중단 — 사실상 무시 가능)
 - 두 게임 모두 KM 곡선이 지수 baseline과 명확히 다른 형태 → **random omission 귀무가설 기각**
 - 피험자 간 bout length 분포 편차 존재 (Pong mean: 31~72 steps) → individual strategy 반영
 
-**교차 지점 수치 (survival_analysis.py 실행 결과, 2025-04-23):**
-
-| Sub | Game | N bouts | Mean | Cross1 (↓, 위→아래) | Cross2 (↑, 아래→위) | Short% (<Cross2) | Long% (≥Cross2) |
-|-----|------|---------|------|---------------------|---------------------|------------------|-----------------|
-| 1 | Pong | 2,161 | 57.4 | 13 | 80 | 75.1% | 24.9% |
-| 1 | SpaceInvaders | 11,519 | 9.4 | 3 | 27 | 94.4% | 5.6% |
-| 2 | Pong | 1,811 | 55.1 | 9 | 81 | 77.0% | 23.0% |
-| 2 | SpaceInvaders | 9,784 | 14.7 | 5 | 34 | 89.8% | 10.2% |
-| 3 | Pong | 1,564 | 71.8 | 6 | 109 | 81.0% | 19.0% |
-| 3 | SpaceInvaders | 8,743 | 9.8 | 3 | 26 | 92.6% | 7.4% |
-| 4 | Pong | 3,209 | 31.5 | 2 | 58 | 84.0% | 16.0% |
-| 4 | SpaceInvaders | 12,841 | 6.5 | 2 | 17 | 92.4% | 7.6% |
-| 5 | Pong | 2,467 | 42.8 | 8 | 61 | 75.7% | 24.3% |
-| 5 | SpaceInvaders | 5,510 | 19.2 | 6 | 55 | 94.3% | 5.7% |
-| 6 | Pong | 1,885 | 61.5 | 9 | 85 | 75.0% | 25.0% |
-| 6 | SpaceInvaders | 11,885 | 6.5 | 2 | 18 | 93.3% | 6.7% |
-
-- **Cross1 범위**: Pong 2~13 steps, SpaceInvaders 2~6 steps (시각적으로 매우 짧아 그림에서 눈에 띄지 않을 수 있음)
-- **Cross2 범위**: Pong 58~109 steps, SpaceInvaders 17~55 steps → **heavy tail 시작점, bout 유형 분리 기준선으로 활용 가능**
-- Long% (≥Cross2): Pong 16~25%, SpaceInvaders 5~10% → 소수의 bout이 heavy tail 담당
-
-#### "위 → 아래 → 위" 3구간 교차 패턴의 해석
-
-실제 KM 곡선은 **3구간 패턴**을 보인다: 처음에 지수 기준선 위 → Cross1에서 아래로 교차 → Cross2에서 다시 위로 교차. 시각적으로 Cross1(매우 짧은 t)이 잘 보이지 않아 "처음에 아래로 내려갔다가 위로 올라온다"처럼 보이지만, 실제로는 세 구간이 존재한다. 이 패턴은 단순히 "지수분포에서 벗어났다"는 것 이상의 구체적인 메커니즘을 시사한다.
-
-- **구간 1: t < Cross1 — KM > 지수 기준선 (매우 짧은 bout 구간)**:  
-  KM이 지수 기준선보다 높다는 것은, 극단적으로 짧은 (1~2 step) bout이 지수 예측보다 *더 적게* 관찰된다는 뜻이다. 즉, 한 번 NOOP가 시작되면 1~2 step에서 즉시 종료되는 경우가 순수 랜덤보다 적다 — bout이 일단 시작되면 최소한의 지속 구조를 가진다는 뜻이다.
-
-- **구간 2: Cross1 < t < Cross2 — KM < 지수 기준선 (중간 bout 구간)**:  
-  중간 길이 bout이 지수 예측보다 *더 많이* 종료된다. 이는 2-2에서 확인된 **"Short bouts" (high entropy, crisis-response deliberation)** 유형과 대응된다 — 높은 불확실성 상황에서 빠르게 반응하는 짧은 보류. 이 구간이 전체 bout의 75~94%를 차지한다.
-
-- **구간 3: t ≥ Cross2 — KM > 지수 기준선 (heavy tail 구간)**:  
-  KM 곡선이 다시 지수 기준선 위로 올라온다는 것은, 긴 bout이 지수 예측보다 *더 많이* 살아남는다는 뜻이다 — **heavy tail**. Cross2에 도달한 bout은 이후 더 오랫동안 지속될 확률이 지수 예측보다 높다 (increasing survival in hazard terms). 이는 2-2의 **"Long bouts" (low entropy, strategic patient planning)** 유형과 대응된다 — 안정적 상태에서 지속되는 계획적 보류. 전체 bout의 5~25%가 이 구간에 해당한다.
-
-- **교차 패턴 전체의 해석**:  
-  두 가지 질적으로 다른 NOOP bout 유형(단기 crisis-response / 장기 strategic planning)이 혼재하는 **혼합 분포(mixture distribution)** 구조를 반영한다. 지수 단일 모델은 이 두 유형을 평균하여 중간에 위치하지만, 실제 데이터는 양 극단(매우 짧거나 매우 긴 bout)에 더 많은 관측값이 몰려 있다. 이는 NOOP가 Poisson 과정처럼 각 step에서 독립적으로 끝날 확률이 일정한 것이 아니라, **bout이 시작되면 그 내부에 지속 구조가 형성됨**을 의미한다. 특히 bout이 일정 시간 지속되면 더 오래 지속될 가능성이 증가한다는 것은, NOOP가 수동적 버튼 미누름이 아니라 **인지적으로 유지되는 active postponement 상태**임을 시사한다. 6명의 피험자 전원에서 이 패턴이 반복된다는 사실은, 이것이 개인 특성이 아닌 **인간 planning의 구조적 특성**임을 강하게 지지한다.
-
 #### 의미 및 가설 연결
-1-3에서 텍스트로만 서술한 "heavy-tail → planned delay" 주장을 **피험자별 시각적 증거**로 뒷받침한다. 지수분포에서의 이탈, 특히 초반 단기 초과와 후반 heavy tail이 공존하는 교차 패턴은, 매 step의 NOOP가 독립적으로 결정되지 않고 bout 내부에 시간적 구조가 존재함을 의미한다. 이는 C1(현상의 체계성)과 C2(structured postponement)를 연결하는 bridge 역할을 하며, Section 2-2의 Short/Long bout 이원성과 직접 연결된다.
+Fig 1-6은 1-3/1-4에서 확인한 reward relevance를 시간 구조 관점으로 확장한다. 지수분포에서의 이탈은 매 step의 NOOP가 독립적으로 끝날 확률이 일정한 random omission이 아니라, bout 내부에 지속 구조가 있음을 의미한다. 이 결과는 C1(현상의 체계성)에서 C2(structured postponement)로 넘어가는 bridge 역할을 하며, 다음 Fig 1-7의 Short/Long bout 분포로 더 구체화된다.
+
+---
+
+## 1-7. Short vs Long bout split: survival tail을 행동 분포로 요약
+
+*리뷰어 관점: Fig 1-6이 "random omission이 아니다"를 survival curve로 보여준다면, Fig 1-7은 그 survival tail을 subject × game 단위의 행동 분포로 요약한다. 즉, bout length의 긴 꼬리가 실제로 얼마나 많은 bout을 차지하는지 보여준다.*
+
+### 현재 파이프라인이 만드는 산출물
+- **Fig 1-7**: `fig_1-7_short_long_bout_distribution.png`
+- **보조 CSV**
+  - `1-7_bout_short_long_detail.csv`
+  - `1-7_bout_short_long_summary.csv`
+
+### 현재 구현에서 사용하는 기준
+- `1-3_bout_lengths.csv`에 저장된 behavior-only bout length를 입력으로 사용한다.
+- 이 bout length는 `compute_bouts()` 기준이므로, overt action으로 종료된 NOOP bout만 포함한다. episode 끝에서 잘린 censored bout은 Fig 1-6 survival 분석에는 포함되지만, Fig 1-7의 Short/Long split에는 포함되지 않는다.
+- 각 subject × game 조합에서 empirical survival curve와 exponential baseline을 비교해, 초기 하회 구간 이후 empirical survival이 baseline 위로 다시 올라오는 첫 지점을 **Cross2**로 잡는다.
+- `bout_length < Cross2`는 **Short**, `bout_length ≥ Cross2`는 **Long**으로 라벨링한다.
+
+### 확보된 결과 (현재 `1-7_bout_short_long_summary.csv` 기준)
+
+| Sub | Game | N bouts | Cross2 | Short% | Long% |
+|-----|------|---------|--------|--------|-------|
+| 1 | Pong | 2,152 | 80 | 75.0% | 25.0% |
+| 1 | SpaceInvaders | 11,487 | 26 | 94.0% | 6.0% |
+| 2 | Pong | 1,800 | 81 | 77.1% | 22.9% |
+| 2 | SpaceInvaders | 9,745 | 32 | 88.9% | 11.1% |
+| 3 | Pong | 1,557 | 110 | 81.3% | 18.8% |
+| 3 | SpaceInvaders | 8,728 | 24 | 91.5% | 8.5% |
+| 4 | Pong | 3,198 | 58 | 84.0% | 16.0% |
+| 4 | SpaceInvaders | 12,824 | 17 | 92.5% | 7.5% |
+| 5 | Pong | 2,457 | 61 | 75.8% | 24.2% |
+| 5 | SpaceInvaders | 5,478 | 57 | 95.0% | 5.0% |
+| 6 | Pong | 1,874 | 86 | 75.1% | 24.9% |
+| 6 | SpaceInvaders | 11,847 | 17 | 93.0% | 7.0% |
+
+- **Cross2 범위**: Pong 58~110 steps, SpaceInvaders 17~57 steps
+- **Long bout 비중**: Pong 16.0~25.0%, SpaceInvaders 5.0~11.1%
+- 즉, 대부분의 bout은 Short로 분류되지만, 각 subject × game에서 일관되게 Long tail이 남아 있다.
+
+### 해석
+Fig 1-7은 Fig 1-6의 survival deviation을 더 해석 가능한 행동 단위로 바꿔준다. Short bout은 전체 bout의 대부분을 차지하는 빠른 보류/해제 단위이고, Long bout은 적은 비율이지만 survival tail을 담당하는 지속적 보류 단위다. 이 분할은 아직 causal mechanism을 증명하는 단계는 아니지만, Section 2-2의 Short/Long bout 이원성과 연결될 수 있는 behavior-only 기준선을 제공한다.
 
 ### Section 1의 최종 결론
 현재 구현된 `01_behavioral_analysis.py`가 행동 데이터만으로 정리해 주는 C1 claim은 다음과 같다.
@@ -272,3 +279,4 @@ Kaplan-Meier(KM) 추정법은 bout length 데이터로부터 비모수적(non-pa
 - reward comparison과 benefit scatter를 함께 보면, **withholding은 양이 아니라 deployment의 질**과 연결된다.
 - fatigue 설명은 약하고, serial structure와 survival structure는 분명하다.
 - survival curve의 비-random성은 NOOP가 단순 omission이 아니라 **시간 구조를 가진 행동 보류**임을 지지한다.
+- Short/Long bout split은 이 시간 구조를 behavior-only 기준으로 요약하며, 후속 section의 bout-type 분석으로 넘어가는 연결고리 역할을 한다.

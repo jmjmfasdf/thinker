@@ -325,19 +325,6 @@ def _stack_onehots(onehots, num_actions):
     fill = np.zeros(num_actions, dtype=np.int64)
     return np.stack([oh if oh is not None else fill for oh in onehots], axis=0)
 
-VIDEO_STAT_SAVE_KEYS = (
-    "tree_reps",
-    "thinker_action",
-    "human_action",
-    "status",
-    "actor_policy",
-    "step_times",
-    "env_return",
-    "cur_rewards",
-    "im_vectors",
-    "im_vp_vectors",
-)
-
 def _finalize_video_stats(video_stats, num_actions):
     if len(video_stats["tree_reps"]) == 0:
         return None
@@ -406,8 +393,7 @@ def _save_video_stats(video_stats, outdir, num_actions, filename):
     finalized = _finalize_video_stats(video_stats, num_actions)
     if finalized is None:
         return False
-    save_payload = {k: finalized.get(k) for k in VIDEO_STAT_SAVE_KEYS}
-    np.save(os.path.join(outdir, filename), save_payload)
+    np.save(os.path.join(outdir, filename), finalized)
     return True
 
 def _init_video_stats(save_encoder_vectors):

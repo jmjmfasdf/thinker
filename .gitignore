@@ -1,4 +1,4 @@
-logs/
+0nlogs/
 data/
 past/
 tmp/
@@ -6,6 +6,8 @@ test/
 hpc/
 .idea/
 .ipynb_checkpoints/
+behavioral_data_block_old/
+behavioral_data_block_mario/
 wandb
 *.pyc
 *.pyd
@@ -42,9 +44,6 @@ behavioral_data_4kframe_legacy/
 behavioral_data_block/
 behavioral_data_block_old/
 design_matrix.mat/
-pong_3e6_sub1_game1_day1_block1_episode0_17872/
-data_spaceinvaders/
-data_pong/
 thinker/train.slurm
 thinker/visual_behav.slurm
 *.err
@@ -63,3 +62,9 @@ test_past/
 research_script/outputs/
 research_script/__pycache__/
 cneuromod/
+cneuromod
+test
+reference/
+roms/
+logs/
+logs_past/
