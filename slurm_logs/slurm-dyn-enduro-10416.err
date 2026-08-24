@@ -1,0 +1,54 @@
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_stream, resource_exists
+Matplotlib is building the font cache; this may take a moment.
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_stream, resource_exists
+Initializing...
+fatal: not a git repository (or any of the parent directories): .git
+2026-08-24 14:19:13,555	INFO worker.py:2003 -- Started a local Ray instance. View the dashboard at [1m[32m127.0.0.1:8265 [39m[22m
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/ray/_private/worker.py:2051: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+Detected 2 GPU 16 CPU
+[36m(pid=2206405)[0m Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+[36m(pid=2206405)[0m Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+[36m(pid=2206405)[0m Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+[36m(pid=2206405)[0m See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+[36m(pid=2206405)[0m /home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+[36m(pid=2206405)[0m   from pkg_resources import resource_stream, resource_exists
+[36m(SelfPlayWorker pid=2206376)[0m Initializing actor 0 with device cuda
+[36m(pid=2206376)[0m Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+[36m(pid=2206376)[0m Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+[36m(pid=2206376)[0m Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+[36m(pid=2206376)[0m See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+[36m(SelfPlayWorker pid=2206376)[0m Initializing env 0 with device cuda
+[36m(pid=2206376)[0m /home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+[36m(pid=2206376)[0m   from pkg_resources import resource_stream, resource_exists
+[36m(SelfPlayWorker pid=2206376)[0m Init. environment with obs space [91mBox(0, 255, (12, 84, 84), uint8)[0m and action space [91mDiscrete(9)[0m
+[36m(SelfPlayWorker pid=2206376)[0m Model network size: 11061450
+[36m(SelfPlayWorker pid=2206376)[0m Actor network size: 1708875
+[36m(SelfPlayWorker pid=2206376)[0m Actor 0 started.
+[36m(SelfPlayWorker pid=2206376)[0m /scratch/jeongmin/dt-10416/p/thinker/thinker/actor_net.py:944: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(SelfPlayWorker pid=2206376)[0m   with autocast(enabled=self.float16):
+[36m(SelfPlayWorker pid=2206376)[0m /scratch/jeongmin/dt-10416/p/thinker/thinker/actor_net.py:1477: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(SelfPlayWorker pid=2206376)[0m   with autocast(enabled=self.float16):
+[36m(pid=2206382)[0m Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+[36m(pid=2206382)[0m Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+[36m(pid=2206382)[0m Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+[36m(pid=2206382)[0m See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+[36m(pid=2206382)[0m /home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+[36m(pid=2206382)[0m   from pkg_resources import resource_stream, resource_exists
+[36m(ActorLearner pid=2206382)[0m Init. actor-learning: Using CUDA.
+[36m(ModelLearner pid=2206421)[0m Init. model-learning: Using CUDA.
+[36m(ActorBuffer pid=2206393)[0m Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.[32m [repeated 2x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)[0m
+[36m(ActorBuffer pid=2206393)[0m Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.[32m [repeated 2x across cluster][0m
+[36m(ActorBuffer pid=2206393)[0m Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.[32m [repeated 2x across cluster][0m
+[36m(ActorBuffer pid=2206393)[0m See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.[32m [repeated 2x across cluster][0m
+slurmstepd-bml-compute07: error: *** JOB 10416 ON bml-compute07 CANCELLED AT 2026-08-24T14:20:12 ***

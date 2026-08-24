@@ -4,10 +4,21 @@ from torch import nn
 from torch.nn import functional as F
 from torch.cuda.amp import autocast
 from thinker import util
-from thinker.core.rnn import ConvAttnLSTM
+from thinker.core.rnn import ConvAttnLSTM, MaskedGRU
 from thinker.core.module import MLP, OneDResBlock, tile_and_concat_tensors
 from thinker.model_net import RVTran
 from gymnasium import spaces
+
+SEARCH_PHASE = getattr(util, "SEARCH_PHASE", 0)
+NEED_REAL_ACTION_PHASE = getattr(util, "NEED_REAL_ACTION_PHASE", 1)
+WAIT_PHASE = getattr(util, "WAIT_PHASE", 2)
+PROCEED = getattr(util, "PROCEED", 0)
+RESET = getattr(util, "RESET", 1)
+STOP = getattr(util, "STOP", 2)
+POLICY_NONE = getattr(util, "POLICY_NONE", 0)
+POLICY_SEARCH = getattr(util, "POLICY_SEARCH", 1)
+POLICY_REAL = getattr(util, "POLICY_REAL", 2)
+
 
 ActorOut = namedtuple(
     "ActorOut",
@@ -24,7 +35,17 @@ ActorOut = namedtuple(
         "entropy_loss", # entropy loss
         "reg_loss", # regularization loss
         "misc",
+        # Dynamic-search fields.  The legacy reset fields above intentionally
+        # remain in place so fixed-budget checkpoints and consumers retain
+        # their original tuple contract.
+        "search_control",
+        "search_control_logits",
+        "primary_valid",
+        "control_valid",
+        "policy_valid",
+        "policy_type",
     ],
+    defaults=[None] * 6,
 )
 
 def compute_discrete_log_prob(logits, actions):
@@ -237,14 +258,20 @@ class RNNEncoder(nn.Module):
         else:
             return ()
 
-    def forward(self, x, done, core_state, record_state=False):
+    def forward(self, x, done, core_state, record_state=False, update_mask=None):
         # input should have shape (T*B, C) 
         # done should have shape (T, B)
         T, B = done.shape
         x = self.rnn_in_fc(x)
         if self.tran_layer_n >= 1:
             x = x.view(*((T, B) + x.shape[1:])).unsqueeze(-1).unsqueeze(-1)            
-            core_output, core_state = self.rnn(x, done, core_state, record_state)
+            core_output, core_state = self.rnn(
+                x,
+                done,
+                core_state,
+                record_state,
+                update_mask=update_mask,
+            )
             core_output = torch.flatten(core_output, 0, 1)
             d = torch.flatten(core_output, 1)   
         else:
@@ -257,6 +284,7 @@ class ActorBaseNet(nn.Module):
     def __init__(self, obs_space, action_space, flags, tree_rep_meaning=False, record_state=False):
         super(ActorBaseNet, self).__init__()
         self.disable_thinker = flags.wrapper_type == 1
+        self.dynamic_search = bool(getattr(flags, "dynamic_search", False)) and not self.disable_thinker
         self.record_state = record_state        
 
         self.obs_space = obs_space        
@@ -269,9 +297,16 @@ class ActorBaseNet(nn.Module):
         self.tree_rep_meaning = tree_rep_meaning
 
         self.float16 = flags.float16
-        self.num_rewards = 1
-        self.num_rewards += int(flags.im_cost > 0.0)
-        self.num_rewards += int(flags.cur_cost > 0.0)
+        # Keep the actor/critic output channels in the single canonical order
+        # used by rollout construction and the learner.  Dynamic search appends
+        # the computation-cost channel without moving legacy reward rows.
+        self.num_rewards = len(util.get_reward_names(flags))
+        # The computation cost is a return/value target, not an observation.
+        # Keeping actor inputs to the legacy reward prefix preserves every
+        # downstream feature width during fixed -> dynamic checkpoint loading.
+        self.num_input_rewards = 1
+        self.num_input_rewards += int(flags.im_cost > 0.0)
+        self.num_input_rewards += int(flags.cur_cost > 0.0)
         self.enc_type = flags.critic_enc_type  
         self.rv_tran = None
         self.critic_zero_init = flags.critic_zero_init     
@@ -339,12 +374,82 @@ class ActorBaseNet(nn.Module):
     def set_weights(self, weights, strict=True):
         device = next(self.parameters()).device
         tensor = isinstance(next(iter(weights.values())), torch.Tensor)
-        if not tensor:
-            self.load_state_dict(
-                {k: torch.tensor(v, device=device) for k, v in weights.items()}, strict=strict
-            )
-        else:
-            self.load_state_dict({k: v.to(device) for k, v in weights.items()}, strict=strict)
+        incoming = (
+            {k: torch.tensor(v, device=device) for k, v in weights.items()}
+            if not tensor
+            else {k: v.to(device) for k, v in weights.items()}
+        )
+        if not self.dynamic_search:
+            self.load_state_dict(incoming, strict=strict)
+            return
+
+        # Resume must never fall through to the legacy partial-migration path.
+        # A strict Dynamic checkpoint is required to match every key and shape.
+        if strict:
+            self.load_state_dict(incoming, strict=True)
+            return
+
+        # Dynamic search deliberately replaces the flattened tree MLP with a
+        # masked GRU and expands the binary reset head to a ternary control
+        # head.  PyTorch's strict=False still raises on same-key shape
+        # mismatches, so filter/migrate them explicitly.  Exact dynamic
+        # checkpoints still take the ordinary strict path.
+        target = self.state_dict()
+        if incoming.keys() == target.keys() and all(
+            incoming[k].shape == target[k].shape for k in target
+        ):
+            self.load_state_dict(incoming, strict=False)
+            return
+
+        migrated = {}
+        for key, value in incoming.items():
+            if key not in target:
+                continue
+            target_value = target[key]
+            if value.shape == target_value.shape:
+                migrated[key] = value
+                continue
+
+            # Preserve the learned PROCEED/RESET rows and initialize the new
+            # STOP row to zero.  This works for ActorNetSingle and nested
+            # ActorNetSep keys alike.
+            if (
+                key.endswith("reset.weight")
+                and value.ndim == 2
+                and target_value.ndim == 2
+                and value.shape[0] == 2
+                and target_value.shape[0] == 3
+                and value.shape[1] == target_value.shape[1]
+            ):
+                expanded = torch.zeros_like(target_value)
+                expanded[:2] = value
+                migrated[key] = expanded
+                continue
+            if (
+                key.endswith("reset.bias")
+                and value.ndim == 1
+                and target_value.ndim == 1
+                and value.shape[0] == 2
+                and target_value.shape[0] == 3
+            ):
+                expanded = torch.zeros_like(target_value)
+                expanded[:2] = value
+                migrated[key] = expanded
+                continue
+
+            # Baseline output expansion (e.g. an added thinking-cost value
+            # row): retain all legacy rows and leave new rows zero-initialized.
+            if (
+                (key.endswith("baseline.weight") or key.endswith("baseline.bias"))
+                and value.ndim == target_value.ndim
+                and value.shape[0] < target_value.shape[0]
+                and value.shape[1:] == target_value.shape[1:]
+            ):
+                expanded = torch.zeros_like(target_value)
+                expanded[: value.shape[0]] = value
+                migrated[key] = expanded
+
+        self.load_state_dict(migrated, strict=False)
 
 class ActorNetSep(ActorBaseNet):
     def __init__(self, obs_space, action_space, flags, tree_rep_meaning=None, record_state=False):
@@ -379,6 +484,12 @@ class ActorNetSep(ActorBaseNet):
             entropy_loss=actor_out.entropy_loss,
             reg_loss=actor_out.reg_loss,
             misc=misc,
+            search_control=actor_out.search_control,
+            search_control_logits=actor_out.search_control_logits,
+            primary_valid=actor_out.primary_valid,
+            control_valid=actor_out.control_valid,
+            policy_valid=actor_out.policy_valid,
+            policy_type=actor_out.policy_type,
         )
         core_state = actor_state + critic_state
         return actor_out, core_state
@@ -398,8 +509,16 @@ class ActorNetSingle(ActorBaseNet):
 
         self.tran_dim = flags.tran_dim 
         self.tran_reset_mode = flags.tran_reset_mode
-        self.tree_rep_rnn = flags.tree_rep_rnn and flags.see_tree_rep         
-        self.se_lstm_table = getattr(flags, "se_lstm_table", False) and flags.see_tree_rep and flags.wrapper_type in [3, 4]
+        self.dynamic_tree_rep = self.dynamic_search and self.see_tree_rep
+        self.tree_rep_rnn = (
+            flags.tree_rep_rnn and flags.see_tree_rep and not self.dynamic_tree_rep
+        )
+        self.se_lstm_table = (
+            getattr(flags, "se_lstm_table", False)
+            and flags.see_tree_rep
+            and flags.wrapper_type in [3, 4]
+            and not self.dynamic_tree_rep
+        )
         self.x_rnn = flags.x_rnn and flags.see_x  
         self.h_rnn = flags.h_rnn and flags.see_h
         self.real_state_rnn = flags.real_state_rnn and flags.see_real_state         
@@ -408,7 +527,7 @@ class ActorNetSingle(ActorBaseNet):
         self.last_layer_n = flags.last_layer_n
           
         # encoder for state or encoding output
-        last_out_size = self.dim_rep_actions + self.num_rewards
+        last_out_size = self.dim_rep_actions + self.num_input_rewards
 
         if not self.disable_thinker:
             last_out_size += 2
@@ -474,7 +593,19 @@ class ActorNetSingle(ActorBaseNet):
         if self.see_tree_rep:            
             self.tree_rep_meaning = tree_rep_meaning
             in_size = self.tree_reps_shape[0]
-            if self.se_lstm_table:
+            if self.dynamic_tree_rep:
+                tree_hidden_size = int(
+                    getattr(flags, "dynamic_search_hidden_dim", 100)
+                )
+                tree_layer_n = int(getattr(flags, "dynamic_search_layer_n", 1))
+                self.tree_rep_encoder = MaskedGRU(
+                    input_size=in_size,
+                    hidden_size=tree_hidden_size,
+                    num_layers=tree_layer_n,
+                )
+                self.tree_rep_out_size = tree_hidden_size
+                last_out_size += tree_hidden_size
+            elif self.se_lstm_table:
                 assert flags.se_query_cur == 2                
                 root_table_mask = torch.zeros(in_size, dtype=torch.bool)
                 root_query_keys = [k for k in tree_rep_meaning if k.startswith("root_query")]
@@ -495,7 +626,9 @@ class ActorNetSingle(ActorBaseNet):
                 self.tree_rep_table_lstm = nn.LSTM(input_size=input_size, hidden_size=64, num_layers=3, batch_first=True)
                 in_size = torch.sum(non_table_mask).long() + 64 * 2           
 
-            if self.tree_rep_rnn:
+            if self.dynamic_tree_rep:
+                pass
+            elif self.tree_rep_rnn:
                 self.tree_rep_encoder = RNNEncoder(
                     in_size=in_size,
                     flags=flags
@@ -521,6 +654,15 @@ class ActorNetSingle(ActorBaseNet):
             )
             last_out_size = 100
 
+        if self.dynamic_search:
+            # SEARCH, NEED_REAL_ACTION and WAIT can expose otherwise identical
+            # observations but require different heads/semantics.  An additive
+            # embedding makes the phase observable without changing any
+            # downstream tensor width.  Zero initialization keeps migrated
+            # fixed-budget policies behaviourally neutral at load time.
+            self.phase_embedding = nn.Embedding(3, last_out_size)
+            nn.init.zeros_(self.phase_embedding.weight)
+
         if self.actor:
             self.policy = nn.Linear(last_out_size, self.num_actions * self.dim_actions)
             self.im_policy = self.policy
@@ -535,7 +677,7 @@ class ActorNetSingle(ActorBaseNet):
                     if not self.discrete_action:
                         self.im_policy_lvar = nn.Linear(last_out_size, self.num_actions * self.dim_actions)
                     
-                self.reset = nn.Linear(last_out_size, 2)
+                self.reset = nn.Linear(last_out_size, 3 if self.dynamic_search else 2)
 
         if self.critic:
             self.rv_tran = None
@@ -564,7 +706,12 @@ class ActorNetSingle(ActorBaseNet):
         idx = 0
         initial_state = ()
         
-        conditions = [self.x_rnn, self.real_state_rnn, self.tree_rep_rnn, self.h_rnn]
+        conditions = [
+            self.x_rnn,
+            self.real_state_rnn,
+            self.tree_rep_rnn or self.dynamic_tree_rep,
+            self.h_rnn,
+        ]
         rnn_names = ["x_encoder_rnn", "r_encoder_rnn", "tree_rep_encoder", "h_encoder_rnn"]
         state_names = ["x", "r", "tree_rep", "h"]
 
@@ -620,13 +767,58 @@ class ActorNetSingle(ActorBaseNet):
         ), f"done shape should be (T, B) instead of {done.shape}"
         T, B = done.shape
 
+        if self.dynamic_search:
+            phase = getattr(env_out, "phase", None)
+            if phase is None:
+                # Transitional fallback for rollouts produced before phase was
+                # added: legacy status 0/1 requests a search action and 2/3 a
+                # real action.  Dynamic cenv always supplies phase explicitly.
+                phase = torch.where(
+                    env_out.step_status <= 1,
+                    torch.full_like(env_out.step_status, SEARCH_PHASE),
+                    torch.full_like(env_out.step_status, NEED_REAL_ACTION_PHASE),
+                )
+            phase = phase.to(device=done.device, dtype=torch.long)
+            if phase.shape != (T, B):
+                raise ValueError(
+                    f"phase must have shape {(T, B)}, got {phase.shape}"
+                )
+            # Recurrent memories advance on an emitted tree/model token, not
+            # merely because the *next* policy phase is SEARCH.  In
+            # particular, the final computation at a positive safety cap
+            # emits a valid token while transitioning directly to
+            # NEED_REAL_ACTION.  STOP, action-store and ordinary WAIT calls
+            # emit no token and therefore remain exact recurrent no-ops.
+            recurrent_update_mask = getattr(env_out, "tree_token_valid", None)
+            if recurrent_update_mask is None:
+                recurrent_update_mask = phase == SEARCH_PHASE
+            else:
+                recurrent_update_mask = recurrent_update_mask.to(
+                    device=done.device, dtype=torch.bool
+                )
+                if (recurrent_update_mask.ndim == 3
+                        and recurrent_update_mask.shape[-1] == 1):
+                    recurrent_update_mask = recurrent_update_mask.squeeze(-1)
+                if recurrent_update_mask.shape != (T, B):
+                    raise ValueError(
+                        "tree_token_valid must have shape "
+                        f"{(T, B)}, got {recurrent_update_mask.shape}"
+                    )
+        else:
+            phase = None
+            recurrent_update_mask = None
+
         assert len(core_state) == self.state_len, "core_state should have length %d" % self.state_len
         new_core_state = [None] * self.state_len
 
         if self.tran_reset_mode == 0:
             rnn_done = env_out.done
+            if self.dynamic_search:
+                rnn_done = rnn_done | env_out.truncated_done.bool()
         elif self.tran_reset_mode == 1:
             rnn_done = env_out.real_done
+            if self.dynamic_search:
+                rnn_done = rnn_done | env_out.truncated_done.bool()
         else:
             rnn_done = torch.zeros_like(env_out.done)
 
@@ -634,35 +826,95 @@ class ActorNetSingle(ActorBaseNet):
         
         last_pri = torch.flatten(env_out.last_pri, 0, 1)
         if not self.tuple_action: last_pri = last_pri.unsqueeze(-1)
-        last_pri = util.encode_action(last_pri, self.pri_action_space)   
+        last_pri = util.encode_action(last_pri, self.pri_action_space)
+
+        last_control = None
+        if self.dynamic_search:
+            last_control = getattr(env_out, "last_search_control", None)
+            if last_control is None:
+                last_control = env_out.last_reset
+            last_control = torch.flatten(last_control, 0, 1).long()
+            # Dynamic rollout construction keeps last_pri at the most recent
+            # accepted primary action when STOP/WAIT dummy inputs are ignored,
+            # and replaces it with the stored real action in WAIT.  Consume
+            # that stable token verbatim here; last_control can legitimately
+            # remain STOP while last_pri advances to the stored real action.
         final_out.append(last_pri)
 
         if not self.disable_thinker:
-            last_reset = torch.flatten(env_out.last_reset, 0, 1)
-            last_reset = F.one_hot(last_reset, 2)
+            if self.dynamic_search:
+                # Preserve the legacy two-feature width exactly.  STOP maps to
+                # the zero vector; PROCEED/RESET retain their old one-hot
+                # representation and therefore keep downstream weight shapes
+                # checkpoint-compatible.
+                last_reset = torch.stack(
+                    [last_control == PROCEED, last_control == RESET], dim=-1
+                ).to(dtype=last_pri.dtype)
+            else:
+                last_reset = torch.flatten(env_out.last_reset, 0, 1)
+                last_reset = F.one_hot(last_reset, 2)
             final_out.append(last_reset)
 
-        reward = env_out.reward
-        reward[torch.isnan(reward)] = 0.
+        reward = env_out.reward[..., : self.num_input_rewards]
+        reward = torch.where(torch.isnan(reward), torch.zeros_like(reward), reward)
         last_reward = torch.clamp(torch.flatten(reward, 0, 1), -1, +1).float()
         final_out.append(last_reward)
 
         if self.see_tree_rep:                
-            tree_rep = env_out.tree_reps               
-            tree_rep = torch.flatten(tree_rep, 0, 1)     
+            tree_rep = env_out.tree_reps
+            if self.dynamic_tree_rep:
+                if tree_rep.shape[:2] != (T, B):
+                    raise ValueError(
+                        "dynamic tree_reps must have shape (T, B, C), got "
+                        f"{tree_rep.shape}"
+                    )
+                tree_token_valid = getattr(env_out, "tree_token_valid", None)
+                if tree_token_valid is None:
+                    tree_token_valid = recurrent_update_mask
+                else:
+                    tree_token_valid = tree_token_valid.to(
+                        device=tree_rep.device, dtype=torch.bool
+                    )
+                    if tree_token_valid.ndim == 3 and tree_token_valid.shape[-1] == 1:
+                        tree_token_valid = tree_token_valid.squeeze(-1)
+                search_state_reset = getattr(env_out, "search_state_reset", None)
+                if search_state_reset is None:
+                    search_state_reset = getattr(env_out, "real_transition", None)
+                if search_state_reset is None:
+                    search_state_reset = torch.zeros_like(tree_token_valid)
+                else:
+                    search_state_reset = search_state_reset.to(
+                        device=tree_rep.device, dtype=torch.bool
+                    )
+                    if search_state_reset.ndim == 3 and search_state_reset.shape[-1] == 1:
+                        search_state_reset = search_state_reset.squeeze(-1)
+                core_state_ = core_state[self.state_idx['tree_rep']]
+                encoded_tree_rep, core_state_ = self.tree_rep_encoder(
+                    tree_rep,
+                    update_mask=tree_token_valid,
+                    reset_mask=search_state_reset,
+                    state=core_state_,
+                    record_state=self.record_state,
+                )
+                encoded_tree_rep = torch.flatten(encoded_tree_rep, 0, 1)
+                new_core_state[self.state_idx['tree_rep']] = core_state_
+            else:
+                tree_rep = torch.flatten(tree_rep, 0, 1)
 
-            if self.se_lstm_table:
-                root_table = tree_rep[:, self.root_table_mask]
-                root_table = torch.flip(root_table.view(T*B, self.flags.se_query_size, -1), dims=[1])
-                root_table_rep, _ = self.tree_rep_table_lstm(root_table)
-                root_table_rep = root_table_rep[:, -1]
-                cur_table = tree_rep[:, self.cur_table_mask]
-                cur_table = torch.flip(cur_table.view(T*B, self.flags.se_query_size, -1), dims=[1])
-                cur_table_rep, _ = self.tree_rep_table_lstm(cur_table)
-                cur_table_rep = cur_table_rep[:, -1]
-                tree_rep = torch.concat([tree_rep[:, self.non_table_mask], root_table_rep, cur_table_rep], dim=-1)
+                if self.se_lstm_table:
+                    root_table = tree_rep[:, self.root_table_mask]
+                    root_table = torch.flip(tree_rep[:, self.root_table_mask].view(T*B, self.flags.se_query_size, -1), dims=[1])
+                    root_table_rep, _ = self.tree_rep_table_lstm(root_table)
+                    root_table_rep = root_table_rep[:, -1]
+                    cur_table = tree_rep[:, self.cur_table_mask]
+                    cur_table = torch.flip(cur_table.view(T*B, self.flags.se_query_size, -1), dims=[1])
+                    cur_table_rep, _ = self.tree_rep_table_lstm(cur_table)
+                    cur_table_rep = cur_table_rep[:, -1]
+                    tree_rep = torch.concat([tree_rep[:, self.non_table_mask], root_table_rep, cur_table_rep], dim=-1)
 
-            if self.tree_rep_rnn:
+            if self.dynamic_tree_rep:
+                pass
+            elif self.tree_rep_rnn:
                 core_state_ = core_state[self.state_idx['tree_rep']]
                 encoded_tree_rep, core_state_ = self.tree_rep_encoder(
                     tree_rep, rnn_done, core_state_)
@@ -678,7 +930,11 @@ class ActorNetSingle(ActorBaseNet):
             if self.h_rnn:
                 core_state_ = core_state[self.state_idx['h']]
                 encoded_h, core_state_ = self.h_encoder_rnn(
-                    encoded_h, rnn_done, core_state_)
+                    encoded_h,
+                    rnn_done,
+                    core_state_,
+                    update_mask=recurrent_update_mask,
+                )
                 new_core_state[self.state_idx['h']] = core_state_
 
             final_out.append(encoded_h)                
@@ -693,7 +949,11 @@ class ActorNetSingle(ActorBaseNet):
                 encoded_x = torch.concat([encoded_x, last_pri, last_reset], dim=-1)
                 core_state_ = core_state[self.state_idx['x']]                
                 encoded_x, core_state_ = self.x_encoder_rnn(
-                    encoded_x, rnn_done, core_state_)
+                    encoded_x,
+                    rnn_done,
+                    core_state_,
+                    update_mask=recurrent_update_mask,
+                )
                 new_core_state[self.state_idx['x']] = core_state_
             
             final_out.append(encoded_x)
@@ -711,130 +971,386 @@ class ActorNetSingle(ActorBaseNet):
         if self.last_layer_n > 0:
             final_out = self.final_mlp(final_out)     
 
+        if self.dynamic_search:
+            final_out = final_out + self.phase_embedding(
+                phase.flatten(0, 1)
+            ).to(dtype=final_out.dtype)
+
         misc = {}
         if self.actor:
-            # compute logits
-            pri_logits = self.policy(final_out)    
-            pri_logits = pri_logits.view(T*B, self.dim_actions, self.num_actions)
-            if self.ordinal: pri_logits = self.ordinal_encode(pri_logits)
+            # Compute both primary-policy branches before phase routing.
+            real_logits = self.policy(final_out)
+            real_logits = real_logits.view(T * B, self.dim_actions, self.num_actions)
+            if self.ordinal:
+                real_logits = self.ordinal_encode(real_logits)
             if not self.discrete_action:
-                pri_mean = pri_logits[:, :, 0]
-                pri_log_var = self.policy_lvar(final_out)
-
-            if not self.discrete_action:
-                pri_log_var = torch.clamp(pri_log_var, self.min_log_var, self.max_log_var)
+                real_mean = real_logits[:, :, 0]
+                real_log_var = torch.clamp(
+                    self.policy_lvar(final_out), self.min_log_var, self.max_log_var
+                )
 
             if not self.disable_thinker:
-                im_logits = self.im_policy(final_out)                
-                im_logits = im_logits.view(T*B, self.dim_actions, self.num_actions)
-                if self.ordinal: im_logits = self.ordinal_encode(im_logits)
-                if not self.discrete_action:                        
-                    im_mean = im_logits[:, :, 0]
-                    im_log_var = self.im_policy_lvar(final_out) 
-                if not self.discrete_action:                   
-                    im_log_var = torch.clamp(im_log_var, self.min_log_var, self.max_log_var)
-
-                im_mask = env_out.step_status <= 1 # imagainary action will be taken next
-                if self.discrete_action:
-                    im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1).unsqueeze(-1)
-                    pri_logits = torch.where(im_mask, im_logits, pri_logits)
-                else:                    
-                    im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1)
-                    pri_mean = torch.where(im_mask, im_mean, pri_mean)
-                    pri_log_var = torch.where(im_mask, im_log_var, pri_log_var)
+                search_logits = self.im_policy(final_out)
+                search_logits = search_logits.view(
+                    T * B, self.dim_actions, self.num_actions
+                )
+                if self.ordinal:
+                    search_logits = self.ordinal_encode(search_logits)
+                if not self.discrete_action:
+                    search_mean = search_logits[:, :, 0]
+                    search_log_var = torch.clamp(
+                        self.im_policy_lvar(final_out),
+                        self.min_log_var,
+                        self.max_log_var,
+                    )
                 reset_logits = self.reset(final_out)
-            else:   
+            else:
+                search_logits = None
                 reset_logits = None
 
-            # compute entropy loss
-            if compute_loss:
+            if self.dynamic_search:
+                search_phase_mask = phase == SEARCH_PHASE
+                real_phase_mask = phase == NEED_REAL_ACTION_PHASE
+                wait_phase_mask = phase == WAIT_PHASE
+
+                forced_stop = getattr(env_out, "forced_stop", None)
+                if forced_stop is None:
+                    forced_stop = torch.zeros_like(search_phase_mask)
+                else:
+                    forced_stop = forced_stop.to(
+                        device=phase.device, dtype=torch.bool
+                    )
+                    if forced_stop.ndim == 3 and forced_stop.shape[-1] == 1:
+                        forced_stop = forced_stop.squeeze(-1)
+                control_valid = search_phase_mask & ~forced_stop
+
+                legal_control_mask = getattr(env_out, "legal_control_mask", None)
+                if legal_control_mask is None:
+                    legal_control_mask = torch.ones(
+                        (T, B, 3), dtype=torch.bool, device=phase.device
+                    )
+                else:
+                    legal_control_mask = legal_control_mask.to(
+                        device=phase.device, dtype=torch.bool
+                    )
+                    if legal_control_mask.shape != (T, B, 3):
+                        raise ValueError(
+                            "legal_control_mask must have shape "
+                            f"{(T, B, 3)}, got {legal_control_mask.shape}"
+                        )
+
+                # Non-control phases receive a deterministic dummy PROCEED.
+                # A malformed all-false SEARCH mask also falls back safely;
+                # forced-stop rows fall back to STOP.
+                fallback_control = torch.where(
+                    forced_stop,
+                    torch.full_like(phase, STOP),
+                    torch.full_like(phase, PROCEED),
+                )
+                fallback_legal = F.one_hot(fallback_control, 3).bool()
+                has_legal = torch.any(legal_control_mask, dim=-1, keepdim=True)
+                legal_control_mask = torch.where(
+                    has_legal, legal_control_mask, fallback_legal
+                )
+                legal_control_mask = torch.where(
+                    search_phase_mask.unsqueeze(-1),
+                    legal_control_mask,
+                    F.one_hot(torch.full_like(phase, PROCEED), 3).bool(),
+                )
+                raw_control_logits = reset_logits.view(T, B, 3)
+                search_control_logits = raw_control_logits.masked_fill(
+                    ~legal_control_mask, -1e9
+                )
+                search_control = sample(
+                    search_control_logits, greedy=greedy, dim=-1
+                )
+                search_control = torch.where(
+                    search_phase_mask,
+                    search_control,
+                    torch.full_like(search_control, PROCEED),
+                )
+                search_control = torch.where(
+                    forced_stop,
+                    torch.full_like(search_control, STOP),
+                    search_control,
+                )
+
+                if clamp_action is not None:
+                    clamp_control = clamp_action[1]
+                    search_control[: clamp_control.shape[0]] = clamp_control
+                    search_control = torch.where(
+                        forced_stop,
+                        torch.full_like(search_control, STOP),
+                        search_control,
+                    )
+
+                reset_uses_primary = self.flags.reset_mode == 0
+                search_primary_valid = search_phase_mask & (
+                    (search_control == PROCEED)
+                    | ((search_control == RESET) & reset_uses_primary)
+                )
+                primary_valid = search_primary_valid | real_phase_mask
+                # STOP is still a learned policy decision even though it has
+                # no primary action.  Only forced controls and WAIT calls are
+                # excluded from policy-gradient accounting.
+                policy_valid = control_valid | real_phase_mask
+                policy_type = torch.full_like(phase, POLICY_NONE)
+                policy_type = torch.where(
+                    control_valid,
+                    torch.full_like(policy_type, POLICY_SEARCH),
+                    policy_type,
+                )
+                policy_type = torch.where(
+                    real_phase_mask,
+                    torch.full_like(policy_type, POLICY_REAL),
+                    policy_type,
+                )
+
+                route_search = search_phase_mask.flatten(0, 1)
                 if self.discrete_action:
-                    entropy_loss = -torch.nn.CrossEntropyLoss(reduction="none")(
-                        input=torch.flatten(pri_logits, 0, 1), 
-                        target=torch.flatten(F.softmax(pri_logits, dim=-1), 0, 1),                
+                    pri_logits = torch.where(
+                        route_search.unsqueeze(-1).unsqueeze(-1),
+                        search_logits,
+                        real_logits,
                     )
-                    entropy_loss = entropy_loss.view(T, B, self.dim_actions)
-                    entropy_loss = torch.sum(entropy_loss, dim=-1)
                 else:
-                    entropy_loss = -torch.sum(pri_log_var.view(T, B, self.dim_actions), dim=-1)
-                if not self.disable_thinker:
-                    ent_reset_loss = -torch.nn.CrossEntropyLoss(reduction="none")(
-                        input=reset_logits, target=F.softmax(reset_logits, dim=-1)
+                    pri_mean = torch.where(
+                        route_search.unsqueeze(-1), search_mean, real_mean
                     )
-                    ent_reset_loss = ent_reset_loss.view(T, B) * (env_out.step_status <= 1).float()
-                    entropy_loss = entropy_loss + ent_reset_loss 
-            else:
-                entropy_loss = None
+                    pri_log_var = torch.where(
+                        route_search.unsqueeze(-1), search_log_var, real_log_var
+                    )
 
-            # sample action
-            if self.discrete_action:
-                pri = sample(pri_logits, greedy=greedy, dim=-1)
-                pri_logits = pri_logits.view(T, B, self.dim_actions, self.num_actions)
-                pri = pri.view(T, B, self.dim_actions)        
-                pri_param = pri_logits
-            else:
-                pri_mean = pri_mean.view(T, B, self.dim_actions)
-                pri_log_var = pri_log_var.view(T, B, self.dim_actions)                
-                pri_std = torch.exp(pri_log_var / 2)
-                pri_std = pri_std.view(T, B, self.dim_actions)
-                normal_dist = torch.distributions.Normal(pri_mean, pri_std)
-                if not greedy:                
-                    pri_pre_tanh = normal_dist.sample()
+                # Sample the routed primary distribution.  Invalid samples are
+                # harmless dummies and are removed from the joint log-prob,
+                # entropy, regularization and downstream policy masks.
+                if self.discrete_action:
+                    pri = sample(pri_logits, greedy=greedy, dim=-1)
+                    pri_logits = pri_logits.view(
+                        T, B, self.dim_actions, self.num_actions
+                    )
+                    pri = pri.view(T, B, self.dim_actions)
+                    pri_param = pri_logits
                 else:
-                    pri_pre_tanh = pri_mean
-                if self.tanh_action:
-                    pri = torch.tanh(pri_pre_tanh)
-                else:
-                    pri = pri_pre_tanh
-                pri_param = torch.stack((pri_mean, pri_log_var), dim=-1)
+                    pri_mean = pri_mean.view(T, B, self.dim_actions)
+                    pri_log_var = pri_log_var.view(T, B, self.dim_actions)
+                    pri_std = torch.exp(pri_log_var / 2)
+                    normal_dist = torch.distributions.Normal(pri_mean, pri_std)
+                    pri_pre_tanh = pri_mean if greedy else normal_dist.sample()
+                    pri = (
+                        torch.tanh(pri_pre_tanh)
+                        if self.tanh_action
+                        else pri_pre_tanh
+                    )
+                    pri_param = torch.stack((pri_mean, pri_log_var), dim=-1)
 
-            if not self.disable_thinker:
-                reset = sample(reset_logits, greedy=greedy, dim=-1)
-                reset_logits = reset_logits.view(T, B, 2)
-                reset = reset.view(T, B)    
-            else:
-                reset = None
+                if clamp_action is not None:
+                    clamp_primary = clamp_action[0]
+                    pri[: clamp_primary.shape[0]] = clamp_primary
+                    if not self.discrete_action:
+                        pri_pre_tanh = atanh(pri) if self.tanh_action else pri
 
-            # clamp the action to clamp_action
-            if clamp_action is not None:
-                if not self.disable_thinker:
-                    pri[:clamp_action[0].shape[0]] = clamp_action[0]
-                    reset[:clamp_action[1].shape[0]] = clamp_action[1]
+                if self.discrete_action:
+                    primary_log_prob = compute_discrete_log_prob(pri_logits, pri)
                 else:
-                    pri[:clamp_action.shape[0]] = clamp_action
-                if not self.discrete_action:  
-                    if self.tanh_action:              
-                        pri_pre_tanh = atanh(pri)
+                    primary_log_prob = normal_dist.log_prob(pri_pre_tanh)
+                    if self.tanh_action:
+                        primary_log_prob = primary_log_prob - torch.log(
+                            1.0 - pri ** 2 + 1e-6
+                        )
+                    primary_log_prob = torch.sum(primary_log_prob, dim=-1)
+                primary_log_prob = primary_log_prob * primary_valid.float()
+
+                control_log_prob = compute_discrete_log_prob(
+                    search_control_logits, search_control
+                )
+                control_log_prob = control_log_prob * control_valid.float()
+                c_action_log_prob = primary_log_prob + control_log_prob
+
+                if compute_loss:
+                    if self.discrete_action:
+                        primary_entropy_loss = -torch.nn.CrossEntropyLoss(
+                            reduction="none"
+                        )(
+                            input=torch.flatten(pri_logits, 0, 2),
+                            target=torch.flatten(
+                                F.softmax(pri_logits, dim=-1), 0, 2
+                            ),
+                        )
+                        primary_entropy_loss = primary_entropy_loss.view(
+                            T, B, self.dim_actions
+                        )
+                        primary_entropy_loss = torch.sum(
+                            primary_entropy_loss, dim=-1
+                        )
                     else:
-                        pri_pre_tanh = pri
+                        primary_entropy_loss = -torch.sum(pri_log_var, dim=-1)
+                    # Entropy of the hierarchical SEARCH policy is
+                    # H(control) + P(control != STOP) H(imaginary action).
+                    # Using the sampled primary-valid bit here would be a
+                    # biased Monte-Carlo entropy regularizer and would omit
+                    # its probability-gradient term.
+                    control_probs = F.softmax(search_control_logits, dim=-1)
+                    non_stop_prob = 1.0 - control_probs[..., STOP]
+                    primary_entropy_weight = (
+                        real_phase_mask.float()
+                        + control_valid.float() * non_stop_prob
+                    )
+                    primary_entropy_loss = (
+                        primary_entropy_loss * primary_entropy_weight
+                    )
+                    control_entropy_loss = -torch.nn.CrossEntropyLoss(
+                        reduction="none"
+                    )(
+                        input=torch.flatten(search_control_logits, 0, 1),
+                        target=torch.flatten(
+                            F.softmax(search_control_logits, dim=-1), 0, 1
+                        ),
+                    ).view(T, B)
+                    control_entropy_loss = (
+                        control_entropy_loss * control_valid.float()
+                    )
+                    entropy_loss = primary_entropy_loss + control_entropy_loss
+                    misc["primary_entropy_loss"] = primary_entropy_loss
+                    misc["control_entropy_loss"] = control_entropy_loss
+                    misc["non_stop_prob"] = non_stop_prob
+                else:
+                    entropy_loss = None
 
-            # compute chosen log porb
-            if self.discrete_action:
-                c_action_log_prob = compute_discrete_log_prob(pri_logits, pri)     
+                reset = search_control
+                reset_logits = search_control_logits
+                pri_env = pri[-1, :, 0] if not self.tuple_action else pri[-1]
+                action = (pri_env, search_control[-1])
+                if self.discrete_action:
+                    action_prob = F.softmax(pri_logits, dim=-1)
+                else:
+                    action_prob = pri_param
+                if not self.tuple_action:
+                    action_prob = action_prob[:, :, 0]
+
+                misc["primary_log_prob"] = primary_log_prob
+                misc["control_log_prob"] = control_log_prob
+                misc["wait_mask"] = wait_phase_mask
             else:
-                c_action_log_prob = normal_dist.log_prob(pri_pre_tanh)
-                if self.tanh_action:    
-                    c_action_log_prob = c_action_log_prob - torch.log(1.0 - pri ** 2 + 1e-6)
-                c_action_log_prob = torch.sum(c_action_log_prob, dim=-1)                
+                # Original fixed-budget routing and loss are intentionally
+                # unchanged.
+                pri_logits = real_logits
+                if not self.discrete_action:
+                    pri_mean = real_mean
+                    pri_log_var = real_log_var
+                if not self.disable_thinker:
+                    im_mask = env_out.step_status <= 1
+                    if self.discrete_action:
+                        im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1).unsqueeze(-1)
+                        pri_logits = torch.where(im_mask, search_logits, pri_logits)
+                    else:
+                        im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1)
+                        pri_mean = torch.where(im_mask, search_mean, pri_mean)
+                        pri_log_var = torch.where(im_mask, search_log_var, pri_log_var)
 
-            if not self.disable_thinker:
-                c_reset_log_prob = compute_discrete_log_prob(reset_logits, reset)     
-                c_reset_log_prob = c_reset_log_prob * (env_out.step_status <= 1).float()
-                # if next action is real action, reset will never be used
-                c_action_log_prob += c_reset_log_prob
+                if compute_loss:
+                    if self.discrete_action:
+                        entropy_loss = -torch.nn.CrossEntropyLoss(reduction="none")(
+                            input=torch.flatten(pri_logits, 0, 1),
+                            target=torch.flatten(F.softmax(pri_logits, dim=-1), 0, 1),
+                        )
+                        entropy_loss = entropy_loss.view(T, B, self.dim_actions)
+                        entropy_loss = torch.sum(entropy_loss, dim=-1)
+                    else:
+                        entropy_loss = -torch.sum(
+                            pri_log_var.view(T, B, self.dim_actions), dim=-1
+                        )
+                    if not self.disable_thinker:
+                        ent_reset_loss = -torch.nn.CrossEntropyLoss(reduction="none")(
+                            input=reset_logits, target=F.softmax(reset_logits, dim=-1)
+                        )
+                        ent_reset_loss = ent_reset_loss.view(T, B) * (
+                            env_out.step_status <= 1
+                        ).float()
+                        entropy_loss = entropy_loss + ent_reset_loss
+                else:
+                    entropy_loss = None
 
-            # pack last step's action and action prob        
-            pri_env = pri[-1, :, 0] if not self.tuple_action else pri[-1]        
-            if not self.disable_thinker:
-                action = (pri_env, reset[-1])            
-            else:
-                action = pri_env        
+                if self.discrete_action:
+                    pri = sample(pri_logits, greedy=greedy, dim=-1)
+                    pri_logits = pri_logits.view(
+                        T, B, self.dim_actions, self.num_actions
+                    )
+                    pri = pri.view(T, B, self.dim_actions)
+                    pri_param = pri_logits
+                else:
+                    pri_mean = pri_mean.view(T, B, self.dim_actions)
+                    pri_log_var = pri_log_var.view(T, B, self.dim_actions)
+                    pri_std = torch.exp(pri_log_var / 2)
+                    normal_dist = torch.distributions.Normal(pri_mean, pri_std)
+                    pri_pre_tanh = pri_mean if greedy else normal_dist.sample()
+                    pri = (
+                        torch.tanh(pri_pre_tanh)
+                        if self.tanh_action
+                        else pri_pre_tanh
+                    )
+                    pri_param = torch.stack((pri_mean, pri_log_var), dim=-1)
 
-            if self.discrete_action:   
-                action_prob = F.softmax(pri_logits, dim=-1)    
-            else:
-                action_prob = pri_param
-            if not self.tuple_action: action_prob = action_prob[:, :, 0]    
+                if not self.disable_thinker:
+                    reset = sample(reset_logits, greedy=greedy, dim=-1)
+                    reset_logits = reset_logits.view(T, B, 2)
+                    reset = reset.view(T, B)
+                else:
+                    reset = None
+
+                if clamp_action is not None:
+                    if not self.disable_thinker:
+                        pri[: clamp_action[0].shape[0]] = clamp_action[0]
+                        reset[: clamp_action[1].shape[0]] = clamp_action[1]
+                    else:
+                        pri[: clamp_action.shape[0]] = clamp_action
+                    if not self.discrete_action:
+                        pri_pre_tanh = atanh(pri) if self.tanh_action else pri
+
+                if self.discrete_action:
+                    c_action_log_prob = compute_discrete_log_prob(pri_logits, pri)
+                else:
+                    c_action_log_prob = normal_dist.log_prob(pri_pre_tanh)
+                    if self.tanh_action:
+                        c_action_log_prob = c_action_log_prob - torch.log(
+                            1.0 - pri ** 2 + 1e-6
+                        )
+                    c_action_log_prob = torch.sum(c_action_log_prob, dim=-1)
+
+                if not self.disable_thinker:
+                    c_reset_log_prob = compute_discrete_log_prob(reset_logits, reset)
+                    c_reset_log_prob = c_reset_log_prob * (
+                        env_out.step_status <= 1
+                    ).float()
+                    c_action_log_prob += c_reset_log_prob
+
+                pri_env = pri[-1, :, 0] if not self.tuple_action else pri[-1]
+                action = (pri_env, reset[-1]) if not self.disable_thinker else pri_env
+                if self.discrete_action:
+                    action_prob = F.softmax(pri_logits, dim=-1)
+                else:
+                    action_prob = pri_param
+                if not self.tuple_action:
+                    action_prob = action_prob[:, :, 0]
+
+                primary_valid = torch.ones((T, B), dtype=torch.bool, device=done.device)
+                policy_valid = primary_valid
+                if not self.disable_thinker:
+                    control_valid = env_out.step_status <= 1
+                    policy_type = torch.where(
+                        control_valid,
+                        torch.full_like(env_out.step_status, POLICY_SEARCH),
+                        torch.full_like(env_out.step_status, POLICY_REAL),
+                    )
+                    search_control = reset
+                    search_control_logits = reset_logits
+                else:
+                    control_valid = torch.zeros_like(primary_valid)
+                    policy_type = torch.full(
+                        (T, B), POLICY_REAL, dtype=torch.long, device=done.device
+                    )
+                    search_control = None
+                    search_control_logits = None
 
         if self.critic:
             # compute baseline
@@ -866,14 +1382,34 @@ class ActorNetSingle(ActorBaseNet):
 
         if compute_loss:
             reg_loss = 1e-6 * torch.sum(final_out**2, dim=-1).view(T, B) / 2
-            if self.discrete_action and self.actor:
-                reg_loss += 1e-3 * torch.sum(pri_logits**2, dim=(-2,-1)) / 2
-            if not self.disable_thinker and self.actor:
+            if self.dynamic_search and self.actor:
+                reg_loss = reg_loss * policy_valid.float()
+                if self.discrete_action:
+                    reg_loss += (
+                        1e-3
+                        * torch.sum(pri_logits**2, dim=(-2, -1))
+                        * primary_valid.float()
+                        / 2
+                    )
                 reg_loss += (
-                    + 1e-3 * torch.sum(reset_logits**2, dim=-1) / 2
+                    1e-3
+                    * torch.sum(raw_control_logits**2, dim=-1)
+                    * control_valid.float()
+                    / 2
                 )
                 if self.see_real_state:
-                    reg_loss += 1e-5 * pre_reg_loss
+                    reg_loss += (
+                        1e-5 * pre_reg_loss * policy_valid.float()
+                    )
+            else:
+                if self.discrete_action and self.actor:
+                    reg_loss += 1e-3 * torch.sum(pri_logits**2, dim=(-2,-1)) / 2
+                if not self.disable_thinker and self.actor:
+                    reg_loss += (
+                        + 1e-3 * torch.sum(reset_logits**2, dim=-1) / 2
+                    )
+                    if self.see_real_state:
+                        reg_loss += 1e-5 * pre_reg_loss
         else:
             reg_loss = None
         
@@ -890,6 +1426,12 @@ class ActorNetSingle(ActorBaseNet):
             entropy_loss=entropy_loss if self.actor else None,
             reg_loss=reg_loss,
             misc=misc,
+            search_control=search_control if self.actor else None,
+            search_control_logits=search_control_logits if self.actor else None,
+            primary_valid=primary_valid if self.actor else None,
+            control_valid=control_valid if self.actor else None,
+            policy_valid=policy_valid if self.actor else None,
+            policy_type=policy_type if self.actor else None,
         )
         core_state = tuple(new_core_state)
         return actor_out, core_state    
@@ -897,7 +1439,20 @@ class ActorNetSingle(ActorBaseNet):
     def compute_encoded_real_state(self, env_out, core_state, rnn_done):
         T, B = env_out.step_status.shape[:2]
         core_state_ = core_state[self.state_idx['r']] if self.real_state_rnn else None
-        need_update = (env_out.step_status == 0) | (env_out.step_status == 3)
+        if self.dynamic_search and getattr(env_out, "real_transition", None) is not None:
+            need_update = env_out.real_transition.to(dtype=torch.bool)
+            # A fresh env.reset emits the first real root without crossing an
+            # env.step boundary.  search_state_reset marks both that initial
+            # root and every post-barrier root, so include it in the real
+            # encoder clock while preserving real_transition as the strict
+            # underlying-environment-step event used by learning/logging.
+            search_state_reset = getattr(env_out, "search_state_reset", None)
+            if search_state_reset is not None:
+                need_update = need_update | search_state_reset.to(
+                    device=need_update.device, dtype=torch.bool
+                )
+        else:
+            need_update = (env_out.step_status == 0) | (env_out.step_status == 3)
         requires_grad = env_out.real_states.requires_grad
         if requires_grad: need_update[0] = True
         assert torch.all(need_update == need_update[:,[0]]), f"expect uniform step_status, not ({env_out.step_status.shape}) {env_out.step_status}"
@@ -1082,6 +1637,20 @@ class DRCNet(ActorBaseNet):
             entropy_loss=entropy_loss,
             reg_loss=reg_loss,
             misc={},
+            search_control=None,
+            search_control_logits=None,
+            primary_valid=torch.ones(
+                (T, B), dtype=torch.bool, device=done.device
+            ),
+            control_valid=torch.zeros(
+                (T, B), dtype=torch.bool, device=done.device
+            ),
+            policy_valid=torch.ones(
+                (T, B), dtype=torch.bool, device=done.device
+            ),
+            policy_type=torch.full(
+                (T, B), POLICY_REAL, dtype=torch.long, device=done.device
+            ),
         )
         return actor_out, core_state
 
@@ -1195,6 +1764,24 @@ class MCTS(ActorBaseNet):
             entropy_loss=None,
             reg_loss=None,
             misc={},
+            search_control=reset,
+            search_control_logits=None,
+            primary_valid=torch.ones(
+                (T, B), dtype=torch.bool, device=tree_rep.device
+            ),
+            control_valid=torch.full(
+                (T, B), not next_real_step,
+                dtype=torch.bool,
+                device=tree_rep.device,
+            ),
+            policy_valid=torch.ones(
+                (T, B), dtype=torch.bool, device=tree_rep.device
+            ),
+            policy_type=torch.full(
+                (T, B), POLICY_REAL if next_real_step else POLICY_SEARCH,
+                dtype=torch.long,
+                device=tree_rep.device,
+            ),
         )
         return actor_out, core_state    
     

@@ -407,6 +407,35 @@ class AsyncVectorEnv(VectorEnv):
             pipe.send(("_call", (name, args, kwargs)))
         self._state = AsyncState.WAITING_CALL
 
+    def call_each(self, name: str, env_id, args_per_env):
+        """Call the same method with different positional args per worker."""
+        self._assert_is_running()
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError(
+                f"Calling call_each while waiting for {self._state.value}",
+                self._state.value,
+            )
+        env_ids = (
+            list(range(self.num_envs)) if env_id is None
+            else [int(idx) for idx in list(env_id)]
+        )
+        args_per_env = list(args_per_env)
+        if len(set(env_ids)) != len(env_ids):
+            raise ValueError("env_id must not contain duplicates")
+        if any(idx < 0 or idx >= self.num_envs for idx in env_ids):
+            raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
+        if len(args_per_env) != len(env_ids):
+            raise ValueError("args_per_env must match the selected environment count")
+        if not env_ids:
+            return []
+        self._process_env_id(None if env_id is None else env_ids)
+        for pipe, args in zip(self.process_pipes, args_per_env):
+            if not isinstance(args, tuple):
+                args = (args,)
+            pipe.send(("_call", (name, args, {})))
+        self._state = AsyncState.WAITING_CALL
+        return self.call_wait()
+
     def call_wait(self, timeout: Optional[Union[int, float]] = None) -> list:
         """Calls all parent pipes and waits for the results.
 
@@ -435,8 +464,8 @@ class AsyncVectorEnv(VectorEnv):
             )
 
         results, successes = zip(*[pipe.recv() for pipe in self.process_pipes])
-        self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
+        self._raise_if_errors(successes)
 
         return results
     
@@ -447,6 +476,28 @@ class AsyncVectorEnv(VectorEnv):
     def quick_load(self, env_id: Optional[List[int]] = None, *args, **kwargs) -> List[Any]:
         self.call_async("quick_load", env_id, *args, **kwargs)
         return self.call_wait()
+
+    def quick_delete(self, env_id: Optional[List[int]] = None, *args, **kwargs) -> List[Any]:
+        self.call_async("quick_delete", env_id, *args, **kwargs)
+        return self.call_wait()
+
+    def quick_save_each(self, env_id, slot_ids):
+        slot_ids = [int(slot) for slot in slot_ids]
+        if any(slot < 0 for slot in slot_ids):
+            raise ValueError("slot_ids must be non-negative")
+        return self.call_each("quick_save", env_id, [(slot,) for slot in slot_ids])
+
+    def quick_load_each(self, env_id, slot_ids):
+        slot_ids = [int(slot) for slot in slot_ids]
+        if any(slot < 0 for slot in slot_ids):
+            raise ValueError("slot_ids must be non-negative")
+        return self.call_each("quick_load", env_id, [(slot,) for slot in slot_ids])
+
+    def quick_delete_each(self, env_id, slot_ids):
+        slot_ids = [int(slot) for slot in slot_ids]
+        if any(slot < 0 for slot in slot_ids):
+            raise ValueError("slot_ids must be non-negative")
+        return self.call_each("quick_delete", env_id, [(slot,) for slot in slot_ids])
 
     def set_attr(self, name: str, values: Union[list, tuple, object]):
         """Sets an attribute of the sub-environments.
@@ -571,7 +622,8 @@ class AsyncVectorEnv(VectorEnv):
         if all(successes):
             return
 
-        num_errors = self.num_envs - sum(successes)
+        # ``successes`` covers only the currently selected worker subset.
+        num_errors = len(successes) - sum(successes)
         assert num_errors > 0
         for i in range(num_errors):
             index, exctype, value = self.error_queue.get()

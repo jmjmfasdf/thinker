@@ -1,0 +1,36 @@
+[meta] HOST=bml-compute17
+[meta] JOBID=10479
+[meta] PROJECT_ROOT=/home/work/jeongmin/thinker-dynamic
+[meta] WORKDIR=/scratch/jeongmin/dt-10479/p
+[meta] XPID=dynamic-enduro-v5-test-10479
+[meta] SLURM_JOB_PARTITION=h200mig
+[meta] SLURM_JOB_NODELIST=bml-compute17
+[meta] SLURM_CPUS_PER_TASK=12
+[meta] SLURM_MEM_PER_NODE=63300
+[meta] SLURM_JOB_GPUS=2
+[meta] CUDA_VISIBLE_DEVICES=MIG-544ba0ea-c307-5172-821c-8cf430b08072
+[stage-in] syncing current Dynamic Thinker source
+[env] python=/home/jeongmin/miniconda3/envs/thinker/bin/python
+Python 3.10.20
+[preflight] importing Dynamic Thinker, Enduro-v5, and W&B
+[preflight] cenv= /scratch/jeongmin/dt-10479/p/thinker/thinker/cenv.cpython-310-x86_64-linux-gnu.so
+[preflight] Enduro observation= (1, 4, 84, 84) uint8
+[preflight] W&B entity= jmme425
+[run] /home/jeongmin/miniconda3/envs/thinker/bin/python train.py --name Enduro-v5 --xpid dynamic-enduro-v5-test-10479 --dynamic_search True --wrapper_type 0 --max_search_steps 40 --think_cost 0.002 --reward_clip 1 --model_size_nn 2 --discounting 0.99 --envpool True --auto_res False --ray_cpu 12 --ray_gpu 1 --gpu_learn 0.5 --gpu_learn_actor 0.25 --gpu_self_play 0.25 --use_wandb True
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[periodic-stage-out] syncing training logs
+[stage-out] syncing training logs

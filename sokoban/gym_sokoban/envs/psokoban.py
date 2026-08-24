@@ -36,6 +36,10 @@ class SokobanEnv(gym.Env):
                                 seed=seed)
         self.action_space = Discrete(5)
         self.observation_space = Box(low=0, high=255, shape=(self.sokoban.obs_x, self.sokoban.obs_y, 3), dtype=np.uint8)
+        # Perfect-model search keeps one simulator snapshot per tree node.  A
+        # singleton save_state cannot represent branches that are alive at the
+        # same time, so snapshots are keyed by the slot supplied by cPerfect.
+        self.save_states = {}
         # self.sokoban.reset()
 
     def step(self, action):
@@ -52,11 +56,20 @@ class SokobanEnv(gym.Env):
             return self.sokoban.reset()
             
         
-    def quick_save(self):
-        self.save_state = self.sokoban.clone_state()
+    def quick_save(self, slot_id=0):
+        slot_id = int(slot_id)
+        if slot_id < 0:
+            raise ValueError(f"Snapshot slot must be non-negative, got {slot_id}.")
+        self.save_states[slot_id] = self.sokoban.clone_state()
 
-    def quick_load(self):
-        self.sokoban.restore_state(self.save_state)
+    def quick_load(self, slot_id=0):
+        slot_id = int(slot_id)
+        if slot_id not in self.save_states:
+            raise ValueError(f"No state has been saved in slot {slot_id}.")
+        self.sokoban.restore_state(self.save_states[slot_id])
+
+    def quick_delete(self, slot_id=0):
+        self.save_states.pop(int(slot_id), None)
         
     def clone_state(self):
         return self.sokoban.clone_state()
@@ -73,4 +86,4 @@ class SokobanEnv(gym.Env):
 
     @step_n.setter
     def step_n(self, step_n):
-        self.sokoban.step_n = step_n  
+        self.sokoban.step_n = step_n

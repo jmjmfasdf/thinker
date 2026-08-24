@@ -1,0 +1,420 @@
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_stream, resource_exists
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_stream, resource_exists
+Initializing...
+fatal: not a git repository (or any of the parent directories): .git
+2026-08-24 14:03:02,312	INFO worker.py:2003 -- Started a local Ray instance. View the dashboard at [1m[32m127.0.0.1:8265 [39m[22m
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/ray/_private/worker.py:2051: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+Detected 2 GPU 16 CPU
+[36m(pid=2124068)[0m Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+[36m(pid=2124068)[0m Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+[36m(pid=2124068)[0m Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+[36m(pid=2124068)[0m See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+[36m(pid=2124079)[0m /home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+[36m(pid=2124079)[0m   from pkg_resources import resource_stream, resource_exists
+[36m(SelfPlayWorker pid=2124068)[0m Initializing actor 0 with device cuda
+[36m(SelfPlayWorker pid=2124068)[0m Initializing env 0 with device cuda
+[36m(SelfPlayWorker pid=2124068)[0m Init. environment with obs space [91mBox(0, 255, (12, 84, 84), uint8)[0m and action space [91mDiscrete(9)[0m
+[36m(SelfPlayWorker pid=2124068)[0m Model network size: 11061450
+[36m(SelfPlayWorker pid=2124068)[0m Actor network size: 1708875
+[36m(SelfPlayWorker pid=2124068)[0m Actor 0 started.
+[36m(SelfPlayWorker pid=2124068)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/actor_net.py:944: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(SelfPlayWorker pid=2124068)[0m   with autocast(enabled=self.float16):
+[36m(SelfPlayWorker pid=2124068)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/actor_net.py:1477: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(SelfPlayWorker pid=2124068)[0m   with autocast(enabled=self.float16):
+[36m(pid=2124070)[0m Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.[32m [repeated 3x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)[0m
+[36m(pid=2124070)[0m Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.[32m [repeated 3x across cluster][0m
+[36m(pid=2124070)[0m Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.[32m [repeated 3x across cluster][0m
+[36m(pid=2124070)[0m See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.[32m [repeated 3x across cluster][0m
+[36m(ActorLearner pid=2124070)[0m Init. actor-learning: Using CUDA.
+[36m(pid=2124070)[0m /home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.[32m [repeated 3x across cluster][0m
+[36m(pid=2124070)[0m   from pkg_resources import resource_stream, resource_exists[32m [repeated 3x across cluster][0m
+[36m(ModelLearner pid=2124080)[0m Init. model-learning: Using CUDA.
+[36m(ActorBuffer pid=2124076)[0m Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+[36m(ActorBuffer pid=2124076)[0m Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+[36m(ActorBuffer pid=2124076)[0m Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+[36m(ActorBuffer pid=2124076)[0m See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+[36m(ActorBuffer pid=2124076)[0m /home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+[36m(ActorBuffer pid=2124076)[0m   from pkg_resources import resource_stream, resource_exists
+[36m(ModelLearner pid=2124080)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/learn_model.py:97: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+[36m(ModelLearner pid=2124080)[0m   self.scaler_m = GradScaler(init_scale=2**3) if self.flags.float16 else None
+[36m(ModelLearner pid=2124080)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/learn_model.py:105: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+[36m(ModelLearner pid=2124080)[0m   self.scaler_p = GradScaler(init_scale=2**3) if self.flags.float16 else None
+[36m(ModelLearner pid=2124080)[0m Symlinked log directory: /scratch/jeongmin/dt-10410/p/logs/thinker/latest
+[36m(ModelLearner pid=2124080)[0m Saving arguments to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/meta_model.json
+[36m(ModelLearner pid=2124080)[0m Saving messages to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/out_model.log
+[36m(ModelLearner pid=2124080)[0m Saving logs data to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/logs_model.csv
+[36m(ActorLearner pid=2124070)[0m   self.scaler = GradScaler(init_scale=2**8)
+[36m(ActorLearner pid=2124070)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/actor_net.py:944: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(ActorLearner pid=2124070)[0m   with autocast(enabled=self.float16):
+[36m(ActorLearner pid=2124070)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/actor_net.py:1477: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(ActorLearner pid=2124070)[0m   with autocast(enabled=self.float16):
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 1280/10000
+[36m(ActorLearner pid=2124070)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/learn_actor.py:195: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+[36m(ActorLearner pid=2124070)[0m Symlinked log directory: /scratch/jeongmin/dt-10410/p/logs/thinker/latest
+[36m(ActorLearner pid=2124070)[0m Saving arguments to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/meta.json
+[36m(ActorLearner pid=2124070)[0m Saving messages to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/out.log
+[36m(ActorLearner pid=2124070)[0m Saving logs data to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/logs.csv
+[36m(ActorLearner pid=2124070)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/learn_actor.py:441: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+[36m(ActorLearner pid=2124070)[0m Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:838.)
+[36m(ActorLearner pid=2124070)[0m   "\033[1;34m[%s] Steps %i @ %.1f SPS (%.1f). (T_q: %.2f) Eps %i. \033[0m"
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 320 @ 370.4 SPS (370.4). (T_q: 0.00) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.23 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.00 last_lr: 3.0000e-04
+[36m(ActorLearner pid=2124070)[0m Triggering actor step-based checkpoint at step 320 (milestone 0)
+[36m(ActorLearner pid=2124070)[0m Saving actor checkpoint to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/ckp_actor.tar
+[36m(ActorLearner pid=2124070)[0m Saved actor checkpoint at step 320 to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/ckp_actor.tar_step_320
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 1520/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 1664 @ 1110.2 SPS (1110.2). (T_q: 0.88) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.21 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.00 last_lr: 3.0000e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 1904/10000
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 2400/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 2272 @ 938.3 SPS (938.3). (T_q: 2.48) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.41 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.02 last_lr: 2.9999e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 3024/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 3024 @ 829.8 SPS (829.8). (T_q: 2.77) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.51 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.03 last_lr: 2.9999e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 3808/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 4016 @ 764.7 SPS (764.7). (T_q: 2.78) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.67 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9999e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 4608/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 5168 @ 726.8 SPS (726.8). (T_q: 2.59) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.79 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9998e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 5616/10000
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 6752/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 6464 @ 709.2 SPS (709.2). (T_q: 2.19) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.87 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.10 last_lr: 2.9998e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 7680/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 7680 @ 687.0 SPS (687.0). (T_q: 2.56) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.83 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.10 last_lr: 2.9998e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 8800/10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 8800 @ 670.3 SPS (670.3). (T_q: 2.55) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.76 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.09 last_lr: 2.9997e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Preloading: 9616/10000
+[36m(ModelLearner pid=2124080)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/learn_model.py:295: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(ModelLearner pid=2124080)[0m   with autocast(enabled=self.flags.float16):
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 9872 @ 655.9 SPS (655.9). (T_q: 2.54) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.74 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9997e-04
+[36m(ModelLearner pid=2124080)[0m /scratch/jeongmin/dt-10410/p/thinker/thinker/learn_model.py:310: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+[36m(ModelLearner pid=2124080)[0m   with autocast(enabled=self.flags.float16):
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 10000 (768[768.0]) @ 11.4 SPS (11.4). norm_m 6745.45 norm_p 2.48 total_loss_m 1.677680 total_loss_p 1.098633 fea_loss 0.110390 done_loss 0.573782
+[36m(ModelLearner pid=2124080)[0m Triggering model step-based checkpoint at step 10000 (milestone 0)
+[36m(ModelLearner pid=2124080)[0m Saving model checkpoint to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/ckp_model.tar
+[36m(ModelLearner pid=2124080)[0m Saved model checkpoint at step 10000 to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/ckp_model.tar_step_10000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 10800 @ 649.0 SPS (649.0). (T_q: 2.38) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9997e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 11456 (6144[4.2]) @ 84.3 SPS (84.3). norm_m 759.19 norm_p 0.87 total_loss_m 0.636382 total_loss_p 1.098591 fea_loss 0.007445 done_loss 0.561929
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 11712 @ 636.9 SPS (636.9). (T_q: 3.13) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.63 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9996e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 12288 (12288[5.4]) @ 157.0 SPS (157.0). norm_m 4063.81 norm_p 0.66 total_loss_m 0.180087 total_loss_p 1.098554 fea_loss 0.007521 done_loss 0.104878
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 12640 @ 634.3 SPS (634.3). (T_q: 2.53) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9996e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 13168 (18432[5.8]) @ 220.2 SPS (220.2). norm_m 1038.73 norm_p 1.75 total_loss_m 0.151310 total_loss_p 1.098567 fea_loss 0.015071 done_loss 0.000599
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 13600 @ 628.6 SPS (628.6). (T_q: 2.80) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.65 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9996e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 14080 (24576[6.0]) @ 275.9 SPS (275.9). norm_m 1575.85 norm_p 1.23 total_loss_m 0.618669 total_loss_p 1.098527 fea_loss 0.061860 done_loss 0.000071
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 14560 @ 625.0 SPS (625.0). (T_q: 2.66) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.65 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9996e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 14864 (30720[6.3]) @ 325.3 SPS (325.3). norm_m 3374.29 norm_p 3.07 total_loss_m 0.377947 total_loss_p 1.098419 fea_loss 0.037534 done_loss 0.002609
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 15408 @ 618.3 SPS (618.3). (T_q: 2.92) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.58 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9995e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 15584 (36864[6.6]) @ 369.4 SPS (369.4). norm_m 2273.71 norm_p 1.98 total_loss_m 0.303961 total_loss_p 1.098397 fea_loss 0.030356 done_loss 0.000404
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 16192 @ 612.6 SPS (612.6). (T_q: 2.91) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.54 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.03 last_lr: 2.9995e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 16240 (43008[6.9]) @ 409.2 SPS (409.2). norm_m 4603.05 norm_p 1.34 total_loss_m 0.256596 total_loss_p 1.098351 fea_loss 0.025651 done_loss 0.000085
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 16752 (49152[7.3]) @ 444.9 SPS (444.9). norm_m 5282.68 norm_p 2.66 total_loss_m 0.277277 total_loss_p 1.098313 fea_loss 0.027721 done_loss 0.000063
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 16752 @ 607.2 SPS (607.2). (T_q: 2.90) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.37 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9995e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 17408 (55296[7.5]) @ 477.4 SPS (477.4). norm_m 2919.64 norm_p 2.68 total_loss_m 0.177860 total_loss_p 1.098347 fea_loss 0.017782 done_loss 0.000037
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 17408 @ 603.1 SPS (603.1). (T_q: 2.84) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.45 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9995e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 18144 (61440[7.5]) @ 506.7 SPS (506.7). norm_m 3305.68 norm_p 4.20 total_loss_m 0.191075 total_loss_p 1.098394 fea_loss 0.019106 done_loss 0.000012
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 18256 @ 599.1 SPS (599.1). (T_q: 2.80) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.57 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9995e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 18944 (67584[7.6]) @ 532.6 SPS (532.6). norm_m 7181.20 norm_p 1.74 total_loss_m 0.245420 total_loss_p 1.098316 fea_loss 0.024540 done_loss 0.000017
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 19184 @ 595.7 SPS (595.7). (T_q: 2.87) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9994e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 19728 (73728[7.6]) @ 557.5 SPS (557.5). norm_m 2686.70 norm_p 3.34 total_loss_m 0.145474 total_loss_p 1.098339 fea_loss 0.014546 done_loss 0.000014
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 20144 @ 593.3 SPS (593.3). (T_q: 2.79) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.65 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9994e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 20560 (79872[7.6]) @ 579.8 SPS (579.8). norm_m 4557.91 norm_p 2.38 total_loss_m 0.189075 total_loss_p 1.098237 fea_loss 0.018907 done_loss 0.000007
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 20960 (86016[7.8]) @ 600.7 SPS (600.7). norm_m 1796.33 norm_p 1.46 total_loss_m 0.188290 total_loss_p 1.098358 fea_loss 0.018822 done_loss 0.000072
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 20944 @ 582.9 SPS (582.9). (T_q: 3.80) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.55 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9994e-04
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 21664 @ 584.6 SPS (584.6). (T_q: 2.21) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.49 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9994e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 21760 (92160[7.8]) @ 619.3 SPS (619.3). norm_m 3016.61 norm_p 2.46 total_loss_m 0.148435 total_loss_p 1.098260 fea_loss 0.014834 done_loss 0.000096
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 22432 (97536[7.8]) @ 633.4 SPS (633.4). norm_m 3492.76 norm_p 2.07 total_loss_m 0.107809 total_loss_p 1.098259 fea_loss 0.010776 done_loss 0.000051
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 22416 @ 584.3 SPS (584.3). (T_q: 2.46) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.51 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9993e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 23232 (102912[7.8]) @ 647.0 SPS (647.0). norm_m 3717.03 norm_p 1.91 total_loss_m 0.111480 total_loss_p 1.098261 fea_loss 0.011143 done_loss 0.000049
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 23232 @ 582.8 SPS (582.8). (T_q: 2.82) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.54 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9993e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 24048 (109056[7.8]) @ 662.9 SPS (662.9). norm_m 2268.99 norm_p 3.31 total_loss_m 0.105969 total_loss_p 1.098148 fea_loss 0.010591 done_loss 0.000062
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 24128 @ 579.2 SPS (579.2). (T_q: 3.06) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.61 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9993e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 24848 (115200[7.8]) @ 678.1 SPS (678.1). norm_m 2552.40 norm_p 3.88 total_loss_m 0.144837 total_loss_p 1.098192 fea_loss 0.014479 done_loss 0.000047
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 25120 @ 576.7 SPS (576.7). (T_q: 2.88) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.68 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.10 last_lr: 2.9992e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 25824 (121344[7.7]) @ 692.2 SPS (692.2). norm_m 5984.28 norm_p 8.54 total_loss_m 0.395668 total_loss_p 1.098021 fea_loss 0.039553 done_loss 0.000138
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 26160 @ 577.0 SPS (577.0). (T_q: 2.52) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.70 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.11 last_lr: 2.9992e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 26736 (127488[7.6]) @ 704.6 SPS (704.6). norm_m 5329.37 norm_p 4.89 total_loss_m 0.413304 total_loss_p 1.097491 fea_loss 0.041326 done_loss 0.000044
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 27184 @ 575.3 SPS (575.3). (T_q: 2.73) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.70 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.11 last_lr: 2.9992e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 27584 (132864[7.6]) @ 714.0 SPS (714.0). norm_m 7529.41 norm_p 3.89 total_loss_m 0.371232 total_loss_p 1.097342 fea_loss 0.037112 done_loss 0.000109
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 28208 @ 574.8 SPS (574.8). (T_q: 2.53) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.70 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.10 last_lr: 2.9992e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 28464 (138240[7.5]) @ 723.0 SPS (723.0). norm_m 13037.46 norm_p 2.62 total_loss_m 0.334794 total_loss_p 1.097380 fea_loss 0.033467 done_loss 0.000127
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 29200 (143616[7.5]) @ 731.5 SPS (731.5). norm_m 8989.52 norm_p 3.28 total_loss_m 0.314522 total_loss_p 1.097539 fea_loss 0.031429 done_loss 0.000232
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 29152 @ 573.2 SPS (573.2). (T_q: 2.70) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.63 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9991e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 29968 (149760[7.5]) @ 741.9 SPS (741.9). norm_m 5967.89 norm_p 2.87 total_loss_m 0.273022 total_loss_p 1.097808 fea_loss 0.027288 done_loss 0.000137
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 29968 @ 572.7 SPS (572.7). (T_q: 2.71) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.55 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9991e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 30576 (153600[7.5]) @ 740.5 SPS (740.5). norm_m 6656.93 norm_p 2.10 total_loss_m 0.323244 total_loss_p 1.097923 fea_loss 0.032310 done_loss 0.000146
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 30688 @ 571.8 SPS (571.8). (T_q: 2.65) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.50 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9991e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 31344 (157440[7.4]) @ 737.1 SPS (737.1). norm_m 6172.88 norm_p 2.65 total_loss_m 0.279595 total_loss_p 1.098118 fea_loss 0.027940 done_loss 0.000190
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 31408 @ 571.1 SPS (571.1). (T_q: 2.66) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.48 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9991e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 31952 (160512[7.3]) @ 732.6 SPS (732.6). norm_m 7631.25 norm_p 2.68 total_loss_m 0.254034 total_loss_p 1.098169 fea_loss 0.025393 done_loss 0.000109
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 32096 @ 577.9 SPS (569.7). (T_q: 2.61) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.47 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9990e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 32720 (164352[7.2]) @ 728.5 SPS (728.5). norm_m 12394.82 norm_p 3.24 total_loss_m 0.312148 total_loss_p 1.098041 fea_loss 0.031207 done_loss 0.000076
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 32768 @ 532.3 SPS (569.3). (T_q: 2.53) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.47 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9990e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 33488 (168192[7.2]) @ 728.2 SPS (728.2). norm_m 8415.23 norm_p 1.62 total_loss_m 0.318231 total_loss_p 1.098168 fea_loss 0.031806 done_loss 0.000172
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 33520 @ 533.6 SPS (569.6). (T_q: 2.43) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.50 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9990e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 34256 (172032[7.1]) @ 726.4 SPS (726.4). norm_m 14383.20 norm_p 1.63 total_loss_m 0.445528 total_loss_p 1.098201 fea_loss 0.044534 done_loss 0.000187
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 34240 @ 536.9 SPS (570.4). (T_q: 2.22) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.49 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9990e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 35024 (175872[7.0]) @ 725.2 SPS (725.2). norm_m 9585.05 norm_p 3.99 total_loss_m 0.312250 total_loss_p 1.098307 fea_loss 0.031210 done_loss 0.000151
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 35040 @ 538.3 SPS (569.7). (T_q: 2.76) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.55 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9989e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 35792 (179712[7.0]) @ 724.8 SPS (724.8). norm_m 9114.56 norm_p 2.23 total_loss_m 0.440840 total_loss_p 1.098332 fea_loss 0.044070 done_loss 0.000144
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 35872 @ 539.5 SPS (569.5). (T_q: 2.66) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.57 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9989e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 36720 (184320[6.9]) @ 725.1 SPS (725.1). norm_m 6075.94 norm_p 2.63 total_loss_m 0.234980 total_loss_p 1.098194 fea_loss 0.023470 done_loss 0.000281
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 36784 @ 537.2 SPS (567.8). (T_q: 2.86) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.09 last_lr: 2.9989e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 37728 (188928[6.8]) @ 980.8 SPS (728.4). norm_m 9571.87 norm_p 3.00 total_loss_m 0.459346 total_loss_p 1.098322 fea_loss 0.045934 done_loss 0.000009
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 37776 @ 538.9 SPS (568.2). (T_q: 2.34) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.67 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.10 last_lr: 2.9989e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 38784 (194304[6.8]) @ 978.8 SPS (733.0). norm_m 7586.28 norm_p 1.95 total_loss_m 0.700472 total_loss_p 1.098220 fea_loss 0.070045 done_loss 0.000022
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 38848 @ 539.7 SPS (568.0). (T_q: 2.56) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.73 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.12 last_lr: 2.9988e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 39952 (200448[6.7]) @ 973.7 SPS (738.3). norm_m 10457.99 norm_p 2.72 total_loss_m 0.738182 total_loss_p 1.098099 fea_loss 0.073817 done_loss 0.000012
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 39952 @ 540.6 SPS (567.6). (T_q: 2.63) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.75 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.13 last_lr: 2.9988e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 41040 (205824[6.6]) @ 968.1 SPS (742.3). norm_m 4657.95 norm_p 4.22 total_loss_m 0.412601 total_loss_p 1.098141 fea_loss 0.041259 done_loss 0.000006
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 41040 @ 540.0 SPS (567.2). (T_q: 2.68) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.73 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.12 last_lr: 2.9988e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 42000 (210432[6.6]) @ 960.6 SPS (744.8). norm_m 26398.89 norm_p 2.33 total_loss_m 1.020845 total_loss_p 1.098050 fea_loss 0.102074 done_loss 0.000110
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 42080 @ 541.6 SPS (567.0). (T_q: 2.53) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.72 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.11 last_lr: 2.9987e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 43088 (215808[6.5]) @ 954.0 SPS (748.1). norm_m 9335.96 norm_p 1.60 total_loss_m 0.644288 total_loss_p 1.098327 fea_loss 0.064398 done_loss 0.000309
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 43088 @ 541.2 SPS (567.3). (T_q: 2.33) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.68 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.10 last_lr: 2.9987e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 43936 (220416[6.5]) @ 942.5 SPS (748.3). norm_m 11254.15 norm_p 1.92 total_loss_m 0.658093 total_loss_p 1.098366 fea_loss 0.065787 done_loss 0.000221
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 44048 @ 540.3 SPS (566.3). (T_q: 2.75) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.65 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9987e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 44864 (225024[6.5]) @ 932.0 SPS (749.1). norm_m 8882.12 norm_p 1.52 total_loss_m 0.278311 total_loss_p 1.098486 fea_loss 0.027827 done_loss 0.000038
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 44928 @ 540.1 SPS (566.2). (T_q: 2.55) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.61 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9987e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 45632 (228864[6.4]) @ 921.5 SPS (749.1). norm_m 9918.18 norm_p 1.03 total_loss_m 0.550556 total_loss_p 1.098473 fea_loss 0.055037 done_loss 0.000190
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 45760 @ 542.2 SPS (566.8). (T_q: 2.21) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.57 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9986e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 46544 (233472[6.4]) @ 908.3 SPS (748.3). norm_m 6227.51 norm_p 1.63 total_loss_m 0.320103 total_loss_p 1.098483 fea_loss 0.031945 done_loss 0.000653
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 46576 @ 543.3 SPS (566.6). (T_q: 2.52) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.55 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9986e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 47312 (237312[6.4]) @ 894.9 SPS (746.8). norm_m 8843.59 norm_p 0.73 total_loss_m 0.255855 total_loss_p 1.098536 fea_loss 0.025585 done_loss 0.000005
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 47360 @ 544.3 SPS (566.3). (T_q: 2.65) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.53 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9986e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 48096 (241152[6.3]) @ 884.4 SPS (746.3). norm_m 10969.73 norm_p 1.76 total_loss_m 0.388575 total_loss_p 1.098446 fea_loss 0.038846 done_loss 0.000112
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 48144 @ 545.5 SPS (566.4). (T_q: 2.38) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.52 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9986e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 48848 (244992[6.3]) @ 870.0 SPS (744.4). norm_m 4334.95 norm_p 1.34 total_loss_m 0.156255 total_loss_p 1.098367 fea_loss 0.015614 done_loss 0.000114
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 48880 @ 546.8 SPS (566.4). (T_q: 2.49) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.51 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9985e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 49616 (248832[6.3]) @ 858.8 SPS (743.9). norm_m 10665.71 norm_p 1.18 total_loss_m 0.236747 total_loss_p 1.098373 fea_loss 0.023663 done_loss 0.000113
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 49728 @ 547.5 SPS (566.2). (T_q: 2.58) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.57 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9985e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 50544 (253440[6.3]) @ 848.1 SPS (744.1). norm_m 4025.62 norm_p 1.70 total_loss_m 0.348201 total_loss_p 1.098363 fea_loss 0.034801 done_loss 0.000195
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 50544 @ 548.8 SPS (566.5). (T_q: 2.40) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.56 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9985e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 51312 (257280[6.2]) @ 837.3 SPS (743.5). norm_m 5734.00 norm_p 1.35 total_loss_m 0.180796 total_loss_p 1.098361 fea_loss 0.018075 done_loss 0.000048
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 51360 @ 554.5 SPS (566.2). (T_q: 2.60) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.56 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9985e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 52240 (261888[6.2]) @ 831.3 SPS (744.6). norm_m 10215.91 norm_p 0.68 total_loss_m 0.271514 total_loss_p 1.098366 fea_loss 0.027151 done_loss 0.000000
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 52256 @ 553.3 SPS (566.5). (T_q: 2.51) Eps 0. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.60 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9984e-04
+[36m(SelfPlayWorker pid=2124068)[0m [DEBUG] Episode termination detected:
+[36m(SelfPlayWorker pid=2124068)[0m   - done: tensor([False, False, False,  True, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False,  True, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - truncated_done: tensor([False, False, False, False, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - real_done: tensor([False, False, False,  True, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False,  True, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - step_status: tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - counter: 12658
+[36m(SelfPlayWorker pid=2124068)[0m [DEBUG] Episode termination detected:
+[36m(SelfPlayWorker pid=2124068)[0m   - done: tensor([False, False,  True, False,  True, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m          True,  True, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - truncated_done: tensor([False, False, False, False, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - real_done: tensor([False, False,  True, False,  True, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m          True,  True, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - step_status: tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - counter: 12661
+[36m(SelfPlayWorker pid=2124068)[0m [DEBUG] Episode termination detected:
+[36m(SelfPlayWorker pid=2124068)[0m   - done: tensor([False, False, False, False, False, False, False, False, False,  True,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - truncated_done: tensor([False, False, False, False, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - real_done: tensor([False, False, False, False, False, False, False, False, False,  True,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - step_status: tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - counter: 12664
+[36m(SelfPlayWorker pid=2124068)[0m [DEBUG] Episode termination detected:
+[36m(SelfPlayWorker pid=2124068)[0m   - done: tensor([ True, False, False, False, False, False, False, False,  True, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False,  True, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - truncated_done: tensor([False, False, False, False, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - real_done: tensor([ True, False, False, False, False, False, False, False,  True, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False,  True, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - step_status: tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - counter: 12674
+[36m(SelfPlayWorker pid=2124068)[0m [DEBUG] Episode termination detected:
+[36m(SelfPlayWorker pid=2124068)[0m   - done: tensor([False, False, False, False, False, False, False,  True, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - truncated_done: tensor([False, False, False, False, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - real_done: tensor([False, False, False, False, False, False, False,  True, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - step_status: tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - counter: 12677
+[36m(SelfPlayWorker pid=2124068)[0m [DEBUG] Episode termination detected:
+[36m(SelfPlayWorker pid=2124068)[0m   - done: tensor([False,  True, False, False, False,  True, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - truncated_done: tensor([False, False, False, False, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - real_done: tensor([False,  True, False, False, False,  True, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - step_status: tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - counter: 12680
+[36m(SelfPlayWorker pid=2124068)[0m [DEBUG] Episode termination detected:
+[36m(SelfPlayWorker pid=2124068)[0m   - done: tensor([False, False, False, False, False, False,  True, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False,  True, False,  True], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - truncated_done: tensor([False, False, False, False, False, False, False, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False, False, False, False], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - real_done: tensor([False, False, False, False, False, False,  True, False, False, False,
+[36m(SelfPlayWorker pid=2124068)[0m         False, False, False,  True, False,  True], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - step_status: tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+[36m(SelfPlayWorker pid=2124068)[0m   - counter: 12684
+[36m(ActorLearner pid=2124070)[0m [DEBUG] Episode counter increased:
+[36m(ActorLearner pid=2124070)[0m   - real_done_count: 6
+[36m(ActorLearner pid=2124070)[0m   - tot_eps: 6
+[36m(ActorLearner pid=2124070)[0m   - train_actor_out.real_done: tensor([[False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         ...,
+[36m(ActorLearner pid=2124070)[0m         [False, False,  True,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False]], device='cuda:0')
+[36m(ActorLearner pid=2124070)[0m   - train_actor_out.done: tensor([[False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         ...,
+[36m(ActorLearner pid=2124070)[0m         [False, False,  True,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False]], device='cuda:0')
+[36m(ActorLearner pid=2124070)[0m   - train_actor_out.truncated_done: tensor([[False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         ...,
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False]], device='cuda:0')
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 53152 (266496[6.2]) @ 825.0 SPS (745.8). norm_m 5922.02 norm_p 1.29 total_loss_m 0.174997 total_loss_p 1.098441 fea_loss 0.017495 done_loss 0.000051
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 53152 @ 553.5 SPS (566.7). (T_q: 2.44) Eps 6. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9984e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 54304 (271872[6.1]) @ 820.2 SPS (748.9). norm_m 5088.79 norm_p 3.45 total_loss_m 0.471593 total_loss_p 1.098463 fea_loss 0.047144 done_loss 0.000153
+[36m(ActorLearner pid=2124070)[0m [DEBUG] Episode counter increased:
+[36m(ActorLearner pid=2124070)[0m   - real_done_count: 10
+[36m(ActorLearner pid=2124070)[0m   - tot_eps: 16
+[36m(ActorLearner pid=2124070)[0m   - train_actor_out.real_done: tensor([[False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         ...,
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False]], device='cuda:0')
+[36m(ActorLearner pid=2124070)[0m   - train_actor_out.done: tensor([[False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         ...,
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False]], device='cuda:0')
+[36m(ActorLearner pid=2124070)[0m   - train_actor_out.truncated_done: tensor([[False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         ...,
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False],
+[36m(ActorLearner pid=2124070)[0m         [False, False, False,  ..., False, False, False]], device='cuda:0')
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 54304 @ 553.0 SPS (566.1). (T_q: 2.89) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.77 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.11 last_lr: 2.9984e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 55600 (277248[6.1]) @ 817.3 SPS (753.1). norm_m 7784.19 norm_p 7.67 total_loss_m 0.446229 total_loss_p 1.097631 fea_loss 0.044558 done_loss 0.000646
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 55648 @ 554.5 SPS (565.6). (T_q: 2.82) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.91 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.13 last_lr: 2.9983e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 56592 (283392[6.1]) @ 816.6 SPS (758.3). norm_m 9564.49 norm_p 20.01 total_loss_m 0.717793 total_loss_p 1.097198 fea_loss 0.071489 done_loss 0.002902
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 56784 @ 554.6 SPS (564.8). (T_q: 3.10) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.77 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.11 last_lr: 2.9983e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 57456 (288000[6.1]) @ 809.2 SPS (759.3). norm_m 7241.93 norm_p 8.88 total_loss_m 0.356249 total_loss_p 1.097019 fea_loss 0.035585 done_loss 0.000396
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 57824 @ 552.3 SPS (563.8). (T_q: 3.14) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.72 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.09 last_lr: 2.9983e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 58416 (292608[6.0]) @ 803.5 SPS (760.2). norm_m 10154.90 norm_p 9.61 total_loss_m 0.469409 total_loss_p 1.087914 fea_loss 0.039009 done_loss 0.079324
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 58832 @ 553.5 SPS (563.9). (T_q: 2.71) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.68 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9982e-04
+[36m(ModelLearner pid=2124080)[0m Saving model checkpoint to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/ckp_model.tar
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 59200 (296448[6.0]) @ 796.2 SPS (760.3). norm_m 8011.94 norm_p 5.46 total_loss_m 0.298663 total_loss_p 1.098138 fea_loss 0.029476 done_loss 0.003900
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 59680 @ 553.3 SPS (563.7). (T_q: 2.72) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.58 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9982e-04
+[36m(ActorLearner pid=2124070)[0m Saving actor checkpoint to /scratch/jeongmin/dt-10410/p/logs/thinker/dynamic-enduro-v5-test-10410/ckp_actor.tar
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 59920 (300288[6.0]) @ 785.6 SPS (758.8). norm_m 6555.81 norm_p 2.68 total_loss_m 0.223648 total_loss_p 1.098114 fea_loss 0.021858 done_loss 0.005064
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 60432 @ 552.7 SPS (562.8). (T_q: 2.99) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.51 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9982e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 60528 (303360[6.0]) @ 771.8 SPS (756.8). norm_m 3578.79 norm_p 3.72 total_loss_m 0.260754 total_loss_p 1.091014 fea_loss 0.021880 done_loss 0.041958
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 61168 @ 553.8 SPS (563.2). (T_q: 2.45) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.50 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9982e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 61296 (307200[6.0]) @ 770.6 SPS (755.2). norm_m 4432.17 norm_p 6.66 total_loss_m 0.341487 total_loss_p 1.097994 fea_loss 0.032617 done_loss 0.015314
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 61904 @ 552.7 SPS (562.3). (T_q: 3.07) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.49 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9981e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 61904 (310272[6.0]) @ 770.7 SPS (753.3). norm_m 4570.55 norm_p 4.17 total_loss_m 0.498504 total_loss_p 1.090825 fea_loss 0.045269 done_loss 0.045812
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 62672 @ 552.4 SPS (562.0). (T_q: 2.93) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.52 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9981e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 62672 (314112[6.0]) @ 772.2 SPS (751.4). norm_m 2669.32 norm_p 2.32 total_loss_m 0.222827 total_loss_p 1.098270 fea_loss 0.021709 done_loss 0.005736
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 63440 (317952[5.9]) @ 777.0 SPS (751.2). norm_m 8319.31 norm_p 3.82 total_loss_m 0.293816 total_loss_p 1.098314 fea_loss 0.029131 done_loss 0.002507
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 63488 @ 553.0 SPS (561.7). (T_q: 2.76) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.56 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9981e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 64384 (322560[5.9]) @ 779.6 SPS (751.9). norm_m 5804.45 norm_p 2.91 total_loss_m 0.239264 total_loss_p 1.098185 fea_loss 0.023695 done_loss 0.002316
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 64400 @ 553.7 SPS (561.9). (T_q: 2.60) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9981e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 65328 (327168[5.9]) @ 784.5 SPS (752.8). norm_m 6178.14 norm_p 3.38 total_loss_m 0.339396 total_loss_p 1.098297 fea_loss 0.033854 done_loss 0.000859
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 65392 @ 552.7 SPS (561.7). (T_q: 2.87) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.67 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.10 last_lr: 2.9980e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 66464 (332544[5.9]) @ 794.1 SPS (756.1). norm_m 6481.97 norm_p 5.11 total_loss_m 0.740242 total_loss_p 1.092170 fea_loss 0.071454 done_loss 0.025702
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 66576 @ 549.7 SPS (560.8). (T_q: 3.30) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.79 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.13 last_lr: 2.9980e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 67408 (337152[5.9]) @ 798.5 SPS (757.5). norm_m 4988.29 norm_p 9.30 total_loss_m 0.653716 total_loss_p 1.094346 fea_loss 0.063905 done_loss 0.014667
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 67664 @ 550.6 SPS (561.0). (T_q: 2.57) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.74 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.11 last_lr: 2.9980e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 68208 (341760[5.9]) @ 802.1 SPS (758.6). norm_m 9145.75 norm_p 9.53 total_loss_m 0.608214 total_loss_p 1.097663 fea_loss 0.060731 done_loss 0.000904
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 68640 @ 548.4 SPS (560.0). (T_q: 3.21) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.67 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9979e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 68976 (345600[5.9]) @ 796.8 SPS (757.9). norm_m 5591.73 norm_p 9.70 total_loss_m 0.661569 total_loss_p 1.097857 fea_loss 0.066101 done_loss 0.000555
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 69408 @ 550.4 SPS (560.1). (T_q: 2.45) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.52 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9979e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 69744 (349440[5.8]) @ 789.8 SPS (757.2). norm_m 3449.01 norm_p 4.53 total_loss_m 0.422944 total_loss_p 1.097748 fea_loss 0.042199 done_loss 0.000957
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 70112 @ 550.6 SPS (560.5). (T_q: 2.49) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.48 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9979e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 70352 (352512[5.8]) @ 778.6 SPS (755.2). norm_m 4713.75 norm_p 6.98 total_loss_m 0.624450 total_loss_p 1.097190 fea_loss 0.062389 done_loss 0.000560
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 70800 @ 549.6 SPS (560.0). (T_q: 2.87) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.47 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9979e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 70976 (355584[5.8]) @ 767.2 SPS (752.6). norm_m 6017.37 norm_p 2.30 total_loss_m 0.635437 total_loss_p 1.097730 fea_loss 0.063487 done_loss 0.000570
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 71488 @ 549.6 SPS (559.9). (T_q: 2.58) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.46 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.04 last_lr: 2.9979e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 71584 (358656[5.8]) @ 760.3 SPS (751.1). norm_m 5210.13 norm_p 8.45 total_loss_m 0.835863 total_loss_p 1.098557 fea_loss 0.083535 done_loss 0.000514
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 72208 @ 550.2 SPS (560.0). (T_q: 2.68) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.49 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9978e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 72208 (361728[5.8]) @ 751.0 SPS (749.3). norm_m 4709.17 norm_p 3.48 total_loss_m 1.100542 total_loss_p 1.098316 fea_loss 0.109990 done_loss 0.000643
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 72976 @ 549.0 SPS (559.5). (T_q: 2.94) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.52 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.05 last_lr: 2.9978e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 72976 (365568[5.8]) @ 747.6 SPS (748.0). norm_m 4839.66 norm_p 5.20 total_loss_m 0.578490 total_loss_p 1.098196 fea_loss 0.057816 done_loss 0.000334
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 73744 (369408[5.8]) @ 745.2 SPS (747.6). norm_m 4571.50 norm_p 2.70 total_loss_m 0.500014 total_loss_p 1.093833 fea_loss 0.048188 done_loss 0.018138
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 73808 @ 547.9 SPS (559.2). (T_q: 3.01) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.57 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.06 last_lr: 2.9978e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 74720 (374016[5.8]) @ 747.1 SPS (748.4). norm_m 2788.28 norm_p 4.51 total_loss_m 0.700725 total_loss_p 1.092387 fea_loss 0.066813 done_loss 0.032594
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 74720 @ 549.9 SPS (559.6). (T_q: 2.51) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.61 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9978e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 75584 (378624[5.8]) @ 748.9 SPS (748.5). norm_m 8315.45 norm_p 4.68 total_loss_m 0.514979 total_loss_p 1.098378 fea_loss 0.051429 done_loss 0.000689
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 75648 @ 548.8 SPS (559.1). (T_q: 2.96) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.63 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9977e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 76496 (383232[5.8]) @ 750.5 SPS (748.2). norm_m 4850.06 norm_p 2.36 total_loss_m 0.184631 total_loss_p 1.098240 fea_loss 0.018291 done_loss 0.001725
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 76528 @ 546.8 SPS (558.7). (T_q: 2.92) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.61 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9977e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 77440 (387840[5.8]) @ 752.0 SPS (748.4). norm_m 8880.53 norm_p 2.69 total_loss_m 0.241612 total_loss_p 1.098018 fea_loss 0.023948 done_loss 0.002136
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 77472 @ 545.7 SPS (558.3). (T_q: 2.98) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.64 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9977e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 78384 (392448[5.7]) @ 756.8 SPS (749.0). norm_m 15182.17 norm_p 2.97 total_loss_m 0.365300 total_loss_p 1.098185 fea_loss 0.036386 done_loss 0.001440
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 78384 @ 546.1 SPS (558.4). (T_q: 2.67) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.09 last_lr: 2.9976e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 79392 (397056[5.7]) @ 761.7 SPS (750.4). norm_m 4561.72 norm_p 3.10 total_loss_m 0.346533 total_loss_p 1.092445 fea_loss 0.032733 done_loss 0.019206
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 79392 @ 546.2 SPS (558.5). (T_q: 2.47) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.68 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.09 last_lr: 2.9976e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 80192 (401664[5.7]) @ 761.1 SPS (750.3). norm_m 2956.58 norm_p 2.05 total_loss_m 0.451064 total_loss_p 1.097879 fea_loss 0.045037 done_loss 0.000690
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 80288 @ 544.5 SPS (558.0). (T_q: 2.83) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.61 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.09 last_lr: 2.9976e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 81104 (406272[5.7]) @ 762.0 SPS (750.2). norm_m 3268.72 norm_p 3.77 total_loss_m 0.498643 total_loss_p 1.090694 fea_loss 0.046485 done_loss 0.033790
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 81184 @ 544.3 SPS (557.8). (T_q: 2.66) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.09 last_lr: 2.9976e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 82048 (410880[5.7]) @ 760.8 SPS (750.4). norm_m 19156.05 norm_p 3.51 total_loss_m 0.370127 total_loss_p 1.098128 fea_loss 0.036895 done_loss 0.001172
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 82112 @ 543.1 SPS (557.6). (T_q: 2.83) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.63 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9975e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 82960 (415488[5.7]) @ 759.0 SPS (750.4). norm_m 8258.04 norm_p 3.64 total_loss_m 0.344435 total_loss_p 1.098246 fea_loss 0.034285 done_loss 0.001582
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 83040 @ 542.0 SPS (557.2). (T_q: 2.92) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9975e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 83904 (420096[5.7]) @ 754.9 SPS (751.0). norm_m 42446.11 norm_p 2.03 total_loss_m 0.312854 total_loss_p 1.098128 fea_loss 0.030725 done_loss 0.005606
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 83968 @ 541.4 SPS (557.2). (T_q: 2.54) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.64 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9975e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 84800 (424704[5.7]) @ 747.7 SPS (751.2). norm_m 4831.67 norm_p 1.23 total_loss_m 0.279143 total_loss_p 1.098061 fea_loss 0.027731 done_loss 0.001832
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 84848 @ 540.4 SPS (557.1). (T_q: 2.75) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.60 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9975e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 85712 (429312[5.7]) @ 737.8 SPS (751.2). norm_m 20052.86 norm_p 3.31 total_loss_m 0.519984 total_loss_p 1.097973 fea_loss 0.051957 done_loss 0.000414
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 85776 @ 540.5 SPS (556.8). (T_q: 2.81) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.63 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.08 last_lr: 2.9974e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 86640 (433920[5.7]) @ 734.2 SPS (750.7). norm_m 9624.71 norm_p 5.04 total_loss_m 0.441123 total_loss_p 1.098157 fea_loss 0.044029 done_loss 0.000834
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 86688 @ 539.5 SPS (556.2). (T_q: 2.94) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9974e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 87568 (438528[5.7]) @ 731.8 SPS (750.5). norm_m 9315.68 norm_p 4.98 total_loss_m 0.401387 total_loss_p 1.097981 fea_loss 0.040007 done_loss 0.001319
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 87616 @ 539.1 SPS (555.6). (T_q: 3.19) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9974e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 88496 (443136[5.6]) @ 733.8 SPS (751.3). norm_m 4722.25 norm_p 3.18 total_loss_m 0.275876 total_loss_p 1.097774 fea_loss 0.027518 done_loss 0.000698
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 88496 @ 541.7 SPS (556.0). (T_q: 2.33) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.60 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9973e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 89248 (446976[5.6]) @ 734.2 SPS (750.5). norm_m 3278.78 norm_p 3.49 total_loss_m 0.290893 total_loss_p 1.097943 fea_loss 0.029048 done_loss 0.000413
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 89360 @ 540.4 SPS (555.7). (T_q: 2.73) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.59 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9973e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 90192 (451584[5.6]) @ 738.0 SPS (750.5). norm_m 24108.66 norm_p 5.01 total_loss_m 0.723341 total_loss_p 1.098432 fea_loss 0.072310 done_loss 0.000236
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 90240 @ 539.9 SPS (555.5). (T_q: 2.72) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.59 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9973e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 91104 (456192[5.6]) @ 742.3 SPS (751.0). norm_m 6015.78 norm_p 3.43 total_loss_m 0.568606 total_loss_p 1.098305 fea_loss 0.056790 done_loss 0.000708
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 91152 @ 542.0 SPS (555.7). (T_q: 2.54) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9973e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 92016 (460800[5.6]) @ 746.0 SPS (750.9). norm_m 7684.45 norm_p 2.57 total_loss_m 0.649575 total_loss_p 1.098143 fea_loss 0.064932 done_loss 0.000258
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 92064 @ 540.0 SPS (555.3). (T_q: 2.75) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.62 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9972e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 92960 (465408[5.6]) @ 750.8 SPS (751.2). norm_m 14656.73 norm_p 4.16 total_loss_m 0.858619 total_loss_p 1.098165 fea_loss 0.085856 done_loss 0.000057
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 93008 @ 540.5 SPS (555.0). (T_q: 2.81) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.65 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9972e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 93856 (470016[5.6]) @ 752.6 SPS (751.6). norm_m 8550.04 norm_p 3.74 total_loss_m 0.446865 total_loss_p 1.098038 fea_loss 0.044675 done_loss 0.000111
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 93984 @ 540.6 SPS (554.9). (T_q: 2.73) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.65 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9972e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 94784 (474624[5.6]) @ 751.4 SPS (751.7). norm_m 9062.50 norm_p 2.91 total_loss_m 0.390085 total_loss_p 1.098200 fea_loss 0.038999 done_loss 0.000092
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 94880 @ 540.5 SPS (554.7). (T_q: 2.65) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.61 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9972e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 95712 (479232[5.6]) @ 751.2 SPS (752.3). norm_m 29555.48 norm_p 2.43 total_loss_m 0.347148 total_loss_p 1.098032 fea_loss 0.034659 done_loss 0.000562
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 95776 @ 540.9 SPS (555.1). (T_q: 2.32) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.61 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9971e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 96656 (483840[5.6]) @ 745.9 SPS (752.9). norm_m 16582.31 norm_p 3.12 total_loss_m 0.658974 total_loss_p 1.098079 fea_loss 0.065870 done_loss 0.000275
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 96688 @ 541.3 SPS (555.1). (T_q: 2.59) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.63 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9971e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 97552 (488448[5.6]) @ 744.4 SPS (753.4). norm_m 12693.15 norm_p 2.11 total_loss_m 0.470956 total_loss_p 1.098104 fea_loss 0.047057 done_loss 0.000388
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 97632 @ 543.1 SPS (555.2). (T_q: 2.57) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.63 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9971e-04
+slurmstepd-bml-compute07: error: *** JOB 10410 ON bml-compute07 CANCELLED AT 2026-08-24T14:14:26 ***
+[36m(ActorLearner pid=2124070)[0m [1;34m[dynamic-enduro-v5-test-10410] Steps 98464 @ 542.9 SPS (555.2). (T_q: 2.70) Eps 16. [0mRet [1;31m0.000000[0m (0.000000/0.000000). Loss -0.00 pg_loss 0.00 entropy_loss -0.57 reg_loss 0.00 total_norm 0.00 mean_abs_v 0.07 last_lr: 2.9970e-04
+[36m(ModelLearner pid=2124080)[0m [dynamic-enduro-v5-test-10410] Steps 98464 (493056[5.6]) @ 741.1 SPS (753.2). norm_m 14805.73 norm_p 3.77 total_loss_m 0.421258 total_loss_p 1.098220 fea_loss 0.042053 done_loss 0.000727

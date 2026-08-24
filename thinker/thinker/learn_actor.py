@@ -58,6 +58,7 @@ class SActorLearner:
         self.flags = flags
         self.time = flags.profile
         self._logger = util.logger()
+        self.dynamic_search = util.dynamic_search_enabled(flags)
 
         if flags.parallel_actor:
             self.actor_buffer = ray_obj["actor_buffer"]
@@ -114,14 +115,12 @@ class SActorLearner:
             self.ret_buffers["im"] = RetBuffer(max_actor_id, mean_n=20000)
         if self.flags.cur_cost > 0.:
             self.ret_buffers["cur"] = RetBuffer(max_actor_id, mean_n=400)
+        if self.dynamic_search:
+            self.ret_buffers["think"] = RetBuffer(max_actor_id, mean_n=20000)
         self.ret_buffers["len"] = RetBuffer(max_actor_id, mean_n=400)
         self.im_discounting = self.flags.discounting ** (1 / self.flags.rec_t)
 
-        self.rewards_ls = ["re"]
-        if flags.im_cost > 0.0:
-            self.rewards_ls += ["im"]
-        if flags.cur_cost > 0.0:
-            self.rewards_ls += ["cur"]
+        self.rewards_ls = util.get_reward_names(flags)
         self.num_rewards = len(self.rewards_ls)
         
         if self.flags.return_norm_type in [0, 1]:
@@ -169,9 +168,28 @@ class SActorLearner:
             self.tar_entropy = -flags.tar_entropy_scale * torch.log(1 / torch.tensor(self.actor_net.num_actions * self.actor_net.dim_actions))   
             self.tar_entropy = self.tar_entropy.item()
             if not self.disable_thinker:
-                self.tar_im_entropy = -flags.tar_im_entropy_scale * torch.log(1 / torch.tensor(self.actor_net.num_actions * self.actor_net.dim_actions))   
-                self.tar_im_entropy += -flags.tar_im_entropy_scale * torch.log(1 / torch.tensor(2))   # reset action
-                self.tar_im_entropy = self.tar_im_entropy.item()    
+                if self.dynamic_search:
+                    # The hierarchical SEARCH policy has one STOP outcome
+                    # and A**D primary-action outcomes under each of PROCEED
+                    # and RESET.  Its maximum joint entropy is therefore
+                    # log(1 + 2*A**D), matching the conditional entropy used
+                    # by ActorNet rather than the unattainable legacy
+                    # log(3) + log(A*D) target.
+                    primary_outcome_n = (
+                        self.actor_net.num_actions
+                        ** self.actor_net.dim_actions
+                    )
+                    self.tar_im_entropy = (
+                        flags.tar_im_entropy_scale
+                        * torch.log(torch.tensor(
+                            1 + 2 * primary_outcome_n,
+                            dtype=torch.float,
+                        ))
+                    ).item()
+                else:
+                    self.tar_im_entropy = -flags.tar_im_entropy_scale * torch.log(1 / torch.tensor(self.actor_net.num_actions * self.actor_net.dim_actions))
+                    self.tar_im_entropy += -flags.tar_im_entropy_scale * torch.log(1 / torch.tensor(2))
+                    self.tar_im_entropy = self.tar_im_entropy.item()
     
         if self.flags.float16:
             self.scaler = GradScaler(init_scale=2**8)
@@ -253,10 +271,20 @@ class SActorLearner:
 
         train_actor_out, initial_actor_state = data
         T, B, *_ = train_actor_out.episode_return.shape
-        self.step += T * B
-        last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
+        if self.dynamic_search:
+            # Row zero is the recurrent bootstrap/overlap row and is dropped
+            # by compute_losses.  Do not count its transition twice at unroll
+            # boundaries.
+            self.step += (T - 1) * B
+            last_step_real = train_actor_out.real_transition[1:].bool()
+            real_done_source = train_actor_out.real_done[1:]
+        else:
+            self.step += T * B
+            last_step_real = ((train_actor_out.step_status == 0)
+                              | (train_actor_out.step_status == 3))
+            real_done_source = train_actor_out.real_done
         self.real_step += torch.sum(last_step_real).item()
-        real_done_count = torch.sum(train_actor_out.real_done).item()
+        real_done_count = torch.sum(real_done_source).item()
         self.tot_eps += real_done_count
         
         # 디버깅: 에피소드 카운터 증가 추적
@@ -442,6 +470,11 @@ class SActorLearner:
                     print_str += " cur_norm_diff %.4f" % (
                         stats.get("actor/cur_norm_diff", 0.),
                     )
+                    if self.dynamic_search:
+                        print_str += " think_ret %.4f search_len %.2f" % (
+                            stats.get("rmean_think_episode_return", 0.),
+                            stats.get("search/mean_steps", 0.),
+                        )
                 if self.ppo_enable:
                     print_str += " kl_beta %.4f" % self.actor_net.kl_beta
                     print_str += " kl_loss %.4f" % losses["kl_loss"]
@@ -507,6 +540,11 @@ class SActorLearner:
         
         if self.disable_thinker:
             clamp_action = train_actor_out.pri[1:]
+        elif self.dynamic_search:
+            search_control = getattr(train_actor_out, "search_control", None)
+            if search_control is None:
+                search_control = train_actor_out.reset
+            clamp_action = (train_actor_out.pri[1:], search_control[1:])
         else:
             clamp_action = (train_actor_out.pri[1:], train_actor_out.reset[1:])
         
@@ -537,28 +575,103 @@ class SActorLearner:
                 base_pri_mean = pri_param[:, :, :, 0]
                 base_pri_log_var = pri_param[:, :, :, 1]
             if not self.disable_thinker:
-                base_reset_logits = base_actor_out.reset_logits.detach()
+                if self.dynamic_search:
+                    base_control_logits = getattr(
+                        base_actor_out, "search_control_logits", None
+                    )
+                    if base_control_logits is None:
+                        base_control_logits = base_actor_out.reset_logits
+                    base_control_logits = base_control_logits.detach()
+                else:
+                    base_reset_logits = base_actor_out.reset_logits.detach()
         rewards = train_actor_out.reward
 
         # compute advantage and baseline        
         pg_losses = []
         baseline_losses = []
         done = train_actor_out.done | train_actor_out.truncated_done
-        discounts = [(~done).float() * self.im_discounting]
-        masks = [None]
+        if self.dynamic_search:
+            real_transition = train_actor_out.real_transition.bool()
+            stage_end = train_actor_out.stage_end.bool()
 
-        last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
-        next_step_real = (train_actor_out.step_status == 2) | (train_actor_out.step_status == 3)        
-        
-        if self.flags.im_cost > 0.:
-            discounts.append((~next_step_real).float() * self.im_discounting)            
-            masks.append((~last_step_real).float())
-        if self.flags.cur_cost > 0.:
-            discounts.append((~done).float() * self.im_discounting)            
-            masks.append(None)
+            def dynamic_field(name):
+                value = getattr(train_actor_out, name, None)
+                if value is None:
+                    value = getattr(new_actor_out, name, None)
+                if value is None:
+                    raise RuntimeError(
+                        "dynamic_search rollout is missing ActorOut.%s" % name
+                    )
+                return value
+
+            policy_valid = dynamic_field("policy_valid").bool()
+            primary_valid = dynamic_field("primary_valid").bool()
+            control_valid = dynamic_field("control_valid").bool()
+            policy_type = dynamic_field("policy_type").long()
+            real_policy_mask = policy_valid & (policy_type == util.POLICY_REAL)
+            search_policy_mask = policy_valid & (policy_type == util.POLICY_SEARCH)
+
+            # Augmented SEARCH/NEED_REAL/WAIT calls are zero-time transitions.
+            # Apply the environment discount once, on the call that actually
+            # crosses the synchronous real-step barrier.
+            main_discount = (~done).float() * torch.where(
+                real_transition,
+                torch.full_like(rewards[:, :, 0], self.flags.discounting),
+                torch.ones_like(rewards[:, :, 0]),
+            )
+            stage_discount = (~(done | stage_end)).float()
+            discount_by_prefix = {
+                "re": main_discount,
+                "im": stage_discount,
+                "cur": main_discount,
+                "think": stage_discount,
+            }
+            pg_mask_by_prefix = {
+                "re": policy_valid,
+                "im": search_policy_mask,
+                "cur": policy_valid,
+                "think": search_policy_mask,
+            }
+            # WAIT states still need a task-value target: their discount-one,
+            # reward-zero transitions carry credit back to STOP and the stored
+            # real action.  Stage-local critics only have meaning in SEARCH.
+            baseline_mask_by_prefix = {
+                "re": None,
+                "im": search_policy_mask,
+                "cur": None,
+                "think": search_policy_mask,
+            }
+            discounts = [discount_by_prefix[p] for p in self.rewards_ls]
+            pg_masks = [pg_mask_by_prefix[p] for p in self.rewards_ls]
+            baseline_masks = [baseline_mask_by_prefix[p] for p in self.rewards_ls]
+            last_step_real = real_transition
+        else:
+            discounts = [(~done).float() * self.im_discounting]
+            pg_masks = [None]
+            baseline_masks = [None]
+
+            last_step_real = ((train_actor_out.step_status == 0)
+                              | (train_actor_out.step_status == 3))
+            next_step_real = ((train_actor_out.step_status == 2)
+                              | (train_actor_out.step_status == 3))
+            if self.flags.im_cost > 0.:
+                discounts.append((~next_step_real).float() * self.im_discounting)
+                pg_masks.append((~last_step_real).float())
+                baseline_masks.append((~last_step_real).float())
+            if self.flags.cur_cost > 0.:
+                discounts.append((~done).float() * self.im_discounting)
+                pg_masks.append(None)
+                baseline_masks.append(None)
 
         if not self.ppo_enable or self.flags.ppo_v_trace:
             log_rhos = new_actor_out.c_action_log_prob - train_actor_out.c_action_log_prob
+            if self.dynamic_search:
+                # No action was sampled on WAIT.  rho=1 keeps the identity
+                # transition in the V-trace recursion without inventing a
+                # behavior/target policy likelihood.
+                log_rhos = torch.where(
+                    policy_valid, log_rhos, torch.zeros_like(log_rhos)
+                )
         else:
             log_rhos = torch.zeros_like(train_actor_out.c_action_log_prob)
 
@@ -567,7 +680,17 @@ class SActorLearner:
             prefix_rewards = rewards[:, :, i]
             
             if self.flags.entropy_r_cost > 0. and prefix == "re":
-                prefix_rewards[last_step_real] += -self.flags.entropy_r_cost * train_actor_out.c_action_log_prob[last_step_real]
+                if self.dynamic_search:
+                    prefix_rewards = prefix_rewards.clone()
+                    prefix_rewards[real_policy_mask] += (
+                        -self.flags.entropy_r_cost
+                        * train_actor_out.c_action_log_prob[real_policy_mask]
+                    )
+                else:
+                    prefix_rewards[last_step_real] += (
+                        -self.flags.entropy_r_cost
+                        * train_actor_out.c_action_log_prob[last_step_real]
+                    )
 
             return_norm_type=self.flags.return_norm_type 
             if not self.ppo_enable:
@@ -583,6 +706,9 @@ class SActorLearner:
                 return_norm_type=return_norm_type,
                 norm_stat=self.norm_stats[i], 
                 lamb=self.flags.v_trace_lamb,
+                norm_mask=(
+                    pg_masks[i] if self.dynamic_search else None
+                ),
             )                
             self.norm_stats[i] = v_trace.norm_stat
             if self.ppo_enable:                
@@ -596,12 +722,25 @@ class SActorLearner:
                 pg_loss = -adv * new_actor_out.c_action_log_prob
             else:                
                 log_is = new_actor_out.c_action_log_prob - log_is_de
+                if self.dynamic_search:
+                    log_is = torch.where(
+                        policy_valid, log_is, torch.zeros_like(log_is)
+                    )
                 unclipped_is = torch.exp(log_is) 
-                self.ppo_is_abs.append(torch.mean(torch.abs(unclipped_is-1)).detach().item())
+                if self.dynamic_search:
+                    if torch.any(policy_valid):
+                        self.ppo_is_abs.append(
+                            torch.mean(torch.abs(unclipped_is[policy_valid] - 1))
+                            .detach().item()
+                        )
+                    else:
+                        self.ppo_is_abs.append(0.)
+                else:
+                    self.ppo_is_abs.append(torch.mean(torch.abs(unclipped_is-1)).detach().item())
                 clipped_is = torch.clamp(unclipped_is, 1-self.flags.ppo_clip, 1+self.flags.ppo_clip)
                 pg_loss = -torch.minimum(unclipped_is * adv, clipped_is * adv)
 
-            if masks[i] is not None: pg_loss = pg_loss * masks[i]
+            if pg_masks[i] is not None: pg_loss = pg_loss * pg_masks[i]
             pg_loss = torch.sum(pg_loss)
 
             vs = v_trace.vs if not self.ppo_enable else vs
@@ -610,7 +749,7 @@ class SActorLearner:
                 baseline_loss = compute_baseline_loss(
                     baseline=new_actor_out.baseline[:, :, i],
                     target_baseline=vs,
-                    mask=masks[i]
+                    mask=baseline_masks[i]
                 )
             else:
                 baseline_loss = compute_baseline_enc_loss(
@@ -618,7 +757,7 @@ class SActorLearner:
                     target_baseline=vs,
                     rv_tran=self.actor_net.rv_tran,
                     enc_type=self.flags.critic_enc_type,
-                    mask=masks[i]
+                    mask=baseline_masks[i]
                 )
 
             baseline_losses.append(baseline_loss)
@@ -632,17 +771,15 @@ class SActorLearner:
             "baseline_loss": baseline_losses[0]
         }
         n = 0
-        for prefix in ["im", "cur"]:
+        for prefix in self.rewards_ls[1:]:
             cost = getattr(self.flags, "%s_cost" % prefix)
-            if cost > 0.:
-                n += 1
-                if getattr(self.flags, "%s_cost_anneal" % prefix):
-                    cost *= self.anneal_c
-                total_loss += cost * pg_losses[n] / self.actor_net.dim_actions
-                total_loss += (cost * self.flags.baseline_cost * 
-                            baseline_losses[n])
-                losses["%s_pg_loss" % prefix] = pg_losses[n]
-                losses["%s_baseline_loss" % prefix] = baseline_losses[n]
+            n += 1
+            if getattr(self.flags, "%s_cost_anneal" % prefix):
+                cost *= self.anneal_c
+            total_loss += cost * pg_losses[n] / self.actor_net.dim_actions
+            total_loss += (cost * self.flags.baseline_cost * baseline_losses[n])
+            losses["%s_pg_loss" % prefix] = pg_losses[n]
+            losses["%s_baseline_loss" % prefix] = baseline_losses[n]
 
         # process entropy loss
         if not self.autotune:
@@ -653,28 +790,65 @@ class SActorLearner:
             im_entropy_cost = self.actor_net.log_im_entropy_cost.exp().item()
 
         f_entropy_loss = new_actor_out.entropy_loss
-        entropy_loss = f_entropy_loss * last_step_real.float()
-        policy_entropy = -entropy_loss.sum() / last_step_real.sum()
-        entropy_loss = torch.sum(entropy_loss)        
-        losses["entropy_loss"] = entropy_loss
-        total_loss += entropy_cost * entropy_loss / self.actor_net.dim_actions
-        
-        if not self.disable_thinker:
-            im_entropy_loss = f_entropy_loss * (~last_step_real).float()
-            im_policy_entropy = -im_entropy_loss.sum() / (~last_step_real).sum()
-            im_entropy_loss = torch.sum(im_entropy_loss)
+        if self.dynamic_search:
+            entropy_loss = torch.sum(f_entropy_loss * real_policy_mask.float())
+            real_policy_n = real_policy_mask.sum()
+            policy_entropy = -entropy_loss / real_policy_n.clamp_min(1)
+            losses["entropy_loss"] = entropy_loss
+            total_loss += entropy_cost * entropy_loss / self.actor_net.dim_actions
+
+            im_entropy_loss = torch.sum(
+                f_entropy_loss * search_policy_mask.float()
+            )
+            search_policy_n = search_policy_mask.sum()
+            im_policy_entropy = -im_entropy_loss / search_policy_n.clamp_min(1)
             total_loss += im_entropy_cost * im_entropy_loss
-            losses["im_entropy_loss"] = im_entropy_loss / self.actor_net.dim_actions            
+            losses["im_entropy_loss"] = im_entropy_loss / self.actor_net.dim_actions
 
-        if self.autotune:
-            autotune_loss = -self.actor_net.log_entropy_cost.exp() * (self.tar_entropy - policy_entropy.detach())            
+            if self.autotune:
+                autotune_loss = torch.zeros(
+                    (), device=f_entropy_loss.device, dtype=f_entropy_loss.dtype
+                )
+                if real_policy_n.item() > 0:
+                    autotune_loss = autotune_loss + (
+                        -self.actor_net.log_entropy_cost.exp()
+                        * (self.tar_entropy - policy_entropy.detach())
+                    )[0]
+                if search_policy_n.item() > 0:
+                    autotune_loss = autotune_loss + (
+                        -self.actor_net.log_im_entropy_cost.exp()
+                        * (self.tar_im_entropy - im_policy_entropy.detach())
+                    )[0]
+                losses["autotune_loss"] = autotune_loss
+                total_loss += autotune_loss
+        else:
+            entropy_loss = f_entropy_loss * last_step_real.float()
+            policy_entropy = -entropy_loss.sum() / last_step_real.sum()
+            entropy_loss = torch.sum(entropy_loss)
+            losses["entropy_loss"] = entropy_loss
+            total_loss += entropy_cost * entropy_loss / self.actor_net.dim_actions
+
             if not self.disable_thinker:
-                autotune_loss += -self.actor_net.log_im_entropy_cost.exp() * (self.tar_im_entropy - im_policy_entropy.detach())
-            autotune_loss = autotune_loss[0]
-            losses["autotune_loss"] = autotune_loss
-            total_loss += autotune_loss
+                im_entropy_loss = f_entropy_loss * (~last_step_real).float()
+                im_policy_entropy = -im_entropy_loss.sum() / (~last_step_real).sum()
+                im_entropy_loss = torch.sum(im_entropy_loss)
+                total_loss += im_entropy_cost * im_entropy_loss
+                losses["im_entropy_loss"] = im_entropy_loss / self.actor_net.dim_actions
 
-        reg_loss = torch.sum(new_actor_out.reg_loss)        
+            if self.autotune:
+                autotune_loss = -self.actor_net.log_entropy_cost.exp() * (self.tar_entropy - policy_entropy.detach())
+                if not self.disable_thinker:
+                    autotune_loss += -self.actor_net.log_im_entropy_cost.exp() * (self.tar_im_entropy - im_policy_entropy.detach())
+                autotune_loss = autotune_loss[0]
+                losses["autotune_loss"] = autotune_loss
+                total_loss += autotune_loss
+
+        if self.dynamic_search:
+            reg_loss = torch.sum(
+                new_actor_out.reg_loss * policy_valid.float()
+            )
+        else:
+            reg_loss = torch.sum(new_actor_out.reg_loss)
         losses["reg_loss"] = reg_loss
         total_loss += self.flags.reg_cost * reg_loss
 
@@ -691,18 +865,66 @@ class SActorLearner:
                     new_actor_out.pri_param[:, :, :, 0],
                     new_actor_out.pri_param[:, :, :, 1]
                 )            
-            pri_kl_loss = torch.sum(pri_kl_loss)
-            kl_loss = pri_kl_loss
+            if self.dynamic_search:
+                # Exact hierarchical-policy KL:
+                #   KL(control) + P_old(non-STOP) KL(imaginary)
+                # on SEARCH rows, and KL(real) on NEED_REAL_ACTION rows.
+                # Unlike the sampled primary_valid mask used by PPO's action
+                # ratio, this expectation also regularizes the conditional
+                # imaginary branch on rows whose sampled control was STOP.
+                base_control_probs = F.softmax(base_control_logits, dim=-1)
+                search_primary_weight = (
+                    search_policy_mask.float()
+                    * (1.0 - base_control_probs[..., util.STOP])
+                )
+                pri_weight = (
+                    real_policy_mask.float() + search_primary_weight
+                )
+                expanded_pri_weight = pri_weight
+                while expanded_pri_weight.ndim < pri_kl_loss.ndim:
+                    expanded_pri_weight = expanded_pri_weight.unsqueeze(-1)
+                pri_kl_loss = torch.sum(
+                    pri_kl_loss * expanded_pri_weight
+                )
+                kl_loss = pri_kl_loss
 
-            if not self.disable_thinker:                
-                tar_reset_log_prob = F.log_softmax(base_reset_logits, dim=-1)
-                reset_log_prob = F.log_softmax(new_actor_out.reset_logits, dim=-1)
-                reset_kl_loss = F.kl_div(reset_log_prob, tar_reset_log_prob, reduction="sum", log_target=True)
-                kl_loss += reset_kl_loss
+                control_logits = getattr(
+                    new_actor_out, "search_control_logits", None
+                )
+                if control_logits is None:
+                    control_logits = new_actor_out.reset_logits
+                tar_control_log_prob = F.log_softmax(
+                    base_control_logits, dim=-1
+                )
+                control_log_prob = F.log_softmax(control_logits, dim=-1)
+                control_kl_loss = F.kl_div(
+                    control_log_prob,
+                    tar_control_log_prob,
+                    reduction="none",
+                    log_target=True,
+                ).sum(dim=-1)
+                control_kl_loss = torch.sum(
+                    control_kl_loss * control_valid.float()
+                )
+                kl_loss += control_kl_loss
+                kl_denominator = (
+                    pri_weight.sum() * self.actor_net.dim_actions
+                    + control_valid.sum()
+                ).clamp_min(1)
+            else:
+                pri_kl_loss = torch.sum(pri_kl_loss)
+                kl_loss = pri_kl_loss
+
+                if not self.disable_thinker:
+                    tar_reset_log_prob = F.log_softmax(base_reset_logits, dim=-1)
+                    reset_log_prob = F.log_softmax(new_actor_out.reset_logits, dim=-1)
+                    reset_kl_loss = F.kl_div(reset_log_prob, tar_reset_log_prob, reduction="sum", log_target=True)
+                    kl_loss += reset_kl_loss
+                kl_denominator = T * B
 
             if self.flags.ppo_kl_coef > 0.:
                 total_loss += self.flags.ppo_kl_coef * self.actor_net.kl_beta * kl_loss         
-                avg_kl_loss = kl_loss / T / B  
+                avg_kl_loss = kl_loss / kl_denominator
                 if last_iter:                
                     if avg_kl_loss < self.flags.ppo_kl_targ / 1.5:
                         self.actor_net.kl_beta /= 2
@@ -722,8 +944,15 @@ class SActorLearner:
         """Update step, real_step and tot_eps; return training stat for printing"""
         stats = {}
         T, B, *_ = train_actor_out.episode_return.shape
-        last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
-        next_step_real = (train_actor_out.step_status == 2) | (train_actor_out.step_status == 3)
+        if self.dynamic_search:
+            last_step_real = train_actor_out.real_transition.bool()
+            stage_end = train_actor_out.stage_end.bool()
+            next_step_real = stage_end
+        else:
+            last_step_real = ((train_actor_out.step_status == 0)
+                              | (train_actor_out.step_status == 3))
+            next_step_real = ((train_actor_out.step_status == 2)
+                              | (train_actor_out.step_status == 3))
         
         real_done = train_actor_out.real_done |  train_actor_out.truncated_done     
 
@@ -739,8 +968,8 @@ class SActorLearner:
                  "max_episode_return": self.ret_buffers["re"].get_max(),
                  "rmean_len": self.ret_buffers["len"].get_mean(),}
 
-        for prefix in ["im", "cur"]:            
-            if prefix == "im":
+        for prefix in self.rewards_ls[1:]:
+            if prefix in ["im", "think"]:
                 done = next_step_real
             elif prefix == "cur":
                 done = real_done
@@ -753,7 +982,42 @@ class SActorLearner:
                 r = self.ret_buffers[prefix].get_mean()
                 stats["rmean_%s_episode_return" % prefix] = r
 
-        if not self.disable_thinker:
+        if self.dynamic_search:
+            control_valid = train_actor_out.control_valid.bool()
+            controls = train_actor_out.search_control[control_valid]
+            control_n = max(int(controls.numel()), 1)
+            stats.update({
+                "search/proceed_ratio": (
+                    (controls == util.PROCEED).sum().item() / control_n
+                ),
+                "search/reset_ratio": (
+                    (controls == util.RESET).sum().item() / control_n
+                ),
+                "search/stop_ratio": (
+                    (controls == util.STOP).sum().item() / control_n
+                ),
+                "search/wait_fraction": (
+                    (train_actor_out.policy_type == util.POLICY_NONE)
+                    .float().mean().item()
+                ),
+                "search/active_batch_fraction": (
+                    train_actor_out.policy_valid.float().mean().item()
+                ),
+                "search/active_batch_size": (
+                    train_actor_out.policy_valid.float().sum(dim=1).mean().item()
+                ),
+            })
+            stats.update(util.get_search_budget_stats(
+                train_actor_out.search_steps, stage_end
+            ))
+            stage_n = max(int(stage_end.sum().item()), 1)
+            stats["search/forced_stop_rate"] = (
+                train_actor_out.forced_stop.bool().sum().item() / stage_n
+            )
+            stats["search/real_transition_fraction"] = (
+                last_step_real.float().mean().item()
+            )
+        elif not self.disable_thinker:
             max_rollout_depth = (
                 (train_actor_out.max_rollout_depth[last_step_real & ~next_step_real])
                 .detach()
@@ -801,6 +1065,14 @@ class SActorLearner:
                     self.norm_stats[n][1] - self.norm_stats[n][0]
                 ).item()
                 stats["norm_rmean_cur_episode_return"] = (stats["rmean_cur_episode_return"] / self.norm_stats[n][2]).item()
+            if "think" in self.rewards_ls:
+                n = self.rewards_ls.index("think")
+                stats["actor/think_norm_diff"] = (
+                    self.norm_stats[n][1] - self.norm_stats[n][0]
+                ).item()
+                stats["norm_rmean_think_episode_return"] = (
+                    stats["rmean_think_episode_return"] / self.norm_stats[n][2]
+                ).item()
         return stats
 
     def save_checkpoint(self, force=False):
@@ -814,7 +1086,10 @@ class SActorLearner:
                 "crnorm": self.crnorm, 
                 "actor_net_optimizer_state_dict": self.optimizer.state_dict(),
                 "actor_net_scheduler_state_dict": self.scheduler.state_dict(),
-                "actor_net_state_dict": self.actor_net.state_dict(),                
+                "actor_net_state_dict": self.actor_net.state_dict(),
+                "actor_arch_version": 2 if self.dynamic_search else 1,
+                "dynamic_search": self.dynamic_search,
+                "reward_names": list(self.rewards_ls),
                 "flags": vars(self.flags),
             }      
         try:
@@ -835,6 +1110,38 @@ class SActorLearner:
 
     def load_checkpoint(self, ckp_path: str):
         train_checkpoint = torch.load(ckp_path, torch.device("cpu"), weights_only = False)
+        checkpoint_flags = train_checkpoint.get("flags", {})
+        checkpoint_dynamic = bool(train_checkpoint.get(
+            "dynamic_search", checkpoint_flags.get("dynamic_search", False)
+        ))
+        if checkpoint_dynamic != self.dynamic_search:
+            raise ValueError(
+                "Cannot resume actor checkpoint across dynamic_search modes "
+                f"(checkpoint={checkpoint_dynamic}, run={self.dynamic_search}). "
+                "Use preload_actor for weight-only legacy migration."
+            )
+        checkpoint_arch = train_checkpoint.get("actor_arch_version")
+        expected_arch = 2 if self.dynamic_search else 1
+        if self.dynamic_search and checkpoint_arch is None:
+            raise ValueError(
+                "Dynamic actor checkpoint is missing actor_arch_version metadata."
+            )
+        if checkpoint_arch is not None and checkpoint_arch != expected_arch:
+            raise ValueError(
+                f"Actor checkpoint architecture {checkpoint_arch} does not "
+                f"match expected version {expected_arch}."
+            )
+        checkpoint_rewards = train_checkpoint.get("reward_names")
+        if self.dynamic_search and checkpoint_rewards is None:
+            raise ValueError(
+                "Dynamic actor checkpoint is missing reward_names metadata."
+            )
+        if (checkpoint_rewards is not None
+                and list(checkpoint_rewards) != list(self.rewards_ls)):
+            raise ValueError(
+                "Actor checkpoint reward channels do not match this run: "
+                f"{checkpoint_rewards} != {self.rewards_ls}."
+            )
         self.step = train_checkpoint["step"]
         self.real_step = train_checkpoint["real_step"]
         self.tot_eps = train_checkpoint["tot_eps"]

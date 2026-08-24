@@ -1,0 +1,22 @@
+[meta] HOST=bml-compute07
+[meta] JOBID=10409
+[meta] PROJECT_ROOT=/home/work/jeongmin/thinker-dynamic
+[meta] WORKDIR=/scratch/jeongmin/dynamic-thinker-10409/project
+[meta] XPID=dynamic-enduro-v5-test-10409
+[meta] SLURM_JOB_PARTITION=titanrtx
+[meta] SLURM_JOB_NODELIST=bml-compute07
+[meta] SLURM_CPUS_PER_TASK=16
+[meta] SLURM_MEM_PER_NODE=128743
+[meta] SLURM_JOB_GPUS=0,1
+[meta] CUDA_VISIBLE_DEVICES=0,1
+[stage-in] syncing current Dynamic Thinker source
+[env] python=/home/jeongmin/miniconda3/envs/thinker/bin/python
+Python 3.10.20
+[preflight] importing Dynamic Thinker and Enduro-v5
+[preflight] cenv= /scratch/jeongmin/dynamic-thinker-10409/project/thinker/thinker/cenv.cpython-310-x86_64-linux-gnu.so
+[preflight] Enduro observation= (1, 4, 84, 84) uint8
+[run] /home/jeongmin/miniconda3/envs/thinker/bin/python train.py --name Enduro-v5 --xpid dynamic-enduro-v5-test-10409 --dynamic_search True --wrapper_type 0 --max_search_steps 40 --think_cost 0.002 --reward_clip 1 --model_size_nn 2 --discounting 0.99 --envpool True --auto_res False --ray_cpu 16 --ray_gpu 2 --gpu_learn 1 --gpu_learn_actor 0.5 --gpu_self_play 0.5 --use_wandb False
+Set THINKER_LOG_DIR environment variable to: /scratch/jeongmin/dynamic-thinker-10409/project/logs/thinker/dynamic-enduro-v5-test-10409
+Symlinked log directory: /scratch/jeongmin/dynamic-thinker-10409/project/logs/thinker/latest
+Wrote config file to /scratch/jeongmin/dynamic-thinker-10409/project/logs/thinker/dynamic-enduro-v5-test-10409/config_c.yaml
+[stage-out] syncing training logs

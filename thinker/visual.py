@@ -77,8 +77,8 @@ def plot_policies(logits, labels, action_meanings, ax=None, title="Real policy p
 def plot_base_policies(prob, action_meanings, ax=None):
     if ax is None:
         fig, ax = plt.subplots()
-    rec_t, num_actions = prob.shape
-    xs = np.arange(rec_t)
+    step_n, num_actions = prob.shape
+    xs = np.arange(step_n)
     labels = action_meanings
     for i in range(num_actions):
         c = ax.bar(
@@ -113,52 +113,95 @@ def plot_im_policies(
     if ax is None:
         fig, ax = plt.subplots()
 
-    rec_t, dim_actions, num_actions = pri_logits.shape
+    _, dim_actions, num_actions = pri_logits.shape
     pri_logits = pri_logits[:10, 0]
     pri = pri[:10, 0]    
     reset_logits = reset_logits[:10]
     cur_reset = cur_reset[:10]
 
-    num_actions += 1
-    rec_t -= 1
-
     im_prob = torch.softmax(pri_logits, dim=-1).detach().cpu().numpy()
-    reset_prob = (
-        torch.softmax(reset_logits, dim=-1)[:, [reset_ind]]
-        .detach()
-        .cpu()
-        .numpy()
-    )
-    full_prob = np.concatenate([im_prob, reset_prob], axis=-1)
 
     if not one_hot:
-        pri = F.one_hot(pri, num_actions - 1)
+        pri = F.one_hot(pri, num_actions)
     pri = pri.detach().cpu().numpy()
-    cur_reset = cur_reset.unsqueeze(-1).detach().cpu().numpy()
-    full_action = np.concatenate([pri, cur_reset], axis=-1)
+
+    dynamic_control = reset_logits.shape[-1] == 3
+    if dynamic_control:
+        control_prob = torch.softmax(reset_logits, dim=-1).detach().cpu().numpy()
+        control_action = F.one_hot(cur_reset.long(), 3).detach().cpu().numpy()
+        full_prob = np.concatenate([im_prob, control_prob], axis=-1)
+        full_action = np.concatenate([pri, control_action], axis=-1)
+        labels = action_meanings.copy() + [
+            "control:PROCEED",
+            "control:RESET",
+            "control:STOP",
+        ]
+        title = "Search policy and 3-way control probabilities/actions"
+    else:
+        reset_prob = (
+            torch.softmax(reset_logits, dim=-1)[:, [reset_ind]]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        full_prob = np.concatenate([im_prob, reset_prob], axis=-1)
+        cur_reset = cur_reset.unsqueeze(-1).detach().cpu().numpy()
+        full_action = np.concatenate([pri, cur_reset], axis=-1)
+        labels = action_meanings.copy()
+        labels.append("cur_reset")
+        title = "Imagainary policy prob"
 
     xs = np.arange(pri_logits.shape[0])
-    labels = action_meanings.copy()
-    labels.append("cur_reset")
+    total_actions = len(labels)
 
-    for i in range(num_actions):
+    for i in range(total_actions):
         c = ax.bar(
-            xs + 0.8 * (i / num_actions),
+            xs + 0.8 * (i / total_actions),
             full_prob[:, i],
-            width=0.8 / (num_actions),
+            width=0.8 / total_actions,
             label=labels[i],
         )
         color = c.patches[0].get_facecolor()
         color = color[:3] + (color[3] * 0.5,)
         ax.bar(
-            xs + 0.8 * (i / num_actions),
+            xs + 0.8 * (i / total_actions),
             full_action[:, i],
-            width=0.8 / (num_actions),
+            width=0.8 / total_actions,
             color=color,
         )
     ax.legend()
     ax.set_ylim(0, 1)
-    ax.set_title("Imagainary policy prob")
+    ax.set_title(title)
+
+
+def decode_visual_tree_reps(env, tree_reps, flags):
+    """Decode tree features without applying fixed-budget rec_t slicing."""
+    if not util.dynamic_search_enabled(flags):
+        return env.decode_tree_reps(tree_reps)
+
+    if tree_reps.ndim == 3:
+        tree_reps = tree_reps[0]
+    meaning = env.get_tree_rep_meaning()
+    decoded = {key: tree_reps[:, value] for key, value in meaning.items()}
+    if flags.model_enc_type != 0:
+        value_keys = {
+            "root_r", "root_v", "root_qs_mean", "root_qs_max",
+            "root_trail_r", "rollout_return", "max_rollout_return",
+            "cur_r", "cur_v", "cur_qs_mean", "cur_qs_max",
+        }
+        for key in value_keys & decoded.keys():
+            value = decoded[key]
+            if flags.model_enc_f_type == 0:
+                decoded[key] = torch.sign(value) * (
+                    torch.square(
+                        (torch.sqrt(1 + 4 * 0.001 * (torch.abs(value) + 1 + 0.001)) - 1)
+                        / (2 * 0.001)
+                    )
+                    - 1
+                )
+            else:
+                decoded[key] = torch.sign(value) * torch.expm1(torch.abs(value))
+    return decoded
 
 def plot_qn_sa(q_s_a, n_s_a, action_meanings, max_q_s_a=None, ax=None):
     if ax is None:
@@ -249,7 +292,9 @@ def gen_video(video_stats, file_path):
     video.release()
 
 
-def print_im_actions(im_dict, action_meanings, real_action, print_stat=False):
+def print_im_actions(
+    im_dict, action_meanings, real_action, print_stat=False, dynamic_search=False
+):
     lookup_dict = {k: v for k, v in enumerate(action_meanings)}
     print_strs = []
     n, s = 1, ""
@@ -261,6 +306,21 @@ def print_im_actions(im_dict, action_meanings, real_action, print_stat=False):
             return "(" + ",".join([f"{num:.2f}" for num in a]) + ")"
         else:
             return lookup_dict[a.item()]
+    if dynamic_search:
+        control_names = ["PROCEED", "RESET", "STOP"]
+        for n, (im, control) in enumerate(
+            zip(im_dict["pri"], im_dict["cur_reset"]), start=1
+        ):
+            print_strs.append(
+                "%d: %s; control=%s"
+                % (n, a_to_str(im), control_names[control.item()])
+            )
+        print_strs.append("Real action: %s" % a_to_str(real_action))
+        if print_stat:
+            for line in print_strs:
+                print(line)
+        return print_strs
+
     for im, reset in zip(im_dict["pri"][:-1], im_dict["cur_reset"][:-1]):        
         s += a_to_str(im) + ", "
         if reset:
@@ -357,6 +417,7 @@ def visualize(
     max_eps_n = 1
     config_path = os.path.join(ckpdir, 'config_c.yaml')
     flags = util.create_flags(config_path, save_flags=False)
+    dynamic_search = util.dynamic_search_enabled(flags)
     if seed < 0:
         seed = np.random.randint(10000)
     
@@ -433,25 +494,29 @@ def visualize(
     
     # GPU로 데이터 이동
     if use_gpu:
-        env_out = env_out._replace(
-            xs=env_out.xs.to(device),
-            real_states=env_out.real_states.to(device),
-            tree_reps=env_out.tree_reps.to(device),
-            episode_return=env_out.episode_return.to(device),
-            done=env_out.done.to(device),
-            real_done=env_out.real_done.to(device),
-            step_status=env_out.step_status.to(device)
-        )
+        if dynamic_search:
+            env_out = util.tuple_map(env_out, lambda value: value.to(device))
+        else:
+            env_out = env_out._replace(
+                xs=env_out.xs.to(device),
+                real_states=env_out.real_states.to(device),
+                tree_reps=env_out.tree_reps.to(device),
+                episode_return=env_out.episode_return.to(device),
+                done=env_out.done.to(device),
+                real_done=env_out.real_done.to(device),
+                step_status=env_out.step_status.to(device)
+            )
     
     # some initial setting
     plt.rcParams.update({"font.size": 15})
 
-    tree_reps = env.decode_tree_reps(env_out.tree_reps)
+    tree_reps = decode_visual_tree_reps(env, env_out.tree_reps, flags)
     end_gym_env_outs, end_titles = [], []
     ini_max_q = tree_reps["max_rollout_return"][0, 0].item()
 
     step = 0
     real_step = 0
+    agent_v = torch.tensor(float("nan"), device=device)
     returns, model_policy = (
         [],
         [],
@@ -502,26 +567,66 @@ def visualize(
         actor_out, actor_state = actor_net(env_out, actor_state)        
         action = actor_out.action
 
-        last_real_step = (env_out.step_status == 0) | (env_out.step_status == 3)
+        if dynamic_search:
+            source_phase = int(env_out.phase[0, 0].item())
+            source_control = int(actor_out.search_control[0, 0].item())
+            reset_event = (
+                env_out.search_state_reset is not None
+                and bool(env_out.search_state_reset[0, 0].item())
+            )
+            root_observation = (
+                source_phase == util.SEARCH_PHASE and (step == 1 or reset_event)
+            )
+        else:
+            source_phase = None
+            source_control = None
+            root_observation = bool(
+                torch.any(
+                    (env_out.step_status == 0) | (env_out.step_status == 3)
+                ).item()
+            )
 
-        if last_real_step:
+        if root_observation:
             agent_v = actor_out.baseline[0, 0, 0]
 
         # additional stat record - GPU에서 CPU로 이동하여 저장
-        im_dict["pri_logits"].append(actor_out.pri_param[:,0].cpu())
-        im_dict["reset_logits"].append(actor_out.reset_logits[:,0].cpu())
-        im_dict["pri"].append(actor_out.pri[:,0].cpu())
-        im_dict["cur_reset"].append(actor_out.reset[:,0].cpu())
+        record_search = (
+            source_phase == util.SEARCH_PHASE if dynamic_search else True
+        )
+        if record_search:
+            im_dict["pri_logits"].append(actor_out.pri_param[:,0].cpu())
+            if dynamic_search:
+                im_dict["reset_logits"].append(
+                    actor_out.search_control_logits[:, 0].cpu()
+                )
+                im_dict["cur_reset"].append(
+                    actor_out.search_control[:, 0].cpu()
+                )
+            else:
+                im_dict["reset_logits"].append(actor_out.reset_logits[:,0].cpu())
+                im_dict["cur_reset"].append(actor_out.reset[:,0].cpu())
+            im_dict["pri"].append(actor_out.pri[:,0].cpu())
         
-        tree_reps_ = env.decode_tree_reps(env_out.tree_reps)
-        model_policy.append(tree_reps_["cur_policy"].cpu())       
+        tree_reps_ = decode_visual_tree_reps(env, env_out.tree_reps, flags)
+        if record_search:
+            model_policy.append(tree_reps_["cur_policy"].cpu())
 
         state, reward, done, truncated_done, info = env.step(action[0], action[1])
-        last_real_step = (info["step_status"] == 0) | (info["step_status"] == 3)
-        next_real_step = (info["step_status"] == 2) | (info["step_status"] == 3)
+        if dynamic_search:
+            last_real_step = bool(info["real_transition"][0].item())
+            next_real_step = last_real_step
+        else:
+            last_real_step = (info["step_status"] == 0) | (info["step_status"] == 3)
+            next_real_step = (info["step_status"] == 2) | (info["step_status"] == 3)
 
         if render:
-            if not last_real_step:
+            render_im_action = (
+                source_phase == util.SEARCH_PHASE
+                and source_control != util.STOP
+                if dynamic_search
+                else not last_real_step
+            )
+            if render_im_action:
                 if flags.sample_n > 0:
                     cur_raw_action = (tree_reps_["cur_raw_action"].view(flags.sample_n, env.raw_dim_actions)*env.raw_num_actions)[action[0][0]]
                     cur_raw_action = cur_raw_action.long().unsqueeze(0)
@@ -533,18 +638,23 @@ def visualize(
         
         # GPU로 데이터 이동
         if use_gpu:
-            env_out = env_out._replace(
-                xs=env_out.xs.to(device),
-                real_states=env_out.real_states.to(device),
-                tree_reps=env_out.tree_reps.to(device),
-                episode_return=env_out.episode_return.to(device),
-                done=env_out.done.to(device),
-                real_done=env_out.real_done.to(device),
-                step_status=env_out.step_status.to(device)
-            )
+            if dynamic_search:
+                env_out = util.tuple_map(env_out, lambda value: value.to(device))
+            else:
+                env_out = env_out._replace(
+                    xs=env_out.xs.to(device),
+                    real_states=env_out.real_states.to(device),
+                    tree_reps=env_out.tree_reps.to(device),
+                    episode_return=env_out.episode_return.to(device),
+                    done=env_out.done.to(device),
+                    real_done=env_out.real_done.to(device),
+                    step_status=env_out.step_status.to(device)
+                )
 
-        tree_reps = env.decode_tree_reps(env_out.tree_reps)
+        tree_reps = decode_visual_tree_reps(env, env_out.tree_reps, flags)
         if (
+            not dynamic_search
+            and
             len(im_dict["cur_reset"]) > 0
             and tree_reps["cur_reset"]
             and not actor_out.reset
@@ -578,6 +688,10 @@ def visualize(
                 root_xs = xs
                 # real action            
                 video_stats["status"].append(0)
+            elif dynamic_search and source_phase == util.SEARCH_PHASE:
+                video_stats["status"].append(
+                    {util.PROCEED: 2, util.RESET: 1, util.STOP: 3}[source_control]
+                )
             else:
                 # imagainary action
                 video_stats["status"].append(2)
@@ -587,7 +701,7 @@ def visualize(
                 {k: v.cpu().numpy() for k, v in tree_reps.items()}
             )
 
-            if im_dict["cur_reset"][-1] in [1, 3]:
+            if not dynamic_search and im_dict["cur_reset"][-1] in [1, 3]:
                 # reset / force reset
                 video_stats["real_imgs"].append(root_real_states)
                 video_stats["im_imgs"].append(root_xs)
@@ -672,7 +786,11 @@ def visualize(
 
             if saveimg:
                 im_action_strs = print_im_actions(
-                    im_dict, action_meanings, actor_out.action[0][0], print_stat=plot
+                    im_dict,
+                    action_meanings,
+                    actor_out.action[0][0],
+                    print_stat=plot,
+                    dynamic_search=dynamic_search,
                 )
                 save_concatenated_image(
                     buf1,
@@ -687,8 +805,12 @@ def visualize(
             model_policy, end_gym_env_outs, end_titles = [], [], []
             ini_max_q = tree_reps["max_rollout_return"][0, 0].item()
 
-            real_step += 1
+            if not dynamic_search:
+                real_step += 1
             #if real_step >= 5: break
+
+        if dynamic_search and last_real_step:
+            real_step += 1
 
         if torch.any(env_out.real_done):
             step = 0

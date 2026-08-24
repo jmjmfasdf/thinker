@@ -137,6 +137,11 @@ cdef node_visit(Node* pnode):
     else:
         ppath = NULL
     node_propagate(pnode=pnode, r=pnode[0].r, v=pnode[0].v, new_rollout=not pnode[0].visited, ppath=ppath)
+    # node_propagate stores an owned copy at every node on the path.  The
+    # initially empty seed vector is only scratch space and must be released by
+    # its creator.
+    if ppath != NULL:
+        del ppath
     pnode[0].visited = True
     pnode[0].rollout_n = pnode[0].rollout_n + 1        
 
@@ -161,7 +166,7 @@ cdef void node_propagate(Node* pnode, float r, float v, bool new_rollout, vector
         node_propagate(pnode[0].pparent, r, v, new_rollout, ppath=ppath_)
 
 #@cython.cdivision(True)
-cdef float[:] node_stat(Node* pnode, bool detailed, int enc_type, int enc_f_type, int mask_type, int raw_num_actions=-1):
+cdef float[:] node_stat(Node* pnode, bool detailed, int enc_type, int enc_f_type, int mask_type, int raw_num_actions=-1, bool dynamic=False):
     cdef int i, j, dim_actions, base_idx
     cdef float[:] result
     cdef int obs_n
@@ -192,7 +197,13 @@ cdef float[:] node_stat(Node* pnode, bool detailed, int enc_type, int enc_f_type
             result[pnode[0].num_actions*2+3+i] = f(average(child.prollout_qs[0])) # child_rollout_qs_mean
             if not mask_type in [3, 4]:
                 result[pnode[0].num_actions*3+3+i] = f(maximum(child.prollout_qs[0])) # child_rollout_qs_max
-            result[pnode[0].num_actions*4+3+i] = child.rollout_n / <float>pnode[0].rec_t # child_rollout_ns_enc
+            if dynamic:
+                # Dynamic search has no fixed recurrent budget with which to
+                # normalize visit counts.  A log transform keeps the feature
+                # bounded enough for the actor while retaining ordering.
+                result[pnode[0].num_actions*4+3+i] = log(1. + child.rollout_n)
+            else:
+                result[pnode[0].num_actions*4+3+i] = child.rollout_n / <float>pnode[0].rec_t # child_rollout_ns_enc
     base_idx = pnode[0].num_actions*5+3
     
     if detailed and not mask_type in [1, 2, 4]:        
@@ -203,7 +214,7 @@ cdef float[:] node_stat(Node* pnode, bool detailed, int enc_type, int enc_f_type
 
     return result
 
-cdef node_del(Node* pnode, int except_idx):
+cdef void node_del(Node* pnode, int except_idx) noexcept:
     cdef int i
     del pnode[0].prollout_qs
 
@@ -221,6 +232,17 @@ cdef node_del(Node* pnode, int except_idx):
     if pnode[0].encoded != NULL:
         Py_DECREF(<object>pnode[0].encoded)
     free(pnode)
+
+cdef void node_collect_snapshot_slots(Node* pnode, object slots):
+    """Collect perfect-model snapshot ids reachable from a carried subtree."""
+    cdef int i
+    cdef dict encoded
+    if pnode[0].encoded != NULL:
+        encoded = <dict>pnode[0].encoded
+        if "snapshot_slot" in encoded:
+            slots.add(int(encoded["snapshot_slot"]))
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        node_collect_snapshot_slots(pnode[0].ppchildren[0][i], slots)
 
 cdef float enc_0(float x):
     return sign(x)*(sqrt(abs(x)+1)-1)+(0.001)*x
@@ -252,6 +274,8 @@ cdef class cWrapper():
     cdef int max_depth    
     cdef bool tree_carry    
     cdef int reset_mode
+    cdef bool dynamic_search
+    cdef int max_search_steps
 
     cdef int enc_type
     cdef int enc_f_type
@@ -301,6 +325,30 @@ cdef class cWrapper():
     cdef int[:] max_rollout_depth
     cdef int[:] cur_t
 
+    # Dynamic-search persistent state.  Control actions are PROCEED=0,
+    # RESET=1, STOP=2; phases are SEARCH=0, NEED_REAL=1, WAIT=2.
+    cdef int[:] phase
+    cdef int[:] search_steps
+    cdef int[:] pending_real_action
+    cdef bool[:] pending_real_valid
+    cdef int[:] next_snapshot_slot
+
+    # Dynamic-search events describe only the transition returned by the
+    # current wrapper call.  Keeping them separate from persistent phase makes
+    # STOP and the synchronous real-action barrier unambiguous to the actor.
+    cdef bool[:] tree_reset_event
+    cdef bool[:] tree_token_valid_event
+    cdef bool[:] search_state_reset_event
+    cdef bool[:] real_transition_event
+    cdef bool[:] stage_end_event
+    cdef bool[:] forced_stop_event
+    cdef bool[:] stored_action_mask_event
+    cdef bool[:] barrier_released_event
+    cdef int[:] executed_primary_action_event
+    cdef int[:] accepted_primary_action_event
+    cdef int[:] accepted_control_event
+    cdef float[:] think_reward_event
+
     # internal variables only used in step function    
     cdef int[:] max_rollout_depth_
     cdef float[:] mean_q
@@ -317,6 +365,7 @@ cdef class cWrapper():
     cdef int[:] total_step  
     cdef int[:] step_from_done  
     cdef int internal_counter
+    cdef bool resources_closed
     
 
     def __init__(self, env, env_n, flags, model_net, device=None, timing=False):        
@@ -331,6 +380,8 @@ cdef class cWrapper():
         self.max_depth = flags.max_depth
         self.tree_carry = flags.tree_carry
         self.reset_mode = flags.reset_mode
+        self.dynamic_search = getattr(flags, "dynamic_search", False)
+        self.max_search_steps = int(getattr(flags, "max_search_steps", -1))
         self.has_action_seq = flags.has_action_seq
 
         self.has_action_seq = flags.has_action_seq
@@ -361,11 +412,17 @@ cdef class cWrapper():
         else:
             raise Exception(f"Unupported observation sapce", env.observation_space)
 
-        self.obs_n = 11 + self.num_actions * 10 + self.rep_rec_t
-        if self.has_action_seq: 
-            self.obs_n += self.max_depth * self.num_actions
-            if self.reset_mode == 0:
-                self.obs_n += self.num_actions
+        if self.dynamic_search:
+            # detailed root (5A+6), compact current node (5A+3), five
+            # budget-independent metadata scalars.
+            self.obs_n = 10 * self.num_actions + 14
+            self.has_action_seq = False
+        else:
+            self.obs_n = 11 + self.num_actions * 10 + self.rep_rec_t
+            if self.has_action_seq:
+                self.obs_n += self.max_depth * self.num_actions
+                if self.reset_mode == 0:
+                    self.obs_n += self.num_actions
 
         self.env_n = env_n
         self.return_h = flags.return_h  
@@ -403,7 +460,7 @@ cdef class cWrapper():
         self.observation_space = spaces.Dict(self.observation_space)
 
         aug_action_space = spaces.Tuple((spaces.Discrete(self.num_actions),)*self.env_n)
-        reset_space = spaces.Tuple((spaces.Discrete(2),)*self.env_n)
+        reset_space = spaces.Tuple((spaces.Discrete(3 if self.dynamic_search else 2),)*self.env_n)
         self.action_space = spaces.Tuple((aug_action_space, reset_space))
         self.reward_range = env.reward_range
         self.metadata = env.metadata
@@ -423,6 +480,25 @@ cdef class cWrapper():
         self.step_status = np.zeros(self.env_n, dtype=np.intc)  
         self.step_from_done = np.zeros(self.env_n, dtype=np.intc)  
         self.internal_counter = 0
+        self.resources_closed = False
+
+        self.phase = np.zeros(self.env_n, dtype=np.intc)
+        self.search_steps = np.zeros(self.env_n, dtype=np.intc)
+        self.pending_real_action = np.zeros(self.env_n, dtype=np.intc)
+        self.pending_real_valid = np.zeros(self.env_n, dtype=np.bool_)
+        self.next_snapshot_slot = np.ones(self.env_n, dtype=np.intc)
+        self.tree_reset_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.tree_token_valid_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.search_state_reset_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.real_transition_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.stage_end_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.forced_stop_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.stored_action_mask_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.barrier_released_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.executed_primary_action_event = np.full(self.env_n, -1, dtype=np.intc)
+        self.accepted_primary_action_event = np.full(self.env_n, -1, dtype=np.intc)
+        self.accepted_control_event = np.full(self.env_n, -1, dtype=np.intc)
+        self.think_reward_event = np.zeros(self.env_n, dtype=np.float32)
     
     cdef float[:, :] compute_tree_reps(self, int[:]& reset, int[:]& status):
         cdef int i, j
@@ -457,6 +533,70 @@ cdef class cWrapper():
                     result[i, idx5+(self.rollout_depth[i] - j)*self.num_actions+node[0].action] = 1.
                     node = node[0].pparent
 
+        return result
+
+    cdef void clear_dynamic_events(self):
+        cdef int i
+        for i in range(self.env_n):
+            self.tree_reset_event[i] = False
+            self.tree_token_valid_event[i] = False
+            self.search_state_reset_event[i] = False
+            self.real_transition_event[i] = False
+            self.stage_end_event[i] = False
+            self.forced_stop_event[i] = False
+            self.stored_action_mask_event[i] = False
+            self.barrier_released_event[i] = False
+            self.executed_primary_action_event[i] = -1
+            self.accepted_primary_action_event[i] = -1
+            self.accepted_control_event[i] = -1
+            self.think_reward_event[i] = 0.
+
+    cdef void reset_dynamic_state(self):
+        """Initialize a fresh search stage after env.reset()."""
+        cdef int i
+        self.clear_dynamic_events()
+        for i in range(self.env_n):
+            self.phase[i] = 0
+            self.search_steps[i] = 0
+            self.pending_real_action[i] = 0
+            self.pending_real_valid[i] = False
+            self.next_snapshot_slot[i] = 1
+            self.tree_reset_event[i] = True
+            self.tree_token_valid_event[i] = True
+            self.search_state_reset_event[i] = True
+            self.step_status[i] = 0
+
+    cdef bool all_real_actions_stored(self):
+        cdef int i
+        for i in range(self.env_n):
+            if not self.pending_real_valid[i]:
+                return False
+        return True
+
+    cdef float[:, :] compute_tree_reps_dynamic(self):
+        cdef int i
+        cdef int root_end, cur_end
+        cdef float[:, :] result
+
+        root_end = self.num_actions * 5 + 6
+        cur_end = root_end + self.num_actions * 5 + 3
+        result = np.zeros((self.env_n, self.obs_n), dtype=np.float32)
+        for i in range(self.env_n):
+            result[i, :root_end] = node_stat(
+                self.root_nodes[i], detailed=True, enc_type=self.enc_type,
+                enc_f_type=self.enc_f_type, mask_type=self.stat_mask_type,
+                raw_num_actions=self.raw_num_actions, dynamic=True)
+            result[i, root_end:cur_end] = node_stat(
+                self.cur_nodes[i], detailed=False, enc_type=self.enc_type,
+                enc_f_type=self.enc_f_type, mask_type=self.stat_mask_type,
+                raw_num_actions=self.raw_num_actions, dynamic=True)
+            # [tree_reset, depth_discount, log1p(search_steps),
+            #  log1p(rollout_depth), search_start]
+            result[i, cur_end] = <float>self.tree_reset_event[i]
+            result[i, cur_end + 1] = self.discounting ** self.rollout_depth[i]
+            result[i, cur_end + 2] = log(1. + self.search_steps[i])
+            result[i, cur_end + 3] = log(1. + self.rollout_depth[i])
+            result[i, cur_end + 4] = <float>(self.phase[i] == 0 and self.search_steps[i] == 0)
         return result
 
     def reset(self, *args, **kwargs):
@@ -512,6 +652,38 @@ cdef class cWrapper():
 
         return states    
 
+    cdef prepare_state_dynamic(self):
+        cdef int i
+
+        for i in range(self.env_n):
+            if self.search_state_reset_event[i]:
+                self.real_states = self.compute_model_out(self.root_nodes, "real_states")
+                break
+
+        tree_reps = torch.tensor(
+            self.compute_tree_reps_dynamic(), dtype=torch.float, device=self.device)
+        states = {
+            "tree_reps": tree_reps,
+            "real_states": self.real_states,
+        }
+
+        if self.return_x:
+            xs = self.compute_model_out(self.cur_nodes, "xs")
+            if self.return_double and xs is not None:
+                root_xs = self.compute_model_out(self.root_nodes, "xs")
+                xs = torch.concat([root_xs, xs], dim=1)
+            assert xs is not None, "xs cannot be None"
+            states["xs"] = xs
+
+        if self.return_h:
+            hs = self.compute_model_out(self.cur_nodes, "hs")
+            if self.return_double and hs is not None:
+                root_hs = self.compute_model_out(self.root_nodes, "hs")
+                hs = torch.concat([root_hs, hs], dim=1)
+            assert hs is not None, "hs cannot be None"
+            states["hs"] = hs
+        return states
+
     cdef update_per_state(self, model_net_out, idx):
         if idx is None or len(idx) == self.env_n:
             self.per_state = model_net_out.state
@@ -561,13 +733,78 @@ cdef class cWrapper():
             return_info["im_reward"] = torch.zeros((self.env_n, 1), dtype=torch.float, device=self.device)
         return return_info
 
+    def prepare_info_dynamic(self, info, perfect):
+        """Build the explicit Dynamic Thinker transition contract."""
+        cdef int i
+        legal_control_mask = np.zeros((self.env_n, 3), dtype=np.bool_)
+        for i in range(self.env_n):
+            if self.phase[i] == 0:
+                # PROCEED may not cross max_depth implicitly: at the boundary
+                # the actor must explicitly RESET the rollout or STOP search.
+                if not (self.max_depth > 0 and
+                        self.rollout_depth[i] >= self.max_depth - 1):
+                    legal_control_mask[i, 0] = True
+                legal_control_mask[i, 1] = True
+                legal_control_mask[i, 2] = True
+
+        if info is None:
+            return_info = util.dict_map(self.default_info, lambda x: x.clone())
+        else:
+            # Dynamic real transitions are released only as a full batch, so
+            # unlike the fixed path no subset-to-batch scatter is required.
+            return_info = util.dict_map(info, lambda x: torch.tensor(x, device=self.device))
+
+        return_info.update({
+            "step_status": torch.tensor(self.step_status, dtype=torch.long, device=self.device),
+            "max_rollout_depth": torch.tensor(self.max_rollout_depth_, dtype=torch.long, device=self.device),
+            "baseline": self.baseline_mean_q.unsqueeze(-1),
+            "real_states_np": self.real_states_np,
+            "phase": torch.tensor(self.phase, dtype=torch.long, device=self.device),
+            "legal_control_mask": torch.tensor(legal_control_mask, dtype=torch.bool, device=self.device),
+            "tree_token_valid": torch.tensor(self.tree_token_valid_event, dtype=torch.bool, device=self.device),
+            "search_state_reset": torch.tensor(self.search_state_reset_event, dtype=torch.bool, device=self.device),
+            "real_transition": torch.tensor(self.real_transition_event, dtype=torch.bool, device=self.device),
+            "stage_end": torch.tensor(self.stage_end_event, dtype=torch.bool, device=self.device),
+            "forced_stop": torch.tensor(self.forced_stop_event, dtype=torch.bool, device=self.device),
+            "stored_action_mask": torch.tensor(self.stored_action_mask_event, dtype=torch.bool, device=self.device),
+            "executed_primary_action": torch.tensor(self.executed_primary_action_event, dtype=torch.long, device=self.device),
+            "accepted_primary_action": torch.tensor(self.accepted_primary_action_event, dtype=torch.long, device=self.device),
+            "accepted_control": torch.tensor(self.accepted_control_event, dtype=torch.long, device=self.device),
+            "search_steps": torch.tensor(self.search_steps, dtype=torch.long, device=self.device),
+            "barrier_released": torch.tensor(self.barrier_released_event, dtype=torch.bool, device=self.device),
+            "think_reward": torch.tensor(self.think_reward_event, dtype=torch.float, device=self.device),
+        })
+        if not perfect:
+            return_info["initial_per_state"] = self.initial_per_state
+        if self.im_enable:
+            return_info["im_reward"] = torch.zeros(
+                (self.env_n, 1), dtype=torch.float, device=self.device)
+        return return_info
+
+
+    cdef void dispose_trees(self) noexcept:
+        """Release every owned root tree and invalidate all pointer vectors."""
+        cdef int i
+        cdef int root_n = <int>self.root_nodes.size()
+        for i in range(root_n):
+            if self.root_nodes[i] != NULL:
+                node_del(self.root_nodes[i], except_idx=-1)
+        self.root_nodes.clear()
+        # Current nodes alias nodes owned by a root tree; never delete them a
+        # second time, but do not leave dangling pointers behind either.
+        self.cur_nodes.clear()
 
     def close(self):
-        cdef int i
-        if hasattr(self, "root_nodes"):
-            for i in range(self.env_n):
-                node_del(self.root_nodes[i], except_idx=-1)
-        self.env.close()
+        self.dispose_trees()
+        if not self.resources_closed:
+            self.resources_closed = True
+            self.env.close()
+
+    def __dealloc__(self):
+        # Python calls are unsafe here, so environment shutdown remains in
+        # close(); all malloc/new/Py_INCREF resources owned by Node are local
+        # and can be released deterministically.
+        self.dispose_trees()
 
     def seed(self, x):
         self.env.seed(x)
@@ -626,11 +863,16 @@ cdef class cWrapper():
 cdef class cModelWrapper(cWrapper):
 
     def reset(self, model_net, seed=None):
-        """reset the environment; should only be called in the initial"""
+        """Reset the environment and replace any previously active tree."""
         cdef int i
         cdef Node* root_node
         cdef Node* cur_node
         cdef float[:,:] model_out       
+
+        # reset() may be called again by evaluators or tests.  Replace the
+        # active forest instead of appending roots behind stale index-zero
+        # entries in the C++ vectors.
+        self.dispose_trees()
 
         with torch.no_grad():
             # some init.
@@ -682,12 +924,16 @@ cdef class cModelWrapper(cWrapper):
             for i in range(self.env_n):
                 self.root_nodes_qmax[i] = self.root_nodes[i][0].max_q
             
-            states = self.prepare_state(None, None)
-            info = self.prepare_info(info, self.status, False)
+            if self.dynamic_search:
+                self.reset_dynamic_state()
+                states = self.prepare_state_dynamic()
+                info = self.prepare_info_dynamic(info, False)
+            else:
+                states = self.prepare_state(None, None)
+                info = self.prepare_info(info, self.status, False)
             return states, info
 
     def step(self, action, model_net):  
-        
         cdef int i, j, k, l
         cdef int[:] re_action
         cdef int[:] im_action
@@ -715,6 +961,9 @@ cdef class cModelWrapper(cWrapper):
         cdef float[:,:] logits_4
 
         cdef str md        
+
+        if self.dynamic_search:
+            return self.step_dynamic(action, model_net)
 
         if self.time: self.timings.reset()
 
@@ -997,6 +1246,363 @@ cdef class cModelWrapper(cWrapper):
                 torch.tensor(self.full_truncated_done, dtype=torch.float, device=self.device).bool(), 
                 info)
 
+    def step_dynamic(self, action, model_net):
+        """Dynamic learned-model search with a synchronous real-step barrier.
+
+        SEARCH consumes the three-way control head.  STOP changes only the
+        policy phase; the next call supplies a real action and then waits.  The
+        final stored action releases one full-batch real environment step in
+        the same call.
+        """
+        cdef int i, j, k, l, control_i
+        cdef int[:] primary
+        cdef int[:] control
+        cdef int[:] reset
+        cdef Node* root_node
+        cdef Node* cur_node
+        cdef Node* next_node
+        cdef vector[Node*] cur_nodes_
+        cdef vector[Node*] root_nodes_
+        cdef vector[int] pass_model_action
+        cdef float[:] vs_1
+        cdef float[:,:] logits_1
+        cdef float[:] rs_4
+        cdef float[:] vs_4
+        cdef float[:,:] logits_4
+        cdef str md
+
+        if self.time:
+            self.timings.reset()
+        assert type(action) is tuple and len(action) == 2, \
+            "action should be (primary_action, search_control)"
+
+        parsed_action = []
+        for i in range(2):
+            a = action[i]
+            assert torch.is_tensor(a) or isinstance(a, np.ndarray) or isinstance(a, list), \
+                f"action[{i}] should be either torch.tensor, np.ndarray, or list"
+            if torch.is_tensor(a):
+                a = a.detach().cpu().numpy()
+            if isinstance(a, list):
+                a = np.array(a, dtype=np.int32)
+            assert a.shape == (self.env_n,), \
+                f"action[{i}] shape should be {(self.env_n,)}, not {a.shape}"
+            if a.dtype != np.int32:
+                a = a.astype(np.int32)
+            parsed_action.append(a)
+        primary = parsed_action[0]
+        control = parsed_action[1]
+        assert (parsed_action[0] >= 0).all() and (parsed_action[0] < self.num_actions).all(), \
+            f"primary action should be in [0, {self.num_actions-1}]"
+        assert (parsed_action[1] >= 0).all() and (parsed_action[1] < 3).all(), \
+            "search control should be PROCEED=0, RESET=1, or STOP=2"
+
+        reset_np = np.zeros(self.env_n, dtype=np.intc)
+        reset = reset_np
+        self.clear_dynamic_events()
+        pass_model_states = []
+
+        # Phase-local policy dispatch.  WAIT inputs are deliberately ignored.
+        for i in range(self.env_n):
+            self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+            if self.phase[i] == 0:  # SEARCH
+                control_i = control[i]
+                assert not (
+                    control_i == 0 and self.max_depth > 0 and
+                    self.rollout_depth[i] >= self.max_depth - 1), \
+                    "PROCEED is illegal at max_depth; choose RESET or STOP"
+                self.accepted_control_event[i] = control_i
+
+                if control_i == 2:  # STOP; no tree/model/environment mutation
+                    self.phase[i] = 1
+                    self.stage_end_event[i] = True
+                    self.status[i] = 6
+                    self.step_status[i] = 2
+                    continue
+
+                self.accepted_primary_action_event[i] = primary[i]
+                self.think_reward_event[i] = -1.
+                self.search_steps[i] += 1
+                self.cur_t[i] += 1
+                self.rollout_depth[i] += 1
+                self.max_rollout_depth[i] = max(
+                    self.max_rollout_depth[i], self.rollout_depth[i])
+                reset[i] = <int>(control_i == 1)
+                if reset[i]:
+                    self.tree_reset_event[i] = True
+                self.tree_token_valid_event[i] = True
+                self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+
+                next_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                if self.reset_mode == 1 and reset[i]:
+                    self.status[i] = 5
+                elif node_expanded(next_node, self.total_step[i]):
+                    self.status[i] = 2
+                elif self.cur_nodes[i][0].done:
+                    self.status[i] = 3
+                else:
+                    encoded = <dict>self.cur_nodes[i][0].encoded
+                    pass_model_states.append(tuple(encoded["model_states"]))
+                    pass_model_action.push_back(primary[i])
+                    self.status[i] = 4
+                if (self.max_search_steps > 0 and
+                        self.search_steps[i] >= self.max_search_steps):
+                    # The Nth computation ends the stage immediately.  There
+                    # is no extra STOP policy sample/call at the safety cap.
+                    self.phase[i] = 1
+                    self.stage_end_event[i] = True
+                    self.forced_stop_event[i] = True
+                    self.step_status[i] = 2
+                else:
+                    self.step_status[i] = 1
+
+            elif self.phase[i] == 1:  # NEED_REAL_ACTION
+                self.pending_real_action[i] = primary[i]
+                self.pending_real_valid[i] = True
+                self.phase[i] = 2
+                self.stored_action_mask_event[i] = True
+                self.accepted_primary_action_event[i] = primary[i]
+                self.status[i] = 7
+                self.step_status[i] = 4
+
+            else:  # WAIT
+                self.status[i] = 8
+                self.step_status[i] = 4
+
+        # The call that stores the last missing action also performs the real
+        # transition.  Because all phases are now WAIT, this call cannot also
+        # contain an imagination transition.
+        if self.all_real_actions_stored():
+            executed_np = np.array(self.pending_real_action, dtype=np.int32, copy=True)
+            model_action_np = executed_np.copy()
+            all_env_id = list(range(self.env_n))
+            for i in range(self.env_n):
+                self.executed_primary_action_event[i] = executed_np[i]
+                self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+                self.baseline_mean_q[i] = (
+                    average(self.root_nodes[i][0].prollout_qs[0]) -
+                    self.root_nodes[i][0].r) / self.discounting
+                self.total_step[i] += 1
+
+            obs, reward, done, truncated_done, info = self.env.step(
+                executed_np, env_id=all_env_id)
+            terminal_np = np.logical_or(done, truncated_done)
+            model_action_np[terminal_np] = 0
+            self.real_states_np[:] = obs
+
+            with torch.no_grad():
+                obs_py = torch.tensor(
+                    obs,
+                    dtype=torch.uint8 if self.state_dtype == 0 else torch.float32,
+                    device=self.device)
+                model_action_py = torch.tensor(
+                    model_action_np, dtype=torch.long, device=self.device
+                ).unsqueeze(0).unsqueeze(-1)
+                done_py = torch.tensor(terminal_np, dtype=torch.bool, device=self.device)
+                self.initial_per_state = self.per_state
+                model_net_out_1 = model_net(
+                    env_state=obs_py,
+                    done=done_py,
+                    actions=model_action_py,
+                    state=self.initial_per_state)
+                self.update_per_state(model_net_out_1, idx=None)
+            vs_1 = model_net_out_1.vs[-1, :, 0].float().cpu().numpy()
+            logits_1_ = model_net_out_1.policy[-1].float().squeeze(-2)
+            logits_1 = logits_1_.cpu().numpy()
+
+            for i in range(self.env_n):
+                new_root = (
+                    not self.tree_carry or
+                    not node_expanded(
+                        self.root_nodes[i][0].ppchildren[0][executed_np[i]], -1) or
+                    terminal_np[i])
+                encoded = {
+                    "real_states": obs_py[i],
+                    "xs": model_net_out_1.xs[-1, i] if self.return_x else None,
+                    "hs": model_net_out_1.hs[-1, i] if self.return_h else None,
+                    "model_states": tuple(
+                        model_net_out_1.state[md][i] for md in self.model_states_keys),
+                }
+                if new_root:
+                    root_node = node_new(
+                        pparent=NULL, action=model_action_np[i], logit=0.,
+                        num_actions=self.num_actions,
+                        discounting=self.discounting, rec_t=self.rec_t,
+                        remember_path=True)
+                    node_expand(
+                        pnode=root_node, r=reward[i], v=vs_1[i],
+                        t=self.total_step[i], done=False, logits=logits_1[i],
+                        encoded=<PyObject*>encoded, override=False)
+                    node_del(self.root_nodes[i], except_idx=-1)
+                else:
+                    root_node = self.root_nodes[i][0].ppchildren[0][executed_np[i]]
+                    node_expand(
+                        pnode=root_node, r=reward[i], v=vs_1[i],
+                        t=self.total_step[i], done=False, logits=logits_1[i],
+                        encoded=<PyObject*>encoded, override=True)
+                    node_del(self.root_nodes[i], except_idx=executed_np[i])
+                node_visit(root_node)
+                root_nodes_.push_back(root_node)
+                cur_nodes_.push_back(root_node)
+
+                self.status[i] = 1
+                self.phase[i] = 0
+                self.search_steps[i] = 0
+                self.cur_t[i] = 0
+                self.rollout_depth[i] = 0
+                self.max_rollout_depth[i] = 0
+                self.pending_real_valid[i] = False
+                self.pending_real_action[i] = 0
+                self.tree_reset_event[i] = True
+                self.tree_token_valid_event[i] = True
+                self.search_state_reset_event[i] = True
+                self.real_transition_event[i] = True
+                self.barrier_released_event[i] = True
+                self.step_status[i] = 0
+                self.full_reward[i] = reward[i]
+                self.full_done[i] = done[i]
+                self.full_truncated_done[i] = truncated_done[i]
+                self.full_im_done[i] = False
+                if terminal_np[i]:
+                    self.step_from_done[i] = 0
+                else:
+                    self.step_from_done[i] += 1
+
+            self.root_nodes = root_nodes_
+            self.cur_nodes = cur_nodes_
+            for i in range(self.env_n):
+                self.root_nodes_qmax[i] = self.root_nodes[i][0].max_q
+                self.root_nodes_qmax_[i] = self.root_nodes_qmax[i]
+                self.full_im_reward[i] = 0.
+
+            states = self.prepare_state_dynamic()
+            info = self.prepare_info_dynamic(info, False)
+            if self.im_enable:
+                info["im_reward"] = torch.zeros(
+                    (self.env_n, 1), dtype=torch.float, device=self.device)
+            return (
+                states,
+                torch.tensor(self.full_reward, dtype=torch.float, device=self.device),
+                torch.tensor(self.full_done, dtype=torch.bool, device=self.device),
+                torch.tensor(self.full_truncated_done, dtype=torch.bool, device=self.device),
+                info)
+
+        # No barrier: only unexpanded SEARCH nodes require a learned-model call.
+        if pass_model_action.size() > 0:
+            with torch.no_grad():
+                pass_model_states = dict({
+                    md: torch.stack([ms[i] for ms in pass_model_states], dim=0)
+                    for i, md in enumerate(self.model_states_keys)})
+                pass_model_action_py = torch.tensor(
+                    pass_model_action, dtype=torch.long, device=self.device
+                ).unsqueeze(-1)
+                model_net_out_4 = model_net.forward_single(
+                    state=pass_model_states, action=pass_model_action_py)
+            rs_4 = model_net_out_4.rs[-1, :, 0].float().cpu().numpy()
+            vs_4 = model_net_out_4.vs[-1, :, 0].float().cpu().numpy()
+            logits_4_ = model_net_out_4.policy[-1].float().squeeze(-2)
+            logits_4 = logits_4_.cpu().numpy()
+            if self.pred_done:
+                done_4 = model_net_out_4.dones[-1].bool().cpu().numpy()
+
+        l = 0
+        for i in range(self.env_n):
+            if self.status[i] == 2:
+                cur_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+            elif self.status[i] == 3:
+                for k in range(self.num_actions):
+                    self.par_logits[k] = self.cur_nodes[i][0].ppchildren[0][k][0].logit
+                cur_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                node_expand(
+                    pnode=cur_node, r=0., v=0., t=self.total_step[i],
+                    done=True, logits=self.par_logits,
+                    encoded=self.cur_nodes[i][0].encoded, override=True)
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+            elif self.status[i] == 4:
+                encoded = {
+                    "real_states": None,
+                    "xs": model_net_out_4.xs[-1, l] if self.return_x else None,
+                    "hs": model_net_out_4.hs[-1, l] if self.return_h else None,
+                    "model_states": tuple(
+                        model_net_out_4.state[md][l] for md in self.model_states_keys),
+                }
+                cur_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                if self.pred_done:
+                    v_in = vs_4[l] if not done_4[l] else 0.
+                    done_in = done_4[l]
+                else:
+                    v_in = vs_4[l]
+                    done_in = False
+                node_expand(
+                    pnode=cur_node, r=rs_4[l], v=v_in,
+                    t=self.total_step[i], done=done_in, logits=logits_4[l],
+                    encoded=<PyObject*>encoded, override=True)
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+                l += 1
+            elif self.status[i] == 5:
+                self.rollout_depth[i] = 0
+                cur_node = self.root_nodes[i]
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+            else:  # STOP, stored real action, or WAIT: freeze tree/current node
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(self.cur_nodes[i])
+
+        self.root_nodes = root_nodes_
+        self.cur_nodes = cur_nodes_
+        states = self.prepare_state_dynamic()
+
+        for i in range(self.env_n):
+            self.full_reward[i] = 0.
+            self.full_done[i] = False
+            self.full_truncated_done[i] = False
+            self.full_im_done[i] = self.cur_nodes[i][0].done
+            if self.im_enable:
+                self.root_nodes_qmax_[i] = self.root_nodes[i][0].max_q
+                if self.status[i] in [2, 3, 4, 5]:
+                    self.full_im_reward[i] = (
+                        self.root_nodes_qmax_[i] - self.root_nodes_qmax[i])
+                    if self.full_im_reward[i] < 0 or reset[i]:
+                        self.full_im_reward[i] = 0.
+                else:
+                    self.full_im_reward[i] = 0.
+                self.root_nodes_qmax[i] = self.root_nodes_qmax_[i]
+
+        # reset_mode=0 exposes the just-completed rollout token, then makes the
+        # root current for the next call (matching the original Thinker order).
+        for i in range(self.env_n):
+            if (self.reset_mode == 0 and reset[i] and
+                    self.status[i] in [2, 3, 4]):
+                self.rollout_depth[i] = 0
+                self.cur_nodes[i] = self.root_nodes[i]
+                node_visit(self.cur_nodes[i])
+                self.status[i] = 5
+
+        # Phase/legal masks describe the state accepted by the *next* call,
+        # whereas the tree token above intentionally describes the completed
+        # rollout before its reset.
+        info = self.prepare_info_dynamic(None, False)
+        if self.im_enable:
+            info["im_reward"] = torch.tensor(
+                self.full_im_reward, dtype=torch.float, device=self.device
+            ).unsqueeze(-1)
+
+        self.internal_counter += 1
+        return (
+            states,
+            torch.tensor(self.full_reward, dtype=torch.float, device=self.device),
+            torch.tensor(self.full_done, dtype=torch.bool, device=self.device),
+            torch.tensor(self.full_truncated_done, dtype=torch.bool, device=self.device),
+            info)
+
 cdef class cPerfectWrapper(cWrapper):
     """Wrap the gym environment with a perfect model (i.e. env that supports quick_save
     and quick_load); output for each step is (out, reward, done, truncated_done, info), where out is a dict 
@@ -1005,10 +1611,23 @@ cdef class cPerfectWrapper(cWrapper):
     """
         
     def reset(self, model_net, seed=None):
-        """reset the environment; should only be called in the initial"""
-        cdef int i
+        """Reset the environment and replace any previously active tree."""
+        cdef int i, slot_i, old_slot_limit
         cdef Node* root_node
         cdef Node* cur_node      
+
+        # See cModelWrapper.reset: a new reset owns a new forest and must not
+        # retain either roots or current-node aliases from the prior episode.
+        # No carried subtree survives, so its perfect-model snapshots must not
+        # survive either (slot zero is overwritten with the new real root).
+        old_slot_limit = 1
+        if self.dynamic_search:
+            for i in range(self.env_n):
+                old_slot_limit = max(old_slot_limit, self.next_snapshot_slot[i])
+            if hasattr(self.env, "quick_delete"):
+                for slot_i in range(1, old_slot_limit):
+                    self.env.quick_delete(slot_id=slot_i)
+        self.dispose_trees()
 
         with torch.no_grad():
             # some init.
@@ -1045,6 +1664,8 @@ cdef class cPerfectWrapper(cWrapper):
                            "xs": model_net_out.xs[-1, i] if model_net_out.xs is not None else None,
                            "hs": model_net_out.hs[-1, i] if model_net_out.hs is not None else None,
                            }
+                if self.dynamic_search:
+                    encoded["snapshot_slot"] = 0
                 node_expand(pnode=root_node, r=0., v=vs[-1, i].item(), t=self.total_step[i], done=False,
                     logits=logits[i], encoded=<PyObject*>encoded, override=False)
                 node_visit(pnode=root_node)
@@ -1055,12 +1676,16 @@ cdef class cPerfectWrapper(cWrapper):
             for i in range(self.env_n):
                 self.root_nodes_qmax[i] = self.root_nodes[i][0].max_q
 
-            states = self.prepare_state(None, None)            
-            info = self.prepare_info(info, self.status, True)
+            if self.dynamic_search:
+                self.reset_dynamic_state()
+                states = self.prepare_state_dynamic()
+                info = self.prepare_info_dynamic(info, True)
+            else:
+                states = self.prepare_state(None, None)
+                info = self.prepare_info(info, self.status, True)
             return states, info
 
     def step(self, action, model_net):  
-
         cdef int i, j, k
         cdef int[:] re_action
         cdef int[:] im_action
@@ -1080,6 +1705,9 @@ cdef class cPerfectWrapper(cWrapper):
 
         cdef float[:] vs
         cdef float[:,:] logits
+
+        if self.dynamic_search:
+            return self.step_dynamic(action, model_net)
 
         if self.time: self.timings.reset()        
 
@@ -1183,7 +1811,7 @@ cdef class cPerfectWrapper(cWrapper):
         if pass_idx_step.size() > 0:
             with torch.no_grad():
                 obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
-                pass_action_py = torch.tensor(pass_action, dtype=long, device=self.device).unsqueeze(-1).unsqueeze(0)
+                pass_action_py = torch.tensor(pass_action, dtype=torch.long, device=self.device).unsqueeze(-1).unsqueeze(0)
                 done_py = torch.tensor(done, dtype=torch.bool, device=self.device)
                 model_net_out = model_net(env_state=obs_py, 
                                           done=done_py,
@@ -1332,4 +1960,365 @@ cdef class cPerfectWrapper(cWrapper):
                 torch.tensor(self.full_reward, dtype=torch.float, device=self.device), 
                 torch.tensor(self.full_done, dtype=torch.float, device=self.device).bool(), 
                 torch.tensor(self.full_truncated_done, dtype=torch.float, device=self.device).bool(), 
-                info)     
+                info)
+
+    def step_dynamic(self, action, model_net):
+        """Dynamic perfect-model search using per-node snapshot slots."""
+        cdef int i, j, k, control_i, slot_i, old_slot_limit
+        cdef int[:] primary
+        cdef int[:] control
+        cdef int[:] reset
+        cdef Node* root_node
+        cdef Node* cur_node
+        cdef Node* next_node
+        cdef vector[Node*] cur_nodes_
+        cdef vector[Node*] root_nodes_
+        cdef float[:] vs
+        cdef float[:,:] logits
+
+        if self.time:
+            self.timings.reset()
+        assert type(action) is tuple and len(action) == 2, \
+            "action should be (primary_action, search_control)"
+
+        parsed_action = []
+        for i in range(2):
+            a = action[i]
+            assert torch.is_tensor(a) or isinstance(a, np.ndarray) or isinstance(a, list), \
+                f"action[{i}] should be either torch.tensor, np.ndarray, or list"
+            if torch.is_tensor(a):
+                a = a.detach().cpu().numpy()
+            if isinstance(a, list):
+                a = np.array(a, dtype=np.int32)
+            assert a.shape == (self.env_n,), \
+                f"action[{i}] shape should be {(self.env_n,)}, not {a.shape}"
+            if a.dtype != np.int32:
+                a = a.astype(np.int32)
+            parsed_action.append(a)
+        primary = parsed_action[0]
+        control = parsed_action[1]
+        assert (parsed_action[0] >= 0).all() and (parsed_action[0] < self.num_actions).all(), \
+            f"primary action should be in [0, {self.num_actions-1}]"
+        assert (parsed_action[1] >= 0).all() and (parsed_action[1] < 3).all(), \
+            "search control should be PROCEED=0, RESET=1, or STOP=2"
+
+        reset_np = np.zeros(self.env_n, dtype=np.intc)
+        reset = reset_np
+        self.clear_dynamic_events()
+        pass_idx_step = []
+        pass_action = []
+        pass_restore_slots = []
+
+        for i in range(self.env_n):
+            self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+            if self.phase[i] == 0:  # SEARCH
+                control_i = control[i]
+                assert not (
+                    control_i == 0 and self.max_depth > 0 and
+                    self.rollout_depth[i] >= self.max_depth - 1), \
+                    "PROCEED is illegal at max_depth; choose RESET or STOP"
+                self.accepted_control_event[i] = control_i
+
+                if control_i == 2:
+                    self.phase[i] = 1
+                    self.stage_end_event[i] = True
+                    self.status[i] = 6
+                    self.step_status[i] = 2
+                    continue
+
+                self.accepted_primary_action_event[i] = primary[i]
+                self.think_reward_event[i] = -1.
+                self.search_steps[i] += 1
+                self.cur_t[i] += 1
+                self.rollout_depth[i] += 1
+                self.max_rollout_depth[i] = max(
+                    self.max_rollout_depth[i], self.rollout_depth[i])
+                reset[i] = <int>(control_i == 1)
+                if reset[i]:
+                    self.tree_reset_event[i] = True
+                self.tree_token_valid_event[i] = True
+                self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+
+                next_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                if self.reset_mode == 1 and reset[i]:
+                    self.status[i] = 5
+                elif node_expanded(next_node, -1):
+                    self.status[i] = 2
+                elif self.cur_nodes[i][0].done:
+                    self.status[i] = 3
+                else:
+                    encoded = <dict>self.cur_nodes[i][0].encoded
+                    pass_idx_step.append(i)
+                    pass_action.append(primary[i])
+                    pass_restore_slots.append(int(encoded["snapshot_slot"]))
+                    self.status[i] = 4
+                if (self.max_search_steps > 0 and
+                        self.search_steps[i] >= self.max_search_steps):
+                    self.phase[i] = 1
+                    self.stage_end_event[i] = True
+                    self.forced_stop_event[i] = True
+                    self.step_status[i] = 2
+                else:
+                    self.step_status[i] = 1
+
+            elif self.phase[i] == 1:  # NEED_REAL_ACTION
+                self.pending_real_action[i] = primary[i]
+                self.pending_real_valid[i] = True
+                self.phase[i] = 2
+                self.stored_action_mask_event[i] = True
+                self.accepted_primary_action_event[i] = primary[i]
+                self.status[i] = 7
+                self.step_status[i] = 4
+            else:
+                self.status[i] = 8
+                self.step_status[i] = 4
+
+        if self.all_real_actions_stored():
+            executed_np = np.array(self.pending_real_action, dtype=np.int32, copy=True)
+            model_action_np = executed_np.copy()
+            all_env_id = list(range(self.env_n))
+            preserved_snapshot_slots = []
+            preserved_snapshot_slots_global = {0}
+            old_slot_limit = 1
+            for i in range(self.env_n):
+                old_slot_limit = max(old_slot_limit, self.next_snapshot_slot[i])
+                self.executed_primary_action_event[i] = executed_np[i]
+                self.max_rollout_depth_[i] = self.max_rollout_depth[i]
+                self.baseline_mean_q[i] = (
+                    average(self.root_nodes[i][0].prollout_qs[0]) -
+                    self.root_nodes[i][0].r) / self.discounting
+                self.total_step[i] += 1
+
+            # Slot zero is the immutable real root throughout a search stage.
+            self.env.quick_load(slot_id=0)
+            obs, reward, done, truncated_done, info = self.env.step(
+                executed_np, env_id=all_env_id)
+            terminal_np = np.logical_or(done, truncated_done)
+            model_action_np[terminal_np] = 0
+            self.real_states_np[:] = obs
+
+            with torch.no_grad():
+                obs_py = torch.tensor(
+                    obs,
+                    dtype=torch.uint8 if self.state_dtype == 0 else torch.float32,
+                    device=self.device)
+                model_action_py = torch.tensor(
+                    model_action_np, dtype=torch.long, device=self.device
+                ).unsqueeze(0).unsqueeze(-1)
+                done_py = torch.tensor(terminal_np, dtype=torch.bool, device=self.device)
+                model_net_out = model_net(
+                    env_state=obs_py, done=done_py,
+                    actions=model_action_py, state=None)
+            vs = model_net_out.vs[-1, :, 0].float().cpu().numpy()
+            logits_ = model_net_out.policy[-1].float().squeeze(-2)
+            logits = logits_.cpu().numpy()
+
+            # The post-real state becomes next stage's immutable root.
+            self.env.quick_save(slot_id=0)
+
+            for i in range(self.env_n):
+                new_root = (
+                    not self.tree_carry or
+                    not node_expanded(
+                        self.root_nodes[i][0].ppchildren[0][executed_np[i]], -1) or
+                    terminal_np[i])
+                if new_root:
+                    root_node = node_new(
+                        pparent=NULL, action=model_action_np[i], logit=0.,
+                        num_actions=self.num_actions,
+                        discounting=self.discounting, rec_t=self.rec_t,
+                        remember_path=False)
+                else:
+                    root_node = self.root_nodes[i][0].ppchildren[0][executed_np[i]]
+                encoded = {
+                    "real_states": obs_py[i],
+                    "xs": model_net_out.xs[-1, i] if model_net_out.xs is not None else None,
+                    "hs": model_net_out.hs[-1, i] if model_net_out.hs is not None else None,
+                    "snapshot_slot": 0,
+                }
+                node_expand(
+                    pnode=root_node, r=reward[i], v=vs[i],
+                    t=self.total_step[i], done=False, logits=logits[i],
+                    encoded=<PyObject*>encoded, override=not new_root)
+                node_del(
+                    self.root_nodes[i],
+                    except_idx=-1 if new_root else executed_np[i])
+                env_snapshot_slots = set()
+                node_collect_snapshot_slots(root_node, env_snapshot_slots)
+                env_snapshot_slots.add(0)
+                preserved_snapshot_slots.append(env_snapshot_slots)
+                preserved_snapshot_slots_global.update(env_snapshot_slots)
+                node_visit(root_node)
+                root_nodes_.push_back(root_node)
+                cur_nodes_.push_back(root_node)
+
+                self.status[i] = 1
+                self.phase[i] = 0
+                self.search_steps[i] = 0
+                self.cur_t[i] = 0
+                self.rollout_depth[i] = 0
+                self.max_rollout_depth[i] = 0
+                self.pending_real_valid[i] = False
+                self.pending_real_action[i] = 0
+                self.tree_reset_event[i] = True
+                self.tree_token_valid_event[i] = True
+                self.search_state_reset_event[i] = True
+                self.real_transition_event[i] = True
+                self.barrier_released_event[i] = True
+                self.step_status[i] = 0
+                self.full_reward[i] = reward[i]
+                self.full_done[i] = done[i]
+                self.full_truncated_done[i] = truncated_done[i]
+                self.full_im_done[i] = False
+
+            self.root_nodes = root_nodes_
+            self.cur_nodes = cur_nodes_
+            for i in range(self.env_n):
+                # Allocate above every slot still reachable by this env's
+                # carried subtree.  A numeric slot may be live in a different
+                # env, because VectorWrap stores per-slot arrays for the batch.
+                self.next_snapshot_slot[i] = max(preserved_snapshot_slots[i]) + 1
+                self.root_nodes_qmax[i] = self.root_nodes[i][0].max_q
+                self.root_nodes_qmax_[i] = self.root_nodes_qmax[i]
+                self.full_im_reward[i] = 0.
+
+            # Delete only slots unused by *all* carried subtrees; targeted
+            # deletion would otherwise pop a shared VectorWrap slot needed by
+            # another environment.
+            if hasattr(self.env, "quick_delete"):
+                for slot_i in range(1, old_slot_limit):
+                    if slot_i not in preserved_snapshot_slots_global:
+                        self.env.quick_delete(slot_id=slot_i)
+
+            states = self.prepare_state_dynamic()
+            info = self.prepare_info_dynamic(info, True)
+            if self.im_enable:
+                info["im_reward"] = torch.zeros(
+                    (self.env_n, 1), dtype=torch.float, device=self.device)
+            return (
+                states,
+                torch.tensor(self.full_reward, dtype=torch.float, device=self.device),
+                torch.tensor(self.full_done, dtype=torch.bool, device=self.device),
+                torch.tensor(self.full_truncated_done, dtype=torch.bool, device=self.device),
+                info)
+
+        # Restore the exact parent snapshot for every unexpanded node, step the
+        # selected subset, then give each resulting child a stable slot.
+        if len(pass_idx_step) > 0:
+            self.env.quick_load_slots(
+                env_id=pass_idx_step, slot_ids=pass_restore_slots)
+            obs, reward, done, truncated_done, _ = self.env.step(
+                np.array(pass_action, dtype=np.int32), env_id=pass_idx_step)
+            terminal_np = np.logical_or(done, truncated_done)
+            model_action_np = np.array(pass_action, dtype=np.int32)
+            model_action_np[terminal_np] = 0
+            new_snapshot_slots = []
+            for i in pass_idx_step:
+                new_snapshot_slots.append(self.next_snapshot_slot[i])
+                self.next_snapshot_slot[i] += 1
+            self.env.quick_save_slots(
+                env_id=pass_idx_step, slot_ids=new_snapshot_slots)
+
+            with torch.no_grad():
+                obs_py = torch.tensor(
+                    obs,
+                    dtype=torch.uint8 if self.state_dtype == 0 else torch.float32,
+                    device=self.device)
+                model_action_py = torch.tensor(
+                    model_action_np, dtype=torch.long, device=self.device
+                ).unsqueeze(-1).unsqueeze(0)
+                done_py = torch.tensor(terminal_np, dtype=torch.bool, device=self.device)
+                model_net_out = model_net(
+                    env_state=obs_py, done=done_py,
+                    actions=model_action_py, state=None)
+            vs = model_net_out.vs[-1, :, 0].float().cpu().numpy()
+            logits_ = model_net_out.policy[-1].float().squeeze(-2)
+            logits = logits_.cpu().numpy()
+
+        j = 0
+        for i in range(self.env_n):
+            if self.status[i] == 2:
+                cur_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+            elif self.status[i] == 3:
+                for k in range(self.num_actions):
+                    self.par_logits[k] = self.cur_nodes[i][0].ppchildren[0][k][0].logit
+                cur_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                node_expand(
+                    pnode=cur_node, r=0., v=0., t=self.total_step[i],
+                    done=True, logits=self.par_logits,
+                    encoded=self.cur_nodes[i][0].encoded, override=False)
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+            elif self.status[i] == 4:
+                encoded = {
+                    "real_states": None,
+                    "xs": model_net_out.xs[-1, j] if model_net_out.xs is not None else None,
+                    "hs": model_net_out.hs[-1, j] if model_net_out.hs is not None else None,
+                    "snapshot_slot": new_snapshot_slots[j],
+                }
+                cur_node = self.cur_nodes[i][0].ppchildren[0][primary[i]]
+                node_expand(
+                    pnode=cur_node, r=reward[j],
+                    v=vs[j] if not terminal_np[j] else 0.,
+                    t=self.total_step[i], done=terminal_np[j], logits=logits[j],
+                    encoded=<PyObject*>encoded, override=False)
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+                j += 1
+            elif self.status[i] == 5:
+                self.rollout_depth[i] = 0
+                cur_node = self.root_nodes[i]
+                node_visit(cur_node)
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(cur_node)
+            else:
+                root_nodes_.push_back(self.root_nodes[i])
+                cur_nodes_.push_back(self.cur_nodes[i])
+
+        self.root_nodes = root_nodes_
+        self.cur_nodes = cur_nodes_
+        states = self.prepare_state_dynamic()
+
+        for i in range(self.env_n):
+            self.full_reward[i] = 0.
+            self.full_done[i] = False
+            self.full_truncated_done[i] = False
+            self.full_im_done[i] = self.cur_nodes[i][0].done
+            if self.im_enable:
+                self.root_nodes_qmax_[i] = self.root_nodes[i][0].max_q
+                if self.status[i] in [2, 3, 4, 5]:
+                    self.full_im_reward[i] = (
+                        self.root_nodes_qmax_[i] - self.root_nodes_qmax[i])
+                    if self.full_im_reward[i] < 0 or reset[i]:
+                        self.full_im_reward[i] = 0.
+                else:
+                    self.full_im_reward[i] = 0.
+                self.root_nodes_qmax[i] = self.root_nodes_qmax_[i]
+
+        for i in range(self.env_n):
+            if (self.reset_mode == 0 and reset[i] and
+                    self.status[i] in [2, 3, 4]):
+                self.rollout_depth[i] = 0
+                self.cur_nodes[i] = self.root_nodes[i]
+                node_visit(self.cur_nodes[i])
+                self.status[i] = 5
+
+
+        info = self.prepare_info_dynamic(None, True)
+        if self.im_enable:
+            info["im_reward"] = torch.tensor(
+                self.full_im_reward, dtype=torch.float, device=self.device
+            ).unsqueeze(-1)
+
+        self.internal_counter += 1
+        return (
+            states,
+            torch.tensor(self.full_reward, dtype=torch.float, device=self.device),
+            torch.tensor(self.full_done, dtype=torch.bool, device=self.device),
+            torch.tensor(self.full_truncated_done, dtype=torch.bool, device=self.device),
+            info)

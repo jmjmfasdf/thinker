@@ -481,6 +481,7 @@ class SelfPlayBuffer:
         # A ray actor tailored for logging across self-play worker; code mostly from learn_actor
         self.flags = flags
         self._logger = util.logger()
+        self.dynamic_search = util.dynamic_search_enabled(flags)
 
         max_actor_id = (
             self.flags.self_play_n * self.flags.env_n
@@ -491,6 +492,8 @@ class SelfPlayBuffer:
             self.ret_buffers["im"] = RetBuffer(max_actor_id, mean_n=20000)
         if self.flags.cur_cost > 0.:
             self.ret_buffers["cur"] = RetBuffer(max_actor_id, mean_n=400) 
+        if self.dynamic_search:
+            self.ret_buffers["think"] = RetBuffer(max_actor_id, mean_n=20000)
         self.ret_buffers["len"] = RetBuffer(max_actor_id, mean_n=400)
         
         self.plogger = FileWriter(
@@ -500,11 +503,7 @@ class SelfPlayBuffer:
             overwrite=not self.flags.ckp,
         )
 
-        self.rewards_ls = ["re"]
-        if flags.im_cost > 0.0:
-            self.rewards_ls += ["im"]
-        if flags.cur_cost > 0.0:
-            self.rewards_ls += ["cur"]
+        self.rewards_ls = util.get_reward_names(flags)
         self.num_rewards = len(self.rewards_ls)
 
         self.step, self.real_step, self.tot_eps = 0, 0, 0        
@@ -525,7 +524,11 @@ class SelfPlayBuffer:
         self.ckp_start_time = int(time.strftime("%M")) // 10
         
 
-    def insert(self, step_status, episode_return, episode_step, real_done, actor_id):
+    def insert(
+            self, step_status, episode_return, episode_step, real_done, actor_id,
+            real_transition=None, stage_end=None, forced_stop=None,
+            search_steps=None, search_control=None, control_valid=None,
+            policy_valid=None, phase=None):
 
         stats = {}
 
@@ -536,8 +539,39 @@ class SelfPlayBuffer:
         episode_step = torch.tensor(episode_step)
         real_done = torch.tensor(real_done)        
 
-        last_step_real = (step_status == 0) | (step_status == 3)
-        next_step_real = (step_status == 2) | (step_status == 3)
+        if self.dynamic_search:
+            if (real_transition is None or stage_end is None
+                    or search_steps is None):
+                raise ValueError(
+                    "dynamic_search logging requires real_transition, "
+                    "stage_end and search_steps"
+                )
+            # Self-play unrolls overlap by one bootstrap row.  The learner
+            # drops row zero, so logging must do the same to avoid double
+            # counting real transitions, stage endings and episode returns.
+            step_status = step_status[1:]
+            episode_return = episode_return[1:]
+            episode_step = episode_step[1:]
+            real_done = real_done[1:]
+            real_transition = torch.as_tensor(real_transition)[1:]
+            stage_end = torch.as_tensor(stage_end)[1:]
+            search_steps = torch.as_tensor(search_steps)[1:]
+            if forced_stop is not None:
+                forced_stop = torch.as_tensor(forced_stop)[1:]
+            if search_control is not None:
+                search_control = torch.as_tensor(search_control)[1:]
+            if control_valid is not None:
+                control_valid = torch.as_tensor(control_valid)[1:]
+            if policy_valid is not None:
+                policy_valid = torch.as_tensor(policy_valid)[1:]
+            if phase is not None:
+                phase = torch.as_tensor(phase)[1:]
+            T = episode_return.shape[0]
+            last_step_real = real_transition.bool()
+            next_step_real = stage_end.bool()
+        else:
+            last_step_real = (step_status == 0) | (step_status == 3)
+            next_step_real = (step_status == 2) | (step_status == 3)
 
         # extract episode_returns
         episode_returns, done_ids = self.ret_buffers["re"].insert(
@@ -551,8 +585,8 @@ class SelfPlayBuffer:
                  "max_episode_return": self.ret_buffers["re"].get_max(),
                  "rmean_len": self.ret_buffers["len"].get_mean(),}
 
-        for prefix in ["im", "cur"]:            
-            if prefix == "im":
+        for prefix in self.rewards_ls[1:]:
+            if prefix in ["im", "think"]:
                 done = next_step_real
             elif prefix == "cur":
                 done = real_done
@@ -564,6 +598,55 @@ class SelfPlayBuffer:
                 )
                 r = self.ret_buffers[prefix].get_mean()
                 stats["rmean_%s_episode_return" % prefix] = r
+
+        if self.dynamic_search:
+            stage_end_t = next_step_real
+            stats.update(util.get_search_budget_stats(
+                search_steps, stage_end_t
+            ))
+
+            if search_control is not None and control_valid is not None:
+                control_valid_t = control_valid.bool()
+                controls = search_control[control_valid_t]
+                control_n = max(int(controls.numel()), 1)
+                stats.update({
+                    "search/proceed_ratio": (
+                        (controls == util.PROCEED).sum().item() / control_n
+                    ),
+                    "search/reset_ratio": (
+                        (controls == util.RESET).sum().item() / control_n
+                    ),
+                    "search/stop_ratio": (
+                        (controls == util.STOP).sum().item() / control_n
+                    ),
+                })
+            if forced_stop is not None:
+                stage_n = max(int(stage_end_t.sum().item()), 1)
+                stats["search/forced_stop_rate"] = (
+                    forced_stop.bool().sum().item() / stage_n
+                )
+            if policy_valid is not None:
+                # policy_valid is aligned with the action sampled on this
+                # row.  The post-step phase may already be SEARCH on the call
+                # that releases the barrier, even for environments whose
+                # action on that call was a WAIT no-op.
+                policy_valid_t = policy_valid.bool()
+                stats["search/wait_fraction"] = (
+                    (~policy_valid_t).float().mean().item()
+                )
+                stats["search/active_batch_fraction"] = (
+                    policy_valid_t.float().mean().item()
+                )
+                stats["search/active_batch_size"] = (
+                    policy_valid_t.float().sum(dim=1).mean().item()
+                )
+            elif phase is not None:
+                stats["search/wait_fraction"] = (
+                    (phase == util.WAIT_PHASE).float().mean().item()
+                )
+            stats["search/real_transition_fraction"] = (
+                last_step_real.float().mean().item()
+            )
 
         self.step += T * B
         self.real_step += torch.sum(last_step_real).item()
@@ -609,6 +692,11 @@ class SelfPlayBuffer:
                     stats.get("rmean_cur_episode_return", 0.),
                 )
             )            
+            if self.dynamic_search:
+                print_str += " ThinkRet %.4f SearchLen %.2f." % (
+                    stats.get("rmean_think_episode_return", 0.),
+                    stats.get("search/mean_steps", 0.),
+                )
             self._logger.info(print_str)
             self.start_time = self.timer()
             self.queue_n = 0     
@@ -626,6 +714,9 @@ class SelfPlayBuffer:
                 "real_step": self.real_step,
                 "tot_eps": self.tot_eps,
                 "ret_buffers": self.ret_buffers,
+                "actor_arch_version": 2 if self.dynamic_search else 1,
+                "dynamic_search": self.dynamic_search,
+                "reward_names": list(self.rewards_ls),
                 "flags": vars(self.flags),
             }      
         try:
@@ -635,7 +726,43 @@ class SelfPlayBuffer:
             pass
 
     def load_checkpoint(self, ckp_path: str):
-        train_checkpoint = torch.load(ckp_path, torch.device("cpu"))
+        # Self-play checkpoints contain RetBuffer objects in addition to
+        # tensors.  PyTorch 2.6+ defaults to weights_only=True, which rejects
+        # those trusted local checkpoint objects.
+        train_checkpoint = torch.load(
+            ckp_path, torch.device("cpu"), weights_only=False
+        )
+        checkpoint_flags = train_checkpoint.get("flags", {})
+        checkpoint_dynamic = bool(train_checkpoint.get(
+            "dynamic_search", checkpoint_flags.get("dynamic_search", False)
+        ))
+        if checkpoint_dynamic != self.dynamic_search:
+            raise ValueError(
+                "Cannot resume self-play statistics across dynamic_search modes."
+            )
+        checkpoint_arch = train_checkpoint.get("actor_arch_version")
+        expected_arch = 2 if self.dynamic_search else 1
+        if self.dynamic_search and checkpoint_arch is None:
+            raise ValueError(
+                "Dynamic self-play checkpoint is missing "
+                "actor_arch_version metadata."
+            )
+        if checkpoint_arch is not None and checkpoint_arch != expected_arch:
+            raise ValueError(
+                f"Self-play checkpoint architecture {checkpoint_arch} does "
+                f"not match expected version {expected_arch}."
+            )
+        checkpoint_rewards = train_checkpoint.get("reward_names")
+        if self.dynamic_search and checkpoint_rewards is None:
+            raise ValueError(
+                "Dynamic self-play checkpoint is missing reward_names metadata."
+            )
+        if (checkpoint_rewards is not None
+                and list(checkpoint_rewards) != list(self.rewards_ls)):
+            raise ValueError(
+                "Self-play checkpoint reward channels do not match this run: "
+                f"{checkpoint_rewards} != {self.rewards_ls}."
+            )
         self.step = train_checkpoint["step"]
         self.real_step = train_checkpoint["real_step"]
         self.tot_eps = train_checkpoint["tot_eps"]

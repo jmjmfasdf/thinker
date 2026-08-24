@@ -7,12 +7,14 @@ This is the official repository for the paper titled [*Thinker: Learning to Plan
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Training in Thinker-augmented MDPs](#training-in-thinker-augmented-mdps)
+- [Dynamic Thinker](#dynamic-thinker)
 - [Basic Usage](#basic-usage-of-the-thinker-augmented-mdp)
 - [Configuration](#configuration)
 - [Available Environments](#available-environments)
 - [Available Wrappers](#available-wrappers)
 - [Resource Management](#resource-management)
 - [Resuming from a Checkpoint](#resuming-from-a-checkpoint)
+- [Testing](#testing)
 - [API](#api)
 	- [Thinker.make](#thinkermake-function)
 	- [env.reset](#envreset-method)
@@ -119,6 +121,90 @@ To save computational cost, you can use only 10 imaginary steps (instead of the 
 python train.py --rec_t 11 --tree_rep_rnn false --see_h false
 ```
 
+## Dynamic Thinker
+
+Dynamic Thinker is opt-in.  It learns the number of planning transitions at
+each real decision with the same categorical policy-gradient objective used by
+the actor.  The original fixed-budget implementation and its checkpoint shapes
+remain the default.
+
+```bash
+cd thinker
+python train.py \
+  --dynamic_search true \
+  --wrapper_type 0 \
+  --max_search_steps -1 \
+  --think_cost 0.002
+```
+
+`wrapper_type=0` (learned dynamics) and `wrapper_type=2` (perfect dynamics) are
+supported.  MCTS and nonzero `reset_mode` are intentionally rejected in this
+mode.  `rec_t` and `test_rec_t` continue to configure only fixed Thinker;
+`max_depth` remains a branch-depth limit and does not change the Dynamic actor
+shape.
+
+The second component of a Dynamic action is a three-way search control:
+
+- `0` (`PROCEED`) applies the imaginary action and remains at its child.
+- `1` (`RESET`) applies the imaginary action and returns to the search root.
+- `2` (`STOP`) leaves the tree unchanged and requests a real action.
+
+Environments may stop at different times.  A stopped environment first enters
+`NEED_REAL_ACTION`, where the real-policy action and its behavior probability
+are saved, and then waits in `WAIT`.  Once every environment has supplied a
+real action, the saved batch is executed by exactly one underlying `env.step`.
+A WAIT call that does not release the barrier is an identity transition:
+reward and policy log-probability are zero, discount is one, and recurrent
+search state is frozen.  On the call that stores the final missing real action,
+the barrier releases immediately.  Earlier WAIT rows still have zero policy
+log-probability on that call, but receive the resulting real transition and
+root-state update with the rest of the batch.
+
+Each `PROCEED` or `RESET` produces `think_reward=-1`; the actor loss scales that
+channel by `think_cost` (default `0.002`).  `STOP`, real-action storage, and
+`WAIT` have zero think reward.  Meta/search transitions use discount one and a
+real transition uses the environment discount (or zero at a terminal).  Thus
+the compute penalty, rather than an accidental per-augmented-step discount,
+trains the stopping policy.
+
+`max_search_steps=-1` means no forced cap.  A positive value executes at most
+that many planning actions before forcing the real-action phase; `0` is invalid.
+Unbounded search can fail to terminate early in training, so use a positive cap
+while debugging a new task or initialization.
+
+For Dynamic runs, actor/self-play logs and W&B include `max_budget` and
+`mean_budget`.  They are respectively the maximum and mean number of executed
+imagination actions (PROCEED or RESET) across search stages completed in that
+logging batch.  STOP, real-action storage, WAIT, and incomplete stages crossing
+an unroll boundary are not counted.  The existing `search/mean_steps`, median,
+and p95 metrics remain available for compatibility.
+
+Dynamic tree observations are fixed-width tokens whose history is accumulated
+by a masked GRU.  Their width and the actor parameter shapes do not depend on
+`max_search_steps` or `max_depth`.  The root contributes one token and each
+executed `PROCEED`/`RESET` contributes one token.  STOP, real-action storage,
+and non-releasing WAIT calls do not update the search GRU; a barrier release
+resets it and consumes the new root token.
+
+Legacy fixed checkpoints may be supplied only as `preload_actor` for a Dynamic
+run.  Compatible policy/encoder weights and the old two reset rows are migrated,
+while the STOP row, tree GRU, phase embedding, and think value are initialized
+for the new architecture.  Optimizer, normalization, scheduler, and learner
+counters are not migrated.  `ckp=true` resume is strict and requires the same
+Dynamic architecture version and reward-channel list.
+
+## Testing
+
+The state-machine tests import the compiled Cython wrapper.  Rebuild it before
+running pytest whenever `cenv.pyx` changes:
+
+```bash
+pip install -r requirements-dev.txt
+cd thinker
+python setup.py build_ext --inplace
+pytest -q tests
+```
+
 ### Visualizing a Run
 
 To visualize a specific run, follow the steps below:
@@ -139,15 +225,28 @@ import thinker
 import numpy as np
 env_n = 16 # batch size
 env = thinker.make("Sokoban-v0", env_n=env_n, gpu=False) # or atari games like "BreakoutNoFrameskip-v4"
-initial_state = env.reset()
+initial_state, info = env.reset()
 for _ in range(20):
 	primary_action = np.random.randint(5, size=env_n) # 5 possible actions in Sokoban
 	reset_action = np.random.randint(2, size=env_n) # 2 possible reset actions
-	state, reward, done, info = env.step(primary_action, reset_action) 
+	state, reward, done, truncated_done, info = env.step(primary_action, reset_action)
 print(state["tree_reps"].shape, state["real_states"].shape)
 env.close()
 ```
 which should output `torch.Size([16, 79]) torch.Size([16, 3, 80, 80])`.
+
+With `dynamic_search=True`, pass a three-valued `search_control` in the second
+slot.  The tuple arity is unchanged:
+
+```py
+env = thinker.make("Sokoban-v0", env_n=env_n, gpu=False,
+                   dynamic_search=True, max_search_steps=40)
+state, info = env.reset()
+primary_action = np.random.randint(5, size=env_n)
+search_control = np.random.randint(3, size=env_n)
+state, reward, done, truncated_done, info = env.step(
+    primary_action, search_control)
+```
 
 ## Configuration
 
@@ -312,10 +411,11 @@ The `env.reset` method resets the current environment, and shall be called only 
 
 **Definition:**
 ```py
-initial_state = env.reset()
+initial_state, info = env.reset()
 ```
 **Returns:**
 -   `initial_state`: The initial state, which is in the same format as the `state` returned in `env.step` method.
+-   `info`: Initial transition metadata, including Dynamic phase and mask fields.
 
 
 ### `env.step` method
@@ -324,7 +424,8 @@ The `env.step` method advances the environment's state by one time step based on
 
 **Definition:**
 ```py
-state, reward, done, info = env.step(primary_action, reset_action, action_prob=None)
+state, reward, done, truncated_done, info = env.step(
+    primary_action, search_control, action_prob=None)
 ```
 **Parameters:**
 
@@ -332,10 +433,12 @@ state, reward, done, info = env.step(primary_action, reset_action, action_prob=N
     -   Type: Torch tensor or numpy array.
     -   Shape: `(env_n,)`
 
--   `reset_action`: Reset action to be taken in the environment state.    
+-   `search_control`: Search-control action. In fixed mode this is the legacy
+    reset bit (`0` or `1`). In Dynamic mode it is `PROCEED=0`, `RESET=1`, or
+    `STOP=2`.
     -   Type: Torch tensor or numpy array.
     -   Shape: `(env_n,)`
-    -   Each element must be either 0 or 1.
+    -   Each element must be in the action space described above.
 
 -   `action_prob` (Optional): Probability distribution over actions. This is required when `require_prob=True` is set for the environment. Passing the action probability provides a better training target for the model.  If `require_prob=False`, this `action_prob` will not be used.
     -   Type: Torch tensor or numpy array.
@@ -365,6 +468,16 @@ state, reward, done, info = env.step(primary_action, reset_action, action_prob=N
 	    -   `1`: An imaginary action was just taken, and the next action is an imaginary action.
 	    -   `2`: An imaginary action was just taken, and the next action is a real action. Typically, a stage has a `step_status` of `[0, 1, 1, ..., 1, 2]` , where the count of `1`s equals the stage length `K` minus 2.
 		-   `3`: A real action was just taken, and the next action is a real action. This only occurs when there is no imagaination steps.
+		In Dynamic mode this field is retained only for compatibility and logging;
+		use the explicit fields below for transition semantics.
+	-   `phase`: Dynamic phase (`SEARCH=0`, `NEED_REAL_ACTION=1`, `WAIT=2`).
+	-   `legal_control_mask`: Boolean mask over `PROCEED`, `RESET`, and `STOP`.
+	-   `tree_token_valid`: Whether this transition contributes a search token.
+	-   `search_state_reset`: Whether the masked tree GRU starts a new history.
+	-   `real_transition`: Whether the underlying batched environment advanced.
+	-   `stage_end`: Whether the search stage ended on this transition.
+	-   `forced_stop`: Whether `max_search_steps` ended search without a sampled STOP.
+	-   `search_steps`: Number of planning actions in the current stage.
 	-   `max_rollout_depth`: Integer tensor representing the greatest depth achieved in all rollouts during the current stage; primarily used for logging.    
 	-   `baseline`: Float tensor representing the mean rollout return at the root node. It is updated only at the end of a stage and can be utilized as a value estimation of the real state underlying the stage.    
 	-   `im_reward`: Float tensor representing the planning rewards.

@@ -19,19 +19,85 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-       
+
+# Dynamic Thinker public action/phase contracts.  Keep these values in sync
+# with cenv.pyx; tests assert the mapping at the Python/Cython boundary.
+PROCEED = 0
+RESET = 1
+STOP = 2
+
+SEARCH_PHASE = 0
+NEED_REAL_ACTION_PHASE = 1
+WAIT_PHASE = 2
+
+POLICY_NONE = 0
+POLICY_SEARCH = 1
+POLICY_REAL = 2
+
 _fields = ("real_states", "tree_reps", "xs", "hs")
 _fields += ("reward", "episode_return", "episode_step")
 _fields += ("done", "real_done", "truncated_done")
 _fields += ("max_rollout_depth", "step_status")
 _fields += ("last_pri", "last_reset", "cur_gate")
+_fields += ("last_search_control", "phase", "legal_control_mask")
+_fields += ("tree_token_valid", "search_state_reset", "real_transition")
+_fields += ("stage_end", "forced_stop", "search_steps")
 EnvOut = namedtuple("EnvOut", _fields)   
+
+
+def dynamic_search_enabled(flags):
+    """Return whether the opt-in Dynamic Thinker state machine is enabled."""
+    return bool(getattr(flags, "dynamic_search", False))
+
+
+def get_reward_names(flags):
+    """Canonical actor reward-channel order.
+
+    The Dynamic computation channel is appended so legacy reward indices stay
+    stable during partial actor-checkpoint migration.
+    """
+    names = ["re"]
+    if flags.im_cost > 0.0:
+        names.append("im")
+    if flags.cur_cost > 0.0:
+        names.append("cur")
+    if dynamic_search_enabled(flags):
+        names.append("think")
+    return names
+
+
+def get_search_budget_stats(search_steps, stage_end):
+    """Summarize imagination actions for completed Dynamic search stages.
+
+    ``search_steps`` counts accepted PROCEED/RESET actions in a stage.  STOP,
+    real-action storage, and WAIT calls are therefore excluded.  Incomplete
+    stages are excluded as well so an unroll boundary cannot shorten a budget.
+    """
+    search_steps = torch.as_tensor(search_steps)
+    stage_end = torch.as_tensor(stage_end, device=search_steps.device).bool()
+    ended_steps = search_steps[stage_end].float()
+    if ended_steps.numel() == 0:
+        return {
+            "max_budget": 0.0,
+            "mean_budget": 0.0,
+            "search/mean_steps": 0.0,
+            "search/median_steps": 0.0,
+            "search/p95_steps": 0.0,
+        }
+
+    mean_budget = ended_steps.mean().item()
+    return {
+        "max_budget": ended_steps.max().item(),
+        "mean_budget": mean_budget,
+        # Keep the existing names for dashboard/checkpoint-log compatibility.
+        "search/mean_steps": mean_budget,
+        "search/median_steps": ended_steps.median().item(),
+        "search/p95_steps": torch.quantile(ended_steps, 0.95).item(),
+    }
 
 def init_env_out(state, info, flags, dim_actions, tuple_action):
     # minimum env_out for actor_net
-    num_rewards = 1        
-    num_rewards += int(flags.im_cost > 0.0)
-    num_rewards += int(flags.cur_cost > 0.0)
+    num_rewards = len(get_reward_names(flags))
 
     env_n = state["real_states"].shape[0]
     device = state["real_states"].device
@@ -40,21 +106,35 @@ def init_env_out(state, info, flags, dim_actions, tuple_action):
     out = {
         "last_pri": torch.zeros(last_pri_shape, dtype=torch.long, device=device),
         "last_reset": torch.zeros(env_n, dtype=torch.long, device=device),
+        "last_search_control": torch.zeros(env_n, dtype=torch.long, device=device),
         "reward": torch.zeros((env_n, num_rewards), 
                             dtype=torch.float, device=device),
         "done": torch.zeros(env_n, dtype=torch.bool, device=device),
         "truncated_done": torch.zeros(env_n, dtype=torch.long, device=device),
     }
 
-    for field in EnvOut._fields:    
+    if dynamic_search_enabled(flags):
+        out.update({
+            "phase": torch.full((env_n,), SEARCH_PHASE, dtype=torch.long, device=device),
+            "legal_control_mask": torch.ones((env_n, 3), dtype=torch.bool, device=device),
+            "tree_token_valid": torch.ones(env_n, dtype=torch.bool, device=device),
+            "search_state_reset": torch.ones(env_n, dtype=torch.bool, device=device),
+            "real_transition": torch.zeros(env_n, dtype=torch.bool, device=device),
+            "stage_end": torch.zeros(env_n, dtype=torch.bool, device=device),
+            "forced_stop": torch.zeros(env_n, dtype=torch.bool, device=device),
+            "search_steps": torch.zeros(env_n, dtype=torch.long, device=device),
+        })
+
+    # State/info are authoritative.  In particular, the Dynamic defaults
+    # above describe only the reset observation; they must not shadow phase
+    # and mask values returned by the wrapper.
+    for field in EnvOut._fields:
+        if field in state and state[field] is not None:
+            out[field] = state[field]
+        if field in info and info[field] is not None:
+            out[field] = info[field]
         if field not in out:
             out[field] = None
-        else:
-            continue
-        if field in state.keys():
-            out[field] = state[field]
-        if field in info.keys():
-            out[field] = info[field]
 
     for k, v in out.items():
         if v is not None:
@@ -69,6 +149,13 @@ def create_env_out(action, state, reward, done, truncated_done, info, flags):
         aug_reward.append(info["im_reward"][:, 0])
     if flags.cur_cost > 0:
         aug_reward.append(info["cur_reward"])
+    if dynamic_search_enabled(flags):
+        think_reward = info.get("think_reward")
+        if think_reward is None:
+            think_reward = torch.zeros_like(reward)
+        if think_reward.ndim > reward.ndim:
+            think_reward = think_reward[..., 0]
+        aug_reward.append(think_reward)
     aug_reward = torch.stack(aug_reward, dim=-1)
 
     if 'episode_return' in info:
@@ -77,6 +164,11 @@ def create_env_out(action, state, reward, done, truncated_done, info, flags):
             aug_epsoide_return.append(info["im_episode_return"])
         if flags.cur_cost > 0:
             aug_epsoide_return.append(info["cur_episode_return"])
+        if dynamic_search_enabled(flags):
+            think_episode_return = info.get("think_episode_return")
+            if think_episode_return is None:
+                think_episode_return = torch.zeros_like(info["episode_return"])
+            aug_epsoide_return.append(think_episode_return)
         aug_epsoide_return = torch.stack(aug_epsoide_return, dim=-1)
     else:
         aug_epsoide_return = None
@@ -88,8 +180,27 @@ def create_env_out(action, state, reward, done, truncated_done, info, flags):
         "truncated_done": truncated_done,           
     }
     if not flags.wrapper_type == 1:    
-        out["last_pri"] = action[0]
+        last_pri = action[0]
+        if dynamic_search_enabled(flags):
+            effective_primary = info.get("effective_primary_action")
+            if effective_primary is not None:
+                last_pri = effective_primary.to(last_pri.device)
+            elif info.get("executed_primary_action") is not None:
+                real_transition = info.get("real_transition")
+                if real_transition is not None:
+                    mask = real_transition.bool()
+                    executed = info["executed_primary_action"].to(last_pri.device)
+                    if last_pri.ndim > mask.ndim:
+                        mask = mask.unsqueeze(-1)
+                    last_pri = torch.where(mask, executed, last_pri)
+        out["last_pri"] = last_pri
         out["last_reset"] = action[1]
+        effective_control = info.get("effective_search_control")
+        out["last_search_control"] = (
+            effective_control.to(action[1].device)
+            if dynamic_search_enabled(flags) and effective_control is not None
+            else action[1]
+        )
     else:
         out["last_pri"] = action
 
@@ -110,6 +221,36 @@ def create_env_out(action, state, reward, done, truncated_done, info, flags):
     return env_out    
 
 def process_flags(flags):
+    # Defaults are needed when resuming a configuration written by an older
+    # Thinker version.
+    if not hasattr(flags, "dynamic_search"):
+        flags.dynamic_search = False
+    if not hasattr(flags, "max_search_steps"):
+        flags.max_search_steps = -1
+    if not hasattr(flags, "think_cost"):
+        flags.think_cost = 0.002
+    if not hasattr(flags, "think_cost_anneal"):
+        flags.think_cost_anneal = False
+    if not hasattr(flags, "dynamic_search_hidden_dim"):
+        flags.dynamic_search_hidden_dim = 100
+
+    if flags.dynamic_search:
+        if flags.wrapper_type not in [0, 2]:
+            raise ValueError(
+                "dynamic_search supports wrapper_type 0 (learned) and "
+                "2 (perfect)"
+            )
+        if flags.reset_mode != 0:
+            raise ValueError(
+                "dynamic_search currently preserves reset_mode=0 semantics only"
+            )
+        if not (flags.max_search_steps == -1 or flags.max_search_steps > 0):
+            raise ValueError(
+                "max_search_steps must be -1 (unbounded) or a positive integer"
+            )
+        # Dynamic history is represented along the temporal token axis.
+        flags.has_action_seq = False
+
     if flags.wrapper_type == 1:
         flags.rec_t = 1
         # flags.train_model = False
@@ -142,6 +283,9 @@ def process_flags_actor(flags):
         flags.cur_cost = 0.
         flags.policy_vis_freq = -1
         flags = process_flags(flags)
+
+    if getattr(flags, "dynamic_search", False) and flags.mcts:
+        raise ValueError("MCTS is not compatible with dynamic_search")
 
     if flags.mcts:
         flags.train_actor = False
@@ -606,7 +750,59 @@ def slice_tree_reps(num_actions, dim_actions, rec_t):
         tree_rep_map_d[k] = slice(idx, next_idx)    
     return tree_rep_map_d
 
-def decode_tree_reps(tree_reps, num_actions, dim_actions, rec_t, enc_type=0, f_type=0):
+
+def slice_dynamic_tree_reps(num_actions, dim_actions=1):
+    """Return the budget-independent Dynamic Thinker token schema.
+
+    A token contains the original detailed root and compact current-node
+    statistics followed by five scalar search metadata values.  The feature
+    width is therefore ``10 * num_actions + 14`` and is independent of both
+    max_search_steps and max_depth.
+    """
+    del dim_actions  # the current wrappers expose discrete augmented actions
+    root_end = num_actions * 5 + 6
+    cur_end = root_end + num_actions * 5 + 3
+    names = [
+        ["root_action", 0],
+        ["root_r", num_actions],
+        ["root_d", num_actions + 1],
+        ["root_v", num_actions + 2],
+        ["root_policy", num_actions + 3],
+        ["root_qs_mean", 2 * num_actions + 3],
+        ["root_qs_max", 3 * num_actions + 3],
+        ["root_ns", 4 * num_actions + 3],
+        ["root_trail_r", 5 * num_actions + 3],
+        ["rollout_return", 5 * num_actions + 4],
+        ["max_rollout_return", 5 * num_actions + 5],
+        ["cur_action", root_end],
+        ["cur_r", root_end + num_actions],
+        ["cur_d", root_end + num_actions + 1],
+        ["cur_v", root_end + num_actions + 2],
+        ["cur_policy", root_end + num_actions + 3],
+        ["cur_qs_mean", root_end + 2 * num_actions + 3],
+        ["cur_qs_max", root_end + 3 * num_actions + 3],
+        ["cur_ns", root_end + 4 * num_actions + 3],
+        ["tree_reset", cur_end],
+        ["depth_discount", cur_end + 1],
+        ["search_steps", cur_end + 2],
+        ["rollout_depth", cur_end + 3],
+        ["search_start", cur_end + 4],
+    ]
+    out = {}
+    for i, (key, start) in enumerate(names):
+        end = names[i + 1][1] if i + 1 < len(names) else cur_end + 5
+        out[key] = slice(start, end)
+    # Compatibility name used by visualizers for the reset event scalar.
+    out["cur_reset"] = out["tree_reset"]
+    return out
+
+
+def get_tree_rep_meaning(num_actions, dim_actions, flags):
+    if dynamic_search_enabled(flags):
+        return slice_dynamic_tree_reps(num_actions, dim_actions)
+    return slice_tree_reps(num_actions, dim_actions, flags.rec_t)
+
+def _decode_tree_reps_with_schema(tree_reps, schema, enc_type=0, f_type=0):
     nd = [
             "root_r", "root_v", "root_qs_mean", "root_qs_max", 
             "root_trail_r", "rollout_return", "max_rollout_return", 
@@ -621,8 +817,24 @@ def decode_tree_reps(tree_reps, num_actions, dim_actions, rec_t, enc_type=0, f_t
     if len(tree_reps.shape) == 3:
         tree_reps = tree_reps[0]
 
-    d = slice_tree_reps(num_actions, dim_actions, rec_t)
-    return {k: dec_k(tree_reps[:, v], k) for k, v in d.items()}
+    return {k: dec_k(tree_reps[:, v], k) for k, v in schema.items()}
+
+
+def decode_tree_reps(tree_reps, num_actions, dim_actions, rec_t, enc_type=0, f_type=0):
+    """Decode the legacy fixed-budget tree representation."""
+    schema = slice_tree_reps(num_actions, dim_actions, rec_t)
+    return _decode_tree_reps_with_schema(
+        tree_reps, schema, enc_type=enc_type, f_type=f_type
+    )
+
+
+def decode_dynamic_tree_reps(
+        tree_reps, num_actions, dim_actions=1, enc_type=0, f_type=0):
+    """Decode a budget-independent Dynamic Thinker token."""
+    schema = slice_dynamic_tree_reps(num_actions, dim_actions)
+    return _decode_tree_reps_with_schema(
+        tree_reps, schema, enc_type=enc_type, f_type=f_type
+    )
 
 def mask_tree_rep(tree_reps, num_actions, rec_t):
     # deprecated

@@ -243,7 +243,11 @@ class SLogWorker:
                 )
                 return None
             try:
-                checkpoint = torch.load(self.actor_net_path, torch.device("cpu"))
+                checkpoint = torch.load(
+                    self.actor_net_path,
+                    map_location=torch.device("cpu"),
+                    weights_only=False,
+                )
                 self.actor_net.set_weights(checkpoint["actor_net_state_dict"])
                 checkpoint = torch.load(self.model_net_path, torch.device("cpu"))
                 self.env.model_net.set_weights(checkpoint["model_net_state_dict"])
@@ -259,9 +263,13 @@ class SLogWorker:
             env_out = self.last_env_out
 
         step = 0
+        dynamic_search = bool(getattr(self.flags, "dynamic_search", False))
+        # Fixed Thinker has exactly rec_t augmented transitions per real
+        # transition.  Dynamic Thinker deliberately has no such ratio, so its
+        # visualization is bounded by observed real transitions instead.
         record_steps = self.flags.policy_vis_length * self.flags.rec_t
-        # max_steps = record_step0s + np.random.randint(100) * self.flags.rec_t # randomly skip the first 100 real steps
         max_steps = record_steps
+        real_steps = 0
         start_time = self.timer()
 
         video_stats = {"real_imgs": [], "im_imgs": [], "status": []}
@@ -271,21 +279,27 @@ class SLogWorker:
         else:
             copy_n = 3
 
-        while step < max_steps:
+        while ((dynamic_search and real_steps < self.flags.policy_vis_length) or
+               (not dynamic_search and step < max_steps)):
             step += 1
             actor_out, self.actor_state = self.actor_net(env_out, self.actor_state)     
-            primary_action, reset_action = actor_out.action      
+            primary_action, search_control = actor_out.action
             state, reward, done, truncated_done, info = self.env.step(
                 primary_action=primary_action, 
-                reset_action=reset_action)
+                reset_action=search_control)
             env_out = util.create_env_out(actor_out.action, state, reward, done, truncated_done, info, self.flags)
             if self.wrapper_type != 1:
                 ret_reset = self.env.decode_tree_reps(env_out.tree_reps)["cur_reset"]
             else:
                 ret_reset = False
                 
-            last_step_real = (env_out.step_status == 0) | (env_out.step_status == 3)
+            if dynamic_search:
+                last_step_real = env_out.real_transition.bool()
+            else:
+                last_step_real = (env_out.step_status == 0) | (env_out.step_status == 3)
             if last_step_real: 
+                if dynamic_search:
+                    real_steps += 1
                 root_real_states = env_out.real_states[0, 0, -copy_n:]
                 root_xs = env_out.xs[0, 0, -copy_n:]
 
@@ -303,11 +317,9 @@ class SLogWorker:
                     video_stats["status"].append(2)
                 video_stats["im_imgs"].append(env_out.xs[0, 0, -copy_n:])
 
-            if (
-                step >= max_steps - record_steps
-                and last_step_real
-                and not start_record
-            ):
+            if (((dynamic_search and last_step_real) or
+                 (not dynamic_search and step >= max_steps - record_steps and last_step_real))
+                and not start_record):
                 video_stats["real_imgs"].append(root_real_states)
                 video_stats["im_imgs"].append(env_out.xs[0, 0, -copy_n:])
                 video_stats["status"].append(0) # 0 for real step, 1 for reset, 2 for normal                

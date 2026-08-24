@@ -1,5 +1,4 @@
 import os
-import shutil
 import time, timeit
 from collections import namedtuple
 import numpy as np
@@ -54,6 +53,7 @@ class SelfPlayWorker:
         self.rank = rank
         self.env_n = env_n
         self.flags = flags
+        self.dynamic_search = util.dynamic_search_enabled(flags)
      
         self.timing = util.Timings()
         self.actor_id = (
@@ -183,13 +183,22 @@ class SelfPlayWorker:
                         if self.flags.mcts:
                             self.actor_net.set_real_step(self.real_step)
 
-                    self.real_step_ptr = self.self_play_buffer.insert.remote(
-                        step_status = ray.put(self.actor_local_buffer.step_status), 
-                        episode_return = ray.put(self.actor_local_buffer.episode_return), 
-                        episode_step = ray.put(self.actor_local_buffer.episode_step), 
-                        real_done = ray.put(self.actor_local_buffer.real_done), 
-                        actor_id = ray.put(self.actor_local_buffer.id), 
-                    )
+                    log_kwargs = {
+                        "step_status": ray.put(self.actor_local_buffer.step_status),
+                        "episode_return": ray.put(self.actor_local_buffer.episode_return),
+                        "episode_step": ray.put(self.actor_local_buffer.episode_step),
+                        "real_done": ray.put(self.actor_local_buffer.real_done),
+                        "actor_id": ray.put(self.actor_local_buffer.id),
+                    }
+                    if self.dynamic_search:
+                        for field in [
+                                "real_transition", "stage_end", "forced_stop",
+                                "search_steps", "search_control", "control_valid",
+                                "policy_valid", "phase"]:
+                            value = getattr(self.actor_local_buffer, field, None)
+                            if value is not None:
+                                log_kwargs[field] = ray.put(value)
+                    self.real_step_ptr = self.self_play_buffer.insert.remote(**log_kwargs)
   
                 if self.time: self.timing.time("mics3")
       
@@ -234,19 +243,65 @@ class SelfPlayWorker:
                             greedy = False,
                         )
         if not self.disable_thinker:
-            primary_action, reset_action = actor_out.action
+            primary_action, secondary_action = actor_out.action
         else:
-            primary_action, reset_action = actor_out.action, None
-        state, reward, done, truncated_done, info = self.env.step(
-                primary_action=primary_action, 
-                reset_action=reset_action, 
-                action_prob=actor_out.action_prob[-1])
-        env_out = self.create_env_out(actor_out.action, state, reward, done, truncated_done, info)
+            primary_action, secondary_action = actor_out.action, None
+        step_kwargs = {
+            "primary_action": primary_action,
+            "action_prob": actor_out.action_prob[-1],
+        }
+        if self.dynamic_search:
+            step_kwargs["search_control"] = secondary_action
+        else:
+            step_kwargs["reset_action"] = secondary_action
+        state, reward, done, truncated_done, info = self.env.step(**step_kwargs)
+        next_env_out = self.create_env_out(
+            actor_out.action, state, reward, done, truncated_done, info
+        )
+        if self.dynamic_search:
+            # Inputs supplied while an item is waiting at the real-step barrier
+            # are ignored.  Preserve the last accepted action tokens so batching
+            # cannot leak dummy WAIT actions into the recurrent actor state.
+            accepted_primary = info.get("accepted_primary_action")
+            real_transition = info.get("real_transition")
+            if accepted_primary is not None:
+                invalid = accepted_primary < 0
+                if real_transition is not None:
+                    invalid = invalid & ~real_transition.bool()
+                if torch.any(invalid):
+                    last_pri = next_env_out.last_pri.clone()
+                    mask = invalid
+                    if last_pri.ndim > mask.ndim + 1:
+                        mask = mask.unsqueeze(-1)
+                    last_pri[0] = torch.where(mask, env_out.last_pri[0], last_pri[0])
+                    next_env_out = next_env_out._replace(last_pri=last_pri)
+
+            accepted_control = info.get("accepted_control")
+            if accepted_control is not None and next_env_out.last_search_control is not None:
+                invalid = accepted_control < 0
+                if torch.any(invalid):
+                    last_control = next_env_out.last_search_control.clone()
+                    last_control[0] = torch.where(
+                        invalid, env_out.last_search_control[0], last_control[0]
+                    )
+                    next_env_out = next_env_out._replace(
+                        last_search_control=last_control
+                    )
+        env_out = next_env_out
         return actor_out, actor_state, env_out, info
 
     def write_actor_buffer(self, env_out: EnvOut, actor_out: ActorOut, t: int, log_only: bool = False):
         # write to local buffer
-        if log_only: include_fields = ["step_status", "episode_return", "episode_step", "real_done"]
+        if log_only:
+            include_fields = [
+                "step_status", "episode_return", "episode_step", "real_done"
+            ]
+            if self.dynamic_search:
+                include_fields += [
+                    "real_transition", "stage_end", "forced_stop",
+                    "search_steps", "search_control", "control_valid",
+                    "policy_valid", "phase",
+                ]
 
         if t == 0:            
             out = {}
@@ -260,7 +315,8 @@ class SelfPlayWorker:
                 if val is None: continue
                 if self.flags.parallel_actor:
                     size_t = self.flags.actor_unroll_len + 1
-                    if not self.disable_thinker and field =="real_states":
+                    if (not self.disable_thinker and field == "real_states"
+                            and not self.dynamic_search):
                         size_t = size_t // self.flags.rec_t + int((size_t % self.flags.rec_t) > 0)                        
                         self.real_state_t = 0
                     out[field] = torch.empty(
@@ -291,7 +347,8 @@ class SelfPlayWorker:
                 assert new_val is not None, f"{field} cannot be None"
                 new_val = new_val[0]
                 if self.flags.parallel_actor:
-                    if not self.disable_thinker and field =="real_states":                        
+                    if (not self.disable_thinker and field == "real_states"
+                            and not self.dynamic_search):
                         if env_out.step_status[0, 0].item() in [0, 3]:
                             # assume uniform step status
                             v[self.real_state_t] = new_val
@@ -331,13 +388,58 @@ class SelfPlayWorker:
             else:
                 if self.flags.preload_actor:
                     path = os.path.join(self.flags.preload_actor, "ckp_actor.tar")
-                    shutil.copyfile(path, os.path.join(self.ckpdir, "ckp_actor.tar"))
             if path is not None:
                 checkpoint = torch.load(
                     path, map_location=torch.device("cpu"), weights_only = False
                 )
+                if self.flags.ckp:
+                    checkpoint_flags = checkpoint.get("flags", {})
+                    checkpoint_dynamic = bool(checkpoint.get(
+                        "dynamic_search",
+                        checkpoint_flags.get("dynamic_search", False),
+                    ))
+                    if checkpoint_dynamic != self.dynamic_search:
+                        raise ValueError(
+                            "Cannot resume actor checkpoint across "
+                            "dynamic_search modes."
+                        )
+                    checkpoint_arch = checkpoint.get("actor_arch_version")
+                    expected_arch = 2 if self.dynamic_search else 1
+                    if self.dynamic_search and checkpoint_arch is None:
+                        raise ValueError(
+                            "Dynamic actor checkpoint is missing "
+                            "actor_arch_version metadata."
+                        )
+                    if (checkpoint_arch is not None
+                            and checkpoint_arch != expected_arch):
+                        raise ValueError(
+                            f"Actor checkpoint architecture {checkpoint_arch} "
+                            f"does not match expected version {expected_arch}."
+                        )
+                    checkpoint_rewards = checkpoint.get("reward_names")
+                    expected_rewards = util.get_reward_names(self.flags)
+                    if self.dynamic_search and checkpoint_rewards is None:
+                        raise ValueError(
+                            "Dynamic actor checkpoint is missing reward_names "
+                            "metadata."
+                        )
+                    if (checkpoint_rewards is not None
+                            and list(checkpoint_rewards) != expected_rewards):
+                        raise ValueError(
+                            "Actor checkpoint reward channels do not match "
+                            f"this run: {checkpoint_rewards} != "
+                            f"{expected_rewards}."
+                        )
+                # Resume is architecture-strict.  preload_actor is explicitly
+                # weight-only initialization and may migrate a legacy head;
+                # optimizer, scheduler, counters and return normalization are
+                # never read on this path.
+                # Fixed checkpoints retain their historical strict-load
+                # contract.  The only permissive path is the explicitly
+                # supported legacy-fixed -> Dynamic preload migration.
+                strict = bool(self.flags.ckp or not self.dynamic_search)
                 self.actor_net.set_weights(
-                    checkpoint["actor_net_state_dict"]
+                    checkpoint["actor_net_state_dict"], strict=strict
                 )
                 self._logger.info("Loaded actor net from %s" % path)
             if self.flags.parallel_actor:            

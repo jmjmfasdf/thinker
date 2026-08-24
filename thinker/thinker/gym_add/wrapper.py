@@ -10,6 +10,14 @@ from gymnasium.utils.step_api_compatibility import (
 )
 import torch
 
+
+def _call_named_slot(env, method_name, slot_id):
+    """Forward snapshots without breaking legacy no-argument slot zero."""
+    method = env.get_wrapper_attr(method_name)
+    slot_id = int(slot_id)
+    return method() if slot_id == 0 else method(slot_id)
+
+
 def create_envpool(name, flags, env_n=1):
     import envpool
     kwargs = dict(
@@ -132,17 +140,21 @@ def atari_wrap(env, grayscale=True, frame_stack_n=4, expose_ram=False):
 class AtariSaveLoad(gym.Wrapper):
     def __init__(self, env, expose_ram=False):
         gym.Wrapper.__init__(self, env)
-        self.save_state = None
+        self.save_states = {}
         self.expose_ram = expose_ram
 
-    def quick_save(self):
-        self.save_state = self.env.unwrapped.clone_state()
+    def quick_save(self, slot_id=0):
+        self.save_states[int(slot_id)] = self.env.unwrapped.clone_state()
 
-    def quick_load(self):
-        if self.save_state is None:
-            raise ValueError("No state has been saved. Please call quick_save() before quick_load().")
+    def quick_load(self, slot_id=0):
+        slot_id = int(slot_id)
+        if slot_id not in self.save_states:
+            raise ValueError(f"No state has been saved in slot {slot_id}.")
         
-        self.env.unwrapped.restore_state(self.save_state)
+        self.env.unwrapped.restore_state(self.save_states[slot_id])
+
+    def quick_delete(self, slot_id=0):
+        self.save_states.pop(int(slot_id), None)
 
     def reset(self, *args, **kwargs):
         observation, info = super().reset(*args, **kwargs)
@@ -159,7 +171,7 @@ class AtariSaveLoad(gym.Wrapper):
 class AtariPreprocessingExtended(wrappers.AtariPreprocessing):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.save_state = None
+        self.save_states = {}
 
     def reset(self, *args, **kwargs):
         observation, info = super().reset(*args, **kwargs)        
@@ -171,64 +183,85 @@ class AtariPreprocessingExtended(wrappers.AtariPreprocessing):
         info['real_done'] = (self.lives == 0) | truncated
         return observation, total_reward, terminated, truncated, info
 
-    def quick_save(self):
+    def quick_save(self, slot_id=0):
         """Save the current state of the wrapper."""
-        self.save_state = {
+        slot_id = int(slot_id)
+        self.save_states[slot_id] = {
             'lives': self.lives,
             'game_over': self.game_over,
         }
-        self.env.get_wrapper_attr('quick_save')()
+        _call_named_slot(self.env, 'quick_save', slot_id)
 
-    def quick_load(self):
+    def quick_load(self, slot_id=0):
         """Load the previously saved state of the wrapper."""
-        if self.save_state is None:
-            raise ValueError("No state has been saved. Please call quick_save() before quick_load().")
+        slot_id = int(slot_id)
+        if slot_id not in self.save_states:
+            raise ValueError(f"No state has been saved in slot {slot_id}.")
         
-        self.lives = self.save_state['lives']
-        self.game_over = self.save_state['game_over']
+        self.lives = self.save_states[slot_id]['lives']
+        self.game_over = self.save_states[slot_id]['game_over']
         
-        self.env.get_wrapper_attr('quick_load')()        
+        _call_named_slot(self.env, 'quick_load', slot_id)
+
+    def quick_delete(self, slot_id=0):
+        slot_id = int(slot_id)
+        self.save_states.pop(slot_id, None)
+        _call_named_slot(self.env, 'quick_delete', slot_id)
 
 class TimeLimitExtended(wrappers.TimeLimit):
     def __init__(self, env: gym.Env, max_episode_steps: int):
         super().__init__(env, max_episode_steps)
-        self.save_state = None
+        self.save_states = {}
 
-    def quick_save(self):
+    def quick_save(self, slot_id=0):
         """Save the current state of the wrapper."""
-        self.save_state = {
+        slot_id = int(slot_id)
+        self.save_states[slot_id] = {
             '_elapsed_steps': self._elapsed_steps,
         }
-        self.env.get_wrapper_attr('quick_save')()
+        _call_named_slot(self.env, 'quick_save', slot_id)
 
-    def quick_load(self):
+    def quick_load(self, slot_id=0):
         """Load the previously saved state of the wrapper."""
-        if self.save_state is None:
-            raise ValueError("No state has been saved. Please call quick_save() before quick_load().")
+        slot_id = int(slot_id)
+        if slot_id not in self.save_states:
+            raise ValueError(f"No state has been saved in slot {slot_id}.")
         
-        self._elapsed_steps = self.save_state['_elapsed_steps']
+        self._elapsed_steps = self.save_states[slot_id]['_elapsed_steps']
         
-        self.env.get_wrapper_attr('quick_load')()
+        _call_named_slot(self.env, 'quick_load', slot_id)
+
+    def quick_delete(self, slot_id=0):
+        slot_id = int(slot_id)
+        self.save_states.pop(slot_id, None)
+        _call_named_slot(self.env, 'quick_delete', slot_id)
 
 class FrameStackExtended(wrappers.FrameStack):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.save_state = None
+        self.save_states = {}
         self.frame_stack_n = kwargs["num_stack"]
 
-    def quick_save(self):
+    def quick_save(self, slot_id=0):
         """Save the current state of the wrapper."""
-        self.save_state = {
+        slot_id = int(slot_id)
+        self.save_states[slot_id] = {
             'frames': list(self.frames),
         }
-        self.env.get_wrapper_attr('quick_save')()
+        _call_named_slot(self.env, 'quick_save', slot_id)
 
-    def quick_load(self):
+    def quick_load(self, slot_id=0):
         """Load the previously saved state of the wrapper."""
-        if self.save_state is None:
-            raise ValueError("No state has been saved. Please call quick_save() before quick_load().")        
-        self.frames = deque(self.save_state['frames'], maxlen=self.num_stack)        
-        self.env.get_wrapper_attr('quick_load')()
+        slot_id = int(slot_id)
+        if slot_id not in self.save_states:
+            raise ValueError(f"No state has been saved in slot {slot_id}.")
+        self.frames = deque(self.save_states[slot_id]['frames'], maxlen=self.num_stack)
+        _call_named_slot(self.env, 'quick_load', slot_id)
+
+    def quick_delete(self, slot_id=0):
+        slot_id = int(slot_id)
+        self.save_states.pop(slot_id, None)
+        _call_named_slot(self.env, 'quick_delete', slot_id)
 
 class TransposeWrap(gym.ObservationWrapper):
     """Image shape to channels x weight x height"""
@@ -246,11 +279,14 @@ class TransposeWrap(gym.ObservationWrapper):
     def observation(self, observation):
         return np.transpose(observation, axes=(2, 0, 1))
     
-    def quick_save(self):
-        self.env.get_wrapper_attr('quick_save')()
+    def quick_save(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_save', slot_id)
 
-    def quick_load(self):
-        self.env.get_wrapper_attr('quick_load')()
+    def quick_load(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_load', slot_id)
+
+    def quick_delete(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_delete', slot_id)
     
 class SqueezeWrap(gym.ObservationWrapper):
     """Wrapper that squeezes the first two dimensions of the observation."""
@@ -271,11 +307,14 @@ class SqueezeWrap(gym.ObservationWrapper):
             observation = np.array(observation)
         return observation.reshape(self.observation_space.shape)
     
-    def quick_save(self):
-        self.env.get_wrapper_attr('quick_save')()
+    def quick_save(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_save', slot_id)
 
-    def quick_load(self):
-        self.env.get_wrapper_attr('quick_load')()    
+    def quick_load(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_load', slot_id)
+
+    def quick_delete(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_delete', slot_id)
 
 # the following are all vectorized wrapper
 
@@ -283,11 +322,14 @@ class WrapperExtended(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
     
-    def quick_save(self):
-        self.env.get_wrapper_attr('quick_save')()
+    def quick_save(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_save', slot_id)
 
-    def quick_load(self):
-        self.env.get_wrapper_attr('quick_load')()
+    def quick_load(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_load', slot_id)
+
+    def quick_delete(self, slot_id=0):
+        _call_named_slot(self.env, 'quick_delete', slot_id)
 
     def load_ckp(self, data):
         return self.env.get_wrapper_attr('load_ckp')(data) 
@@ -306,10 +348,7 @@ class VectorWrap(WrapperExtended):
         if flags.obs_norm or flags.reward_norm:
             raise NotImplemented()
         
-        self.save_state = {
-            "episode_return": np.zeros(self.num_envs, dtype=np.float32),
-            "episode_step": np.zeros(self.num_envs, dtype=np.int64),
-        }        
+        self.save_states = {}
         self.keys_to_keep = ["real_done", "cost"] # all other info will be discarded for efficiency
 
     def reset(self, *args, **kwargs):
@@ -391,17 +430,132 @@ class VectorWrap(WrapperExtended):
 
         return observation, reward, terminated, truncated, info
     
-    def quick_save(self, env_id=None):
-        if env_id is None: env_id = list(range(self.num_envs))
-        self.save_state["episode_return"][env_id] = self.episode_return[env_id]
-        self.save_state["episode_step"][env_id] = self.episode_step[env_id]
-        self.env.quick_save(env_id=env_id)
+    def _ensure_stat_slot(self, slot_id):
+        slot_id = int(slot_id)
+        if slot_id < 0:
+            raise ValueError("slot_id must be non-negative")
+        if slot_id not in self.save_states:
+            self.save_states[slot_id] = {
+                "episode_return": np.zeros(self.num_envs, dtype=np.float32),
+                "episode_step": np.zeros(self.num_envs, dtype=np.int64),
+                "valid": np.zeros(self.num_envs, dtype=np.bool_),
+            }
+        return self.save_states[slot_id]
 
-    def quick_load(self, env_id=None):
-        if env_id is None: env_id = list(range(self.num_envs))
-        self.episode_return[env_id] = self.save_state["episode_return"][env_id]
-        self.episode_step[env_id] = self.save_state["episode_step"][env_id]
-        self.env.quick_load(env_id=env_id)
+    def _normalize_snapshot_env_ids(self, env_id):
+        if env_id is None:
+            return list(range(self.num_envs))
+        env_ids = [int(idx) for idx in list(env_id)]
+        if len(set(env_ids)) != len(env_ids):
+            raise ValueError("env_id must not contain duplicates")
+        if any(idx < 0 or idx >= self.num_envs for idx in env_ids):
+            raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
+        return env_ids
+
+    def _normalize_snapshot_pairs(self, env_id, slot_ids):
+        env_ids = self._normalize_snapshot_env_ids(env_id)
+        slot_ids = [int(slot_id) for slot_id in list(slot_ids)]
+        if len(env_ids) != len(slot_ids):
+            raise ValueError("env_id and slot_ids must have the same length")
+        if any(slot_id < 0 for slot_id in slot_ids):
+            raise ValueError("slot_ids must be non-negative")
+        return env_ids, slot_ids
+
+    def _require_stat_slot(self, slot_id, env_ids):
+        slot_id = int(slot_id)
+        slot = self.save_states.get(slot_id)
+        missing = env_ids if slot is None else [
+            idx for idx in env_ids if not slot["valid"][idx]
+        ]
+        if missing:
+            raise ValueError(
+                f"No vector state has been saved for env_id {missing} "
+                f"in slot {slot_id}."
+            )
+        return slot
+
+    def _snapshot_each(self, operation, env_ids, slot_ids):
+        method = getattr(self.env, f"quick_{operation}_each", None)
+        if method is not None:
+            return method(env_id=env_ids, slot_ids=slot_ids)
+        method = getattr(self.env, f"quick_{operation}")
+        results = []
+        for idx, slot_id in zip(env_ids, slot_ids):
+            kwargs = {"env_id": [idx]}
+            if slot_id != 0 or operation == "delete":
+                kwargs["slot_id"] = slot_id
+            results.append(method(**kwargs))
+        return results
+
+    def quick_save(self, env_id=None, slot_id=0):
+        env_id = self._normalize_snapshot_env_ids(env_id)
+        slot_id = int(slot_id)
+        if slot_id < 0:
+            raise ValueError("slot_id must be non-negative")
+        kwargs = {"env_id": env_id}
+        if slot_id != 0:
+            kwargs["slot_id"] = slot_id
+        self.env.quick_save(**kwargs)
+        slot = self._ensure_stat_slot(slot_id)
+        slot["episode_return"][env_id] = self.episode_return[env_id]
+        slot["episode_step"][env_id] = self.episode_step[env_id]
+        slot["valid"][env_id] = True
+
+    def quick_load(self, env_id=None, slot_id=0):
+        env_id = self._normalize_snapshot_env_ids(env_id)
+        slot_id = int(slot_id)
+        slot = self._require_stat_slot(slot_id, env_id)
+        kwargs = {"env_id": env_id}
+        if slot_id != 0:
+            kwargs["slot_id"] = slot_id
+        self.env.quick_load(**kwargs)
+        self.episode_return[env_id] = slot["episode_return"][env_id]
+        self.episode_step[env_id] = slot["episode_step"][env_id]
+
+    def quick_delete(self, env_id=None, slot_id=0):
+        env_id = self._normalize_snapshot_env_ids(env_id)
+        slot_id = int(slot_id)
+        if slot_id < 0:
+            raise ValueError("slot_id must be non-negative")
+        self.env.quick_delete(env_id=env_id, slot_id=slot_id)
+        slot = self.save_states.get(slot_id)
+        if slot is not None:
+            slot["valid"][env_id] = False
+            if not np.any(slot["valid"]):
+                self.save_states.pop(slot_id)
+
+    def quick_save_slots(self, env_id, slot_ids):
+        env_id, slot_ids = self._normalize_snapshot_pairs(env_id, slot_ids)
+        result = self._snapshot_each("save", env_id, slot_ids)
+        for idx, slot_id in zip(env_id, slot_ids):
+            slot = self._ensure_stat_slot(slot_id)
+            slot["episode_return"][idx] = self.episode_return[idx]
+            slot["episode_step"][idx] = self.episode_step[idx]
+            slot["valid"][idx] = True
+        return result
+
+    def quick_load_slots(self, env_id, slot_ids):
+        env_id, slot_ids = self._normalize_snapshot_pairs(env_id, slot_ids)
+        slots = [
+            self._require_stat_slot(slot_id, [idx])
+            for idx, slot_id in zip(env_id, slot_ids)
+        ]
+        result = self._snapshot_each("load", env_id, slot_ids)
+        for idx, slot in zip(env_id, slots):
+            self.episode_return[idx] = slot["episode_return"][idx]
+            self.episode_step[idx] = slot["episode_step"][idx]
+        return result
+
+    def quick_delete_slots(self, env_id, slot_ids):
+        env_id, slot_ids = self._normalize_snapshot_pairs(env_id, slot_ids)
+        result = self._snapshot_each("delete", env_id, slot_ids)
+        for idx, slot_id in zip(env_id, slot_ids):
+            slot = self.save_states.get(slot_id)
+            if slot is not None:
+                slot["valid"][idx] = False
+                if not np.any(slot["valid"]):
+                    self.save_states.pop(slot_id)
+        return result
 
     def load_ckp(self, data):
         return 
@@ -446,15 +600,24 @@ class EnvPoolWrap(WrapperExtended):
         info["real_done"] = real_done
         return observation, reward, terminated, truncated, info
     
-    def quick_save(self, env_id=None):    
+    def quick_save(self, env_id=None, slot_id=0):
         if type(env_id) == list: env_id = np.array(env_id, np.int32)
-        kwargs = dict(env_id=env_id) if env_id is not None else dict()
+        kwargs = dict(env_id=env_id) if env_id is not None else {}
+        if int(slot_id) != 0:
+            kwargs["slot_id"] = int(slot_id)
         self.env.quick_save(**kwargs)
 
-    def quick_load(self, env_id=None):   
+    def quick_load(self, env_id=None, slot_id=0):
         if type(env_id) == list: env_id = np.array(env_id, np.int32)
-        kwargs = dict(env_id=env_id) if env_id is not None else dict()
+        kwargs = dict(env_id=env_id) if env_id is not None else {}
+        if int(slot_id) != 0:
+            kwargs["slot_id"] = int(slot_id)
         self.env.quick_load(**kwargs)
+
+    def quick_delete(self, env_id=None, slot_id=0):
+        if hasattr(self.env, "quick_delete"):
+            kwargs = dict(env_id=env_id, slot_id=slot_id) if env_id is not None else dict(slot_id=slot_id)
+            self.env.quick_delete(**kwargs)
 
 class PostWrapper(WrapperExtended):
     """Final wrapper that recorrds useful statistics"""
@@ -468,6 +631,7 @@ class PostWrapper(WrapperExtended):
         self.norm_high = high
 
         self.disable_thinker = flags.wrapper_type == 1
+        self.dynamic_search = bool(getattr(flags, "dynamic_search", False))
         if not self.disable_thinker:
             self.pri_action_space = self.env.action_space[0][0]            
         else:
@@ -483,7 +647,10 @@ class PostWrapper(WrapperExtended):
         )
 
         self.episode_return = {}
-        for key in ["im", "cur"]:
+        reward_prefixes = ["im", "cur"]
+        if self.dynamic_search:
+            reward_prefixes.append("think")
+        for key in reward_prefixes:
             self.episode_return[key] = torch.zeros(
                 self.env_n, dtype=torch.float, device=self.device
             )
@@ -496,7 +663,10 @@ class PostWrapper(WrapperExtended):
         state, reward, done, truncated_done, info = self.env.step(action, model_net)
         real_done = info["real_done"]        
 
-        for prefix in ["im", "cur"]:
+        reward_prefixes = ["im", "cur"]
+        if self.dynamic_search:
+            reward_prefixes.append("think")
+        for prefix in reward_prefixes:
             if prefix+"_reward" in info:
                 r = info[prefix+"_reward"]
                 if prefix == "im": r = r[:, 0]
@@ -504,8 +674,11 @@ class PostWrapper(WrapperExtended):
                 self.episode_return[prefix][nan_mask] += r[nan_mask]
                 info[prefix + "_episode_return"] = self.episode_return[prefix].clone()
                 self.episode_return[prefix][real_done] = 0.
-                if prefix == "im":
-                    self.episode_return[prefix][info["step_status"] == 0] = 0.     
+                if prefix in ["im", "think"]:
+                    if self.dynamic_search and "stage_end" in info:
+                        self.episode_return[prefix][info["stage_end"].bool()] = 0.
+                    elif prefix == "im":
+                        self.episode_return[prefix][info["step_status"] == 0] = 0.
         return state, reward, done, truncated_done, info
     
     def render(self, *args, **kwargs):  

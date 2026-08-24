@@ -63,6 +63,7 @@ def compute_v_trace(
     clip_pg_rho_threshold=1.0,
     lamb=1.0,
     norm_stat=None,
+    norm_mask=None,
 ):
     """V-trace from log importance weights."""
     with torch.no_grad():
@@ -100,6 +101,15 @@ def compute_v_trace(
         else:
             clipped_pg_rhos = rhos
         target_values = rewards + discounts * vs_t_plus_1
+        if norm_mask is not None:
+            norm_mask = norm_mask.to(
+                device=target_values.device, dtype=torch.bool
+            )
+            if norm_mask.shape != target_values.shape:
+                raise ValueError(
+                    "norm_mask must match V-trace tensors: "
+                    f"{norm_mask.shape} != {target_values.shape}"
+                )
         if not return_norm_type in [0, 1]:
             norm_stat = None
         else:
@@ -109,9 +119,18 @@ def compute_v_trace(
                 norm_v = target_values - values
             
             buffer = norm_stat[-1]
-            buffer.push(norm_v)
+            if norm_mask is not None:
+                norm_v = norm_v[norm_mask]
+            if norm_v.numel() > 0:
+                buffer.push(norm_v)
             lq = buffer.get_percentile(0.05)
             uq = buffer.get_percentile(0.95)
+            if lq is None or uq is None:
+                # A Dynamic unroll can contain only scheduler rows for a
+                # stage-local head.  Keep normalization neutral until the
+                # first valid policy sample reaches the buffer.
+                lq = torch.zeros((), device=values.device, dtype=values.dtype)
+                uq = torch.ones((), device=values.device, dtype=values.dtype)
             norm_stat = (
                 lq,
                 uq,
@@ -128,8 +147,21 @@ def compute_v_trace(
             pg_advantages = pg_advantages / norm_factor
             pg_advantages_nois = pg_advantages_nois / norm_factor
         elif return_norm_type == 2:
-            pg_advantages = (pg_advantages - pg_advantages.mean()) / (pg_advantages.std() + 1e-8)
-            pg_advantages_nois = (pg_advantages_nois - pg_advantages_nois.mean()) / (pg_advantages_nois.std() + 1e-8)
+            if norm_mask is None:
+                pg_advantages = (pg_advantages - pg_advantages.mean()) / (pg_advantages.std() + 1e-8)
+                pg_advantages_nois = (pg_advantages_nois - pg_advantages_nois.mean()) / (pg_advantages_nois.std() + 1e-8)
+            else:
+                valid_pg = pg_advantages[norm_mask]
+                valid_nois = pg_advantages_nois[norm_mask]
+                if valid_pg.numel() > 0:
+                    pg_mean = valid_pg.mean()
+                    pg_std = valid_pg.std(unbiased=False).clamp_min(1e-8)
+                    nois_mean = valid_nois.mean()
+                    nois_std = valid_nois.std(unbiased=False).clamp_min(1e-8)
+                    pg_advantages = (pg_advantages - pg_mean) / pg_std
+                    pg_advantages_nois = (
+                        pg_advantages_nois - nois_mean
+                    ) / nois_std
 
 
         # Make sure no gradients backpropagated through the returned values.

@@ -6,6 +6,116 @@ import torch.nn.functional as F
 import math
 
 
+class MaskedGRU(nn.Module):
+    """A small GRU whose state updates and resets are controlled per item.
+
+    The regular ``nn.GRU`` API cannot skip individual batch items at a given
+    timestep.  Dynamic Thinker needs exactly that behaviour: SEARCH tokens
+    update the tree summary, while scheduler-only NEED_REAL_ACTION / WAIT
+    transitions must leave it untouched.  States use the same batch-first
+    tuple convention as the other recurrent modules in this file.
+    """
+
+    def __init__(self, input_size, hidden_size, num_layers=1):
+        super().__init__()
+        if num_layers < 1:
+            raise ValueError("MaskedGRU requires at least one layer")
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.cells = nn.ModuleList(
+            [
+                nn.GRUCell(input_size if layer == 0 else hidden_size, hidden_size)
+                for layer in range(num_layers)
+            ]
+        )
+
+    def initial_state(self, batch_size=1, device=None, dtype=None):
+        return tuple(
+            torch.zeros(batch_size, self.hidden_size, device=device, dtype=dtype)
+            for _ in range(self.num_layers)
+        )
+
+    def forward(
+        self,
+        inputs,
+        update_mask=None,
+        reset_mask=None,
+        state=(),
+        record_state=False,
+    ):
+        """Encode ``inputs`` with masked recurrent updates.
+
+        Args:
+            inputs: ``(T, B, C)`` input tokens.
+            update_mask: optional ``(T, B)`` mask.  A false entry preserves
+                the previous hidden state and emits that preserved state.
+            reset_mask: optional ``(T, B)`` mask applied before the update.
+            state: tuple of ``num_layers`` tensors shaped ``(B, H)``.
+        """
+        if inputs.ndim != 3:
+            raise ValueError(
+                f"MaskedGRU inputs must have shape (T, B, C), got {inputs.shape}"
+            )
+        T, B, _ = inputs.shape
+        if update_mask is None:
+            update_mask = torch.ones((T, B), dtype=torch.bool, device=inputs.device)
+        else:
+            update_mask = update_mask.to(device=inputs.device, dtype=torch.bool)
+            if update_mask.shape != (T, B):
+                raise ValueError(
+                    "MaskedGRU update_mask must have shape "
+                    f"{(T, B)}, got {update_mask.shape}"
+                )
+        if reset_mask is None:
+            reset_mask = torch.zeros((T, B), dtype=torch.bool, device=inputs.device)
+        else:
+            reset_mask = reset_mask.to(device=inputs.device, dtype=torch.bool)
+            if reset_mask.shape != (T, B):
+                raise ValueError(
+                    "MaskedGRU reset_mask must have shape "
+                    f"{(T, B)}, got {reset_mask.shape}"
+                )
+
+        if not state:
+            state = self.initial_state(B, device=inputs.device, dtype=inputs.dtype)
+        if len(state) != self.num_layers:
+            raise ValueError(
+                f"MaskedGRU expected {self.num_layers} state tensors, got {len(state)}"
+            )
+
+        hidden = list(state)
+        outputs = []
+        recorded = []
+        if record_state:
+            recorded.append(torch.stack(hidden, dim=1))
+
+        for t in range(T):
+            update_t = update_mask[t].unsqueeze(-1)
+            # A masked timestep is a strict no-op.  Valid reset events are
+            # emitted together with a valid first token of the new search.
+            reset_t = (reset_mask[t] & update_mask[t]).unsqueeze(-1)
+            layer_input = inputs[t]
+            next_hidden = []
+            for layer, cell in enumerate(self.cells):
+                base_hidden = torch.where(
+                    reset_t, torch.zeros_like(hidden[layer]), hidden[layer]
+                )
+                candidate = cell(layer_input, base_hidden)
+                layer_hidden = torch.where(update_t, candidate, base_hidden)
+                next_hidden.append(layer_hidden)
+                layer_input = layer_hidden
+            hidden = next_hidden
+            outputs.append(hidden[-1])
+            if record_state:
+                recorded.append(torch.stack(hidden, dim=1))
+
+        output = torch.stack(outputs, dim=0)
+        if record_state:
+            self.hidden_state = torch.stack(recorded, dim=0)
+        return output, tuple(hidden)
+
+
 class ConvAttnLSTMCell(nn.Module):
     def __init__(
         self,
@@ -281,8 +391,16 @@ class ConvAttnLSTM(nn.Module):
             )
         return core_state
     
-    def forward(self, x, done, core_state, record_state=False):
+    def forward(self, x, done, core_state, record_state=False, update_mask=None):
         assert len(x.shape) == 5
+        T, B = x.shape[:2]
+        if update_mask is not None:
+            update_mask = update_mask.to(device=x.device, dtype=torch.bool)
+            if update_mask.shape != (T, B):
+                raise ValueError(
+                    "ConvAttnLSTM update_mask must have shape "
+                    f"{(T, B)}, got {update_mask.shape}"
+                )
         core_output_list = []
         reset = done.float()
         if record_state: 
@@ -291,20 +409,25 @@ class ConvAttnLSTM(nn.Module):
         for n, (x_single, reset_single) in enumerate(
             zip(x.unbind(), reset.unbind())
         ):
+            update_single = None if update_mask is None else update_mask[n]
             for t in range(self.tran_t):
                 if t > 0:
                     reset_single = torch.zeros_like(reset_single)
                 reset_single = reset_single.view(-1)
                 output, core_state = self.forward_single(
-                    x_single, core_state, reset_single, reset_single
-                )  # output shape: 1, B, core_output_size        
+                    x_single,
+                    core_state,
+                    reset_single,
+                    reset_single,
+                    update_mask=update_single,
+                )  # output shape: 1, B, core_output_size
                 if record_state: self.hidden_state.append(torch.concat(core_state, dim=1))          
             core_output_list.append(output)
         core_output = torch.cat(core_output_list)
         if record_state: self.hidden_state = torch.stack(self.hidden_state, dim=1)
         return core_output, core_state
 
-    def forward_single(self, x, core_state, reset, reset_attn):
+    def forward_single(self, x, core_state, reset, reset_attn, update_mask=None):
         reset = reset.float()
         if reset_attn is None:
             reset_attn = reset.float()
@@ -312,13 +435,17 @@ class ConvAttnLSTM(nn.Module):
             reset_attn = reset_attn.float()
 
         b, c, h, w = x.shape
+        previous_core_state = core_state
+        previous_output = core_state[(self.num_layers - 1) * (4 if self.attn else 2)]
         layer_n = 4 if self.attn else 2
         out = core_state[(self.num_layers - 1) * layer_n] * (1 - reset).view(
             b, 1, 1, 1
         )  # h_cur on last layer
         
         if self.attn:
-            src_mask = core_state[-1]
+            # Avoid mutating a state that may need to be preserved for masked
+            # (WAIT) items.
+            src_mask = core_state[-1].clone() if update_mask is not None else core_state[-1]
             src_mask[reset_attn.bool(), :] = True
             src_mask[:, :-1] = src_mask[:, 1:].clone().detach()
             src_mask[:, -1] = False
@@ -363,6 +490,24 @@ class ConvAttnLSTM(nn.Module):
             core_state = core_state + (new_src_mask,)
 
         core_out = out.unsqueeze(0)
+        if update_mask is not None:
+            update_mask = update_mask.to(device=x.device, dtype=torch.bool)
+            if update_mask.shape != (b,):
+                raise ValueError(
+                    "ConvAttnLSTM per-step update_mask must have shape "
+                    f"{(b,)}, got {update_mask.shape}"
+                )
+            blended_state = []
+            for candidate, previous in zip(core_state, previous_core_state):
+                view_shape = (b,) + (1,) * (candidate.ndim - 1)
+                blended_state.append(
+                    torch.where(update_mask.view(view_shape), candidate, previous)
+                )
+            core_state = tuple(blended_state)
+            output_mask = update_mask.view(b, 1, 1, 1)
+            core_out = torch.where(
+                output_mask.unsqueeze(0), core_out, previous_output.unsqueeze(0)
+            )
         return core_out, core_state
     
 class LSTMReset(nn.Module):
@@ -397,4 +542,4 @@ class LSTMReset(nn.Module):
         state = tuple(s.transpose(0,1) for s in state)
 
         outputs = torch.cat(outputs, dim=0)
-        return outputs, state    
+        return outputs, state

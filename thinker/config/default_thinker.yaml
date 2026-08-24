@@ -52,6 +52,8 @@ reward_clip: -1 # reward clipping; if positve, the reward is clipped within the 
 # core wrapper setting
 wrapper_type: 0 # 0: default Thinker; 1: raw env; 2: Thinker w/ perfect model; 3: Thinker-v2; 4: Thinker-v2 w/ perfect model
 require_prob: false # whether to use prob to train model instead of sampled action
+dynamic_search: false # opt-in Dynamic Thinker search halting
+max_search_steps: -1 # positive safety cap; -1 allows unbounded learned search (0 is invalid)
 rec_t: 40 # stage length, modified
 test_rec_t: -1 # stage length for testing; non-positive for being the same as rec_t
 max_depth: 40 # maximum search depth before forceful reset, modified

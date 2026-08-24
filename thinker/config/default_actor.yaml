@@ -22,6 +22,8 @@ im_cost: 1 # cost for imaginary rewards, modified
 im_cost_anneal: true # whether to anneal the imaginary cost to 0
 cur_cost: 0. # cost for curiosity rewards - unused
 cur_cost_anneal: true # whether to anneal the curiosity cost to 0
+think_cost: 0.002 # cost applied to the Dynamic Thinker planning-reward channel
+think_cost_anneal: false # computation cost is part of the final objective
 baseline_cost: 0.5 # cost for computing baseline
 entropy_r_cost: 0. # entropy cost added to reward
 entropy_cost: 0.001 # entropy cost for real actions
@@ -42,6 +44,7 @@ drc: false # whether to use the drc baseline
 mcts: false # whether to use the mcts baseline
 # -tree rep processing
 tree_rep_rnn: false # whether to use rnn in processing tree representation
+dynamic_search_hidden_dim: 100 # hidden/output width of the masked Dynamic tree-token GRU
 se_lstm_table: true # whether to use lstm to enablde tables
 # -real state processing
 x_rnn: false # whether to use rnn in processing x, model's predicted state
@@ -107,4 +110,3 @@ env_n: 16  # number of parallel environment for each self-play ray actors
 gpu_self_play: 0.25 # gpu for each self-play ray actor (will be set automatically if auto_res is enabled)
 gpu_learn_actor: 0.25 # gpu for the actor-learning ray actor (will be set automatically if auto_res is enabled)
 gpu_learn: 0.5 # gpu for the model-learning ray actor (will be set automatically if auto_res is enabled)
-

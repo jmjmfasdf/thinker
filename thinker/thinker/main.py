@@ -67,6 +67,7 @@ class Env(gym.Wrapper):
         
         self._logger = util.logger() 
         self.parallel = self.flags.parallel
+        self.dynamic_search = util.dynamic_search_enabled(self.flags)
                 
         self.env_n = env_n
         self.device = torch.device("cuda") if gpu else torch.device("cpu")
@@ -189,6 +190,17 @@ class Env(gym.Wrapper):
             self.per_state_shape = {k:v.shape[1:] for k, v in per_state.items()}
         else:
             self.model_net = None            
+
+        # Dynamic search may accept a real action several augmented steps before
+        # the synchronous barrier executes it.  Cache the policy target at the
+        # acceptance step so model training is attributed to the executed action,
+        # rather than to the ignored action supplied by a later WAIT call.
+        self.pending_primary_action = None
+        self.pending_action_prob = None
+        self.pending_action_valid = None
+        self.think_episode_return = None
+        self.last_accepted_primary_action = None
+        self.last_accepted_search_control = None
         
         self.env_seed =  list(range(
             self.rank * env_n + self.flags.base_seed, 
@@ -285,15 +297,47 @@ class Env(gym.Wrapper):
     def reset(self, seed=None):
         if seed is None: seed = self.env_seed
         state = self.env.reset(self.model_net, seed=seed)
+        if self.dynamic_search:
+            self.pending_primary_action = torch.zeros(
+                self.pri_action_shape, dtype=torch.long, device=self.device
+            )
+            self.pending_action_prob = torch.zeros(
+                self.action_prob_shape, dtype=torch.float, device=self.device
+            )
+            self.pending_action_valid = torch.zeros(
+                self.env_n, dtype=torch.bool, device=self.device
+            )
+            self.think_episode_return = torch.zeros(
+                self.env_n, dtype=torch.float, device=self.device
+            )
+            self.last_accepted_primary_action = torch.zeros(
+                self.pri_action_shape, dtype=torch.long, device=self.device
+            )
+            self.last_accepted_search_control = torch.zeros(
+                self.env_n, dtype=torch.long, device=self.device
+            )
         return state
 
-    def step(self, primary_action, reset_action=None, action_prob=None, ignore=False):        
+    def step(
+            self, primary_action, reset_action=None, action_prob=None,
+            ignore=False, search_control=None):
+
+        if search_control is not None:
+            if reset_action is not None:
+                raise ValueError(
+                    "Pass either search_control or the legacy reset_action "
+                    "alias, not both."
+                )
+            reset_action = search_control
 
         assert primary_action.shape == self.pri_action_shape, \
                     f"primary_action should have shape {self.pri_action_shape} not {primary_action.shape}"  
         if self.flags.wrapper_type == 1:
             action = primary_action                
         else:
+            if reset_action is None:
+                name = "search_control" if self.dynamic_search else "reset_action"
+                raise ValueError(f"{name} is required for this wrapper")
             assert reset_action.shape == (self.env_n,), \
                     f"reset should have shape {(self.env_n,)} not {reset_action.shape}"
             action = (primary_action, reset_action)            
@@ -305,7 +349,68 @@ class Env(gym.Wrapper):
         
         with torch.set_grad_enabled(False):
             state, reward, done, truncated_done, info = self.env.step(action, self.model_net)  
-        last_step_real = (info["step_status"] == 0) | (info["step_status"] == 3)
+        if self.dynamic_search:
+            last_step_real = info["real_transition"].bool()
+            accepted_primary = info.get("accepted_primary_action")
+            if accepted_primary is not None:
+                accepted_primary = accepted_primary.to(primary_action.device)
+                accepted_mask = accepted_primary >= 0
+                self.last_accepted_primary_action[accepted_mask] = (
+                    accepted_primary[accepted_mask]
+                )
+            accepted_control = info.get("accepted_control")
+            if accepted_control is not None:
+                accepted_control = accepted_control.to(primary_action.device)
+                accepted_mask = accepted_control >= 0
+                self.last_accepted_search_control[accepted_mask] = (
+                    accepted_control[accepted_mask]
+                )
+            executed_primary = info.get("executed_primary_action")
+            if executed_primary is not None and torch.any(last_step_real):
+                executed_primary = executed_primary.to(primary_action.device)
+                self.last_accepted_primary_action[last_step_real] = (
+                    executed_primary[last_step_real]
+                )
+            # Callers other than SelfPlayWorker can use these effective tokens
+            # when WAIT inputs were ignored.  They are deliberately separate
+            # from accepted_* whose -1 sentinel remains an event-level API.
+            info["effective_primary_action"] = (
+                self.last_accepted_primary_action.clone()
+            )
+            info["effective_search_control"] = (
+                self.last_accepted_search_control.clone()
+            )
+            stored_action_mask = info.get("stored_action_mask")
+            if stored_action_mask is None:
+                stored_action_mask = torch.zeros_like(last_step_real)
+            else:
+                stored_action_mask = stored_action_mask.bool()
+
+            if torch.any(stored_action_mask):
+                if self.pending_primary_action is None:
+                    self.pending_primary_action = torch.zeros_like(primary_action)
+                    self.pending_action_valid = torch.zeros_like(stored_action_mask)
+                self.pending_primary_action[stored_action_mask] = primary_action[stored_action_mask]
+                self.pending_action_valid[stored_action_mask] = True
+                if action_prob is not None:
+                    if self.pending_action_prob is None or self.pending_action_prob.dtype != action_prob.dtype:
+                        self.pending_action_prob = torch.zeros_like(action_prob)
+                    self.pending_action_prob[stored_action_mask] = action_prob[stored_action_mask]
+
+            think_reward = info.get("think_reward")
+            if think_reward is None:
+                think_reward = torch.zeros_like(reward)
+            if think_reward.ndim > reward.ndim:
+                think_reward = think_reward[..., 0]
+            if self.think_episode_return is None:
+                self.think_episode_return = torch.zeros_like(think_reward, dtype=torch.float)
+            self.think_episode_return += think_reward.float()
+            info["think_episode_return"] = self.think_episode_return.clone()
+            stage_end = info.get("stage_end")
+            if stage_end is not None:
+                self.think_episode_return[stage_end.bool()] = 0.
+        else:
+            last_step_real = (info["step_status"] == 0) | (info["step_status"] == 3)
         
         # real_done 정보가 없으면 설정
         if "real_done" not in info:
@@ -321,8 +426,27 @@ class Env(gym.Wrapper):
             self._logger.info(f"  - step_status: {info.get('step_status', 'N/A')}")
             self._logger.info(f"  - counter: {self.counter}")
         
-        if self.train_model and not ignore and torch.any(last_step_real): 
-            self._write_send_model_buffer(state, reward, done, truncated_done, info, primary_action, action_prob)        
+        if self.train_model and not ignore and torch.any(last_step_real):
+            model_primary_action = primary_action
+            model_action_prob = action_prob
+            if self.dynamic_search:
+                executed_primary_action = info.get("executed_primary_action")
+                if executed_primary_action is not None:
+                    model_primary_action = executed_primary_action.to(primary_action.device)
+                    if primary_action.ndim > model_primary_action.ndim:
+                        model_primary_action = model_primary_action.unsqueeze(-1)
+                if action_prob is not None and self.pending_action_prob is not None:
+                    missing = last_step_real & ~self.pending_action_valid
+                    if torch.any(missing):
+                        # This should only be needed by partially upgraded wrappers.
+                        self.pending_action_prob[missing] = action_prob[missing]
+                    model_action_prob = self.pending_action_prob
+            self._write_send_model_buffer(
+                state, reward, done, truncated_done, info,
+                model_primary_action, model_action_prob, real_step_mask=last_step_real,
+            )
+            if self.dynamic_search:
+                self.pending_action_valid[last_step_real] = False
         if self.train_model:
             if self.parallel:
                 if self.counter % 200 == 0: self._refresh_wait()     
@@ -341,8 +465,11 @@ class Env(gym.Wrapper):
         self.counter += 1
         return state, reward, done, truncated_done, info      
 
-    def _write_send_model_buffer(self, state, reward, done, truncated_done, info, primary_action, action_prob):
-        real_step_mask = (info["step_status"] == 0) | (info["step_status"] == 3)
+    def _write_send_model_buffer(
+            self, state, reward, done, truncated_done, info,
+            primary_action, action_prob, real_step_mask=None):
+        if real_step_mask is None:
+            real_step_mask = (info["step_status"] == 0) | (info["step_status"] == 3)
         reward = reward.unsqueeze(-1)
         data = {
                 "baseline": info["baseline"][real_step_mask],
@@ -423,6 +550,14 @@ class Env(gym.Wrapper):
     def decode_tree_reps(self, tree_reps):
         if self.flags.wrapper_type in [3, 4, 5]:
             return self.env.get_wrapper_attr('decode_tree_reps')(tree_reps)
+        if self.dynamic_search:
+            return util.decode_dynamic_tree_reps(
+                tree_reps=tree_reps,
+                num_actions=self.num_actions,
+                dim_actions=self.dim_actions,
+                enc_type=self.flags.model_enc_type,
+                f_type=self.flags.model_enc_f_type,
+            )
         return util.decode_tree_reps(
             tree_reps=tree_reps,
             num_actions=self.num_actions,
@@ -437,7 +572,9 @@ class Env(gym.Wrapper):
             if self.flags.wrapper_type in [3, 4, 5]:
                 self.tree_rep_meaning = self.env.get_wrapper_attr('tree_rep_meaning')
             elif self.flags.wrapper_type in [0, 2]:
-                self.tree_rep_meaning = util.slice_tree_reps(self.num_actions, self.dim_actions, self.flags.rec_t)        
+                self.tree_rep_meaning = util.get_tree_rep_meaning(
+                    self.num_actions, self.dim_actions, self.flags
+                )
         return self.tree_rep_meaning
     
     def save_ckp(self):

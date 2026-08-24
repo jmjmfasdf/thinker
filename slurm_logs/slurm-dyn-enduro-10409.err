@@ -1,0 +1,28 @@
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_stream, resource_exists
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_stream, resource_exists
+Initializing...
+fatal: not a git repository (or any of the parent directories): .git
+Traceback (most recent call last):
+  File "/scratch/jeongmin/dynamic-thinker-10409/project/thinker/train.py", line 20, in <module>
+    ray.init(
+  File "/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/ray/_private/client_mode_hook.py", line 107, in wrapper
+    return func(*args, **kwargs)
+  File "/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/ray/_private/worker.py", line 1905, in init
+    _global_node = ray._private.node.Node(
+  File "/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/ray/_private/node.py", line 321, in __init__
+    self._plasma_store_socket_name = self._prepare_socket_file(
+  File "/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/ray/_private/node.py", line 1012, in _prepare_socket_file
+    validate_socket_filepath(result.split("://", 1)[-1])
+  File "/home/jeongmin/miniconda3/envs/thinker/lib/python3.10/site-packages/ray/_private/utils.py", line 1715, in validate_socket_filepath
+    raise OSError(
+OSError: validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes: /scratch/jeongmin/dynamic-thinker-10409/ray/ray/session_2026-08-24_14-01-07_299499_2120534/sockets/plasma_store
