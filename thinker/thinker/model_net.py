@@ -15,7 +15,10 @@ OutNetOut = namedtuple(
 )
 SRNetOut = namedtuple(
     "SRNetOut",
-    ["rs", "r_enc_logits", "dones", "done_logits", "xs", "hs", "state", "noise_loss"],
+    [
+        "rs", "r_enc_logits", "dones", "done_logits", "xs", "raw_xs",
+        "hs", "state", "noise_loss",
+    ],
 )
 VPNetOut = namedtuple(
     "VPNetOut",
@@ -574,6 +577,7 @@ class SRNet(nn.Module):
         self.noise_enable = flags.noise_enable
         self.has_memory = flags.model_has_memory
         self.decoder_depth = flags.model_decoder_depth
+        self.state_projection = getattr(flags, "model_state_projection", "none")
 
         if self.decoder_depth == 0:
             self.frame_stack_n = frame_stack_n        
@@ -592,6 +596,7 @@ class SRNet(nn.Module):
             decoder=True,
             decoder_depth=flags.model_decoder_depth,
             frame_stack_n=self.frame_stack_n,
+            disable_bn=flags.model_disable_bn,
             has_memory=self.has_memory,
         )
         self.per_state_len = len(self.encoder.initial_state())
@@ -659,7 +664,42 @@ class SRNet(nn.Module):
     def initial_state(self, batch_size=1, device=None):
         return self.encoder.initial_state(batch_size=batch_size, device=device)
 
-    def forward(self, env_state_norm, done, actions, state, one_hot=False, future_env_state_norm=None):
+    def _project_decoded_state(self, raw_x, *, check_raw_finite=False):
+        """Project depth-0 predictions into the normalized observation domain.
+
+        Clamp mode is fail-closed in both training and inference so projection
+        cannot hide an infinite raw decoder output.  Legacy ``none`` mode keeps
+        its historical inference path and checks only when explicitly asked by
+        the learner.
+        """
+
+        if self.state_projection == "clamp" or check_raw_finite:
+            finite = torch.isfinite(raw_x)
+            if not bool(torch.all(finite).item()):
+                invalid = ~finite
+                flat_index = int(
+                    torch.nonzero(invalid.reshape(-1), as_tuple=False)[0].item()
+                )
+                first_value = raw_x.detach().reshape(-1)[flat_index].cpu().item()
+                raise FloatingPointError(
+                    "raw decoded state contains non-finite values before "
+                    f"projection; first invalid value is {first_value!r} at "
+                    f"flat index {flat_index}"
+                )
+        if self.state_projection == "clamp":
+            return torch.clamp(raw_x, 0.0, 1.0)
+        return raw_x
+
+    def forward(
+        self,
+        env_state_norm,
+        done,
+        actions,
+        state,
+        one_hot=False,
+        future_env_state_norm=None,
+        check_raw_finite=False,
+    ):
         """
         Args:
             env_state_norm (tensor): normalized env state (float) with shape (B, C, H, W), in the form of s_t
@@ -706,7 +746,10 @@ class SRNet(nn.Module):
 
         new_state["sr_h"] = h
         if len(hs) > 1:
-            xs = self.encoder.decode(hs[1:], flatten=True)
+            raw_xs = self.encoder.decode(hs[1:], flatten=True)
+            xs = self._project_decoded_state(
+                raw_xs, check_raw_finite=check_raw_finite
+            )
             if self.frame_stack_n > 1:
                 stacked_x = env_state_norm
                 stacked_xs = []
@@ -717,7 +760,8 @@ class SRNet(nn.Module):
                 new_state["last_x"] = stacked_x[:, self.frame_ch:]   
        
         else:
-            xs = None            
+            xs = None
+            raw_xs = None
             if self.frame_stack_n > 1:
                 new_state["last_x"] = env_state_norm[:, self.frame_ch:].clone()
 
@@ -732,12 +776,20 @@ class SRNet(nn.Module):
             dones=util.safe_concat(outs, "dones", 0),
             done_logits=util.safe_concat(outs, "done_logits", 0),
             xs=xs,
+            raw_xs=raw_xs,
             hs=hs,
             state=new_state,
             noise_loss=noise_loss,
         )
 
-    def forward_single(self, action, state, one_hot=False, future_x=None):
+    def forward_single(
+        self,
+        action,
+        state,
+        one_hot=False,
+        future_x=None,
+        check_raw_finite=False,
+    ):
         """
         Single unroll of the network with one action
         Args:
@@ -757,7 +809,10 @@ class SRNet(nn.Module):
                 future_enc_x = None
             h, _ = self.compute_noise(h, action, future_enc_x)
         h = self.RNN(h=h, actions=action)
-        x = self.encoder.decode(h, flatten=False)
+        raw_x = self.encoder.decode(h, flatten=False)
+        x = self._project_decoded_state(
+            raw_x, check_raw_finite=check_raw_finite
+        )
         if self.frame_stack_n > 1:
             x = torch.concat([state["last_x"], x], dim=1)
 
@@ -767,6 +822,7 @@ class SRNet(nn.Module):
             new_state["last_x"] = x[:, self.frame_ch:].clone()
         
         xs = util.safe_unsqueeze(x, 0)
+        raw_xs = util.safe_unsqueeze(raw_x, 0)
 
         return SRNetOut(
             rs=util.safe_unsqueeze(out.rs, 0),
@@ -774,6 +830,7 @@ class SRNet(nn.Module):
             dones=util.safe_unsqueeze(out.dones, 0),
             done_logits=util.safe_unsqueeze(out.done_logits, 0),
             xs=xs,
+            raw_xs=raw_xs,
             hs=util.safe_unsqueeze(h, 0),
             state=new_state,
             noise_loss=None,
@@ -849,6 +906,7 @@ class VPNet(nn.Module):
             downscale_c=self.downscale_c,
             decoder=False,
             decoder_depth=0,
+            disable_bn=flags.model_disable_bn,
             has_memory=self.has_memory,
         )
         self.hidden_shape = self.encoder.out_shape
@@ -881,11 +939,17 @@ class VPNet(nn.Module):
         if not self.dual_net:
             if not self.oned_input:
                 self.h_to_z_nn = nn.Sequential(
-                    ResBlock(inplanes=inplanes, disable_bn=False),
+                    ResBlock(
+                        inplanes=inplanes,
+                        disable_bn=self.flags.model_disable_bn,
+                    ),
                     conv3x3(inplanes, inplanes),
                 )
                 self.z_to_h_nn = nn.Sequential(
-                    ResBlock(inplanes=inplanes, disable_bn=False),
+                    ResBlock(
+                        inplanes=inplanes,
+                        disable_bn=self.flags.model_disable_bn,
+                    ),
                     conv3x3(inplanes, inplanes),
                 )
             else:
@@ -1050,7 +1114,34 @@ class ModelNet(BaseNet):
         super(ModelNet, self).__init__()
         self.rnn = False
         self.flags = flags
+        self.observation_space = obs_space
         self.obs_shape = obs_space.shape
+        self.obs_dtype = obs_space.dtype
+        self.obs_low = obs_space.low.copy()
+        self.obs_high = obs_space.high.copy()
+        self.frame_stack_n = int(frame_stack_n)
+        if self.frame_stack_n <= 0:
+            raise ValueError("frame_stack_n must be positive")
+        if len(self.obs_shape) == 1:
+            if self.frame_stack_n != 1:
+                raise ValueError(
+                    "one-dimensional ModelNet observations require "
+                    f"frame_stack_n=1, got {self.frame_stack_n}"
+                )
+        elif len(self.obs_shape) == 3:
+            channel_n = int(self.obs_shape[0])
+            if channel_n <= 0 or channel_n % self.frame_stack_n != 0:
+                raise ValueError(
+                    "ModelNet observation channels must be divisible by "
+                    "frame_stack_n: "
+                    f"shape={self.obs_shape}, "
+                    f"frame_stack_n={self.frame_stack_n}"
+                )
+        else:
+            raise ValueError(
+                "ModelNet observations must be one-dimensional or "
+                f"channel-first images, got shape {self.obs_shape}"
+            )
         self.action_space = action_space
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
             util.process_action_space(action_space)  
@@ -1071,7 +1162,28 @@ class ModelNet(BaseNet):
         
         low = torch.tensor(obs_space.low)
         high = torch.tensor(obs_space.high)
-        self.need_norm = torch.isfinite(low).all() and torch.isfinite(high).all()
+        self.need_norm = bool(
+            torch.isfinite(low).all().item()
+            and torch.isfinite(high).all().item()
+        )
+        self.decoder_depth = flags.model_decoder_depth
+        self.state_projection = getattr(flags, "model_state_projection", "none")
+        if self.state_projection == "clamp":
+            if not self.dual_net:
+                raise ValueError(
+                    "model_state_projection='clamp' requires dual_net=true"
+                )
+            if self.decoder_depth != 0:
+                raise ValueError(
+                    "model_state_projection='clamp' requires "
+                    "model_decoder_depth=0"
+                )
+            if not self.need_norm or not bool(torch.all(high > low).item()):
+                raise ValueError(
+                    "model_state_projection='clamp' requires finite, "
+                    "non-degenerate observation bounds so decoded states "
+                    "represent normalized [0, 1] observations"
+                )
         
         if self.need_norm:
             self.register_buffer("norm_low", low)
@@ -1080,10 +1192,15 @@ class ModelNet(BaseNet):
         self.vp_net = VPNet(self.obs_shape, action_space, self.reward_n, flags)
         self.hidden_shape = list(self.vp_net.hidden_shape)
         if self.dual_net:
-            self.sr_net = SRNet(self.obs_shape, action_space, self.reward_n, flags, frame_stack_n)
+            self.sr_net = SRNet(
+                self.obs_shape,
+                action_space,
+                self.reward_n,
+                flags,
+                self.frame_stack_n,
+            )
             self.hidden_shape[0] += self.sr_net.hidden_shape[0]
-        self.frame_ch = self.obs_shape[0] // frame_stack_n
-        self.decoder_depth = flags.model_decoder_depth
+        self.frame_ch = self.obs_shape[0] // self.frame_stack_n
 
     def initial_state(self, batch_size=1, device=None):
         state = {}
@@ -1133,7 +1250,14 @@ class ModelNet(BaseNet):
         if self.dual_net:
             action = util.encode_action(actions[0], self.vp_net.action_space, one_hot=False)       
             x0 = self.vp_net.encoder.forward_pre_mem(env_state_norm, action, end_depth=self.decoder_depth)
-            sr_net_out = self.sr_net(env_state_norm, done, actions, state, future_env_state_norm=future_env_state_norm)
+            sr_net_out = self.sr_net(
+                env_state_norm,
+                done,
+                actions,
+                state,
+                future_env_state_norm=future_env_state_norm,
+                check_raw_finite=training,
+            )
             xs = sr_net_out.xs
             new_state.update(sr_net_out.state)
             full_xs = x0.unsqueeze(0)
@@ -1172,7 +1296,10 @@ class ModelNet(BaseNet):
         state_ = {}
         if self.dual_net:
             sr_net_out = self.sr_net.forward_single(
-                action=action, state=state, future_x=future_x
+                action=action,
+                state=state,
+                future_x=future_x,
+                check_raw_finite=training,
             )
             xs = sr_net_out.xs 
             x = xs[0]

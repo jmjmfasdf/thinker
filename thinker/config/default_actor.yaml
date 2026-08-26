@@ -14,6 +14,7 @@ actor_batch_size: 16 # actor batch size
 actor_unroll_len: 201 # unroll length used to update actor
 actor_use_rms: false # whether to use rms (default: adam) as optimizer
 actor_grad_norm_clipping: 0.5 # gradient clipping norm; non-positive for no clipping
+actor_amp_max_consecutive_skips: 8 # fail after this many consecutive AMP overflows
 actor_adam_eps: 0.00000001 # eps for Adam optimizer
 return_norm_type: -1 # return norm type; -1 for no normalization, 0 for value normalization, 1 for advantage normalization, 2 for standard adv normalization
 v_trace_lamb: 1. # lambda used in v-trace
@@ -32,6 +33,8 @@ autotune: false # autotune the entropy_cost and im_entropy_cost
 tar_entropy_scale: 0.4 # target policy entropy; 1 for uniform policy so it should be less than 1
 tar_im_entropy_scale: 0.4 # target imaginary policy entropy; 1 for uniform policy so it should be less than 1
 reg_cost: 0.001 # regularization cost
+action_prior_weight: 1.0 # per-real-policy-row KL toward the human action prior (active only with icopro_data_path)
+action_prior_ema: 0.05 # EMA update rate for the online real-policy distribution
 # actor setting
 # - general
 see_real_state: True # whether to see root real state
@@ -100,6 +103,21 @@ policy_vis_length: 20 # length of the video visualization
 profile: false # whether to output all the time statistics of the run
 parallel_actor: true # whether to use a parallel ray actor for training the actor
 float16: true # whether to use mixed precision
+# dynamic behavioral imitation (disabled when icopro_data_path is empty)
+icopro_data_path: '' # behavioral_data_block root
+icopro_subjects: '1' # comma-separated participant IDs
+icopro_game_id: 0 # behavioral archive game entity; action count comes from the live environment
+icopro_train_sessions: '1,2,3' # explicit training-session filter
+icopro_holdout_sessions: '4'
+icopro_batch_size: 32
+batch_length: 4 # number of scored real decisions after one unscored burn-in
+icopro_margin: 1.0 # DQfD margin size
+icopro_margin_coef: 1.0
+icopro_action_diff_coef: 1.0 # normalized cross-entropy coefficient
+icopro_pvp_coef: 0.0
+icopro_coef: 1.0 # overall behavioral-cloning coefficient
+icopro_supervised_freq: 1 # one imitation batch per this many actor optimizer calls
+icopro_device: cpu # frozen ModelNet/planner device
 # ray resources
 auto_res: True # whether to auto allocate gpu
 ray_mem: -1 # default initialized ray memory unit: GB

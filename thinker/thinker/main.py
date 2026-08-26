@@ -16,6 +16,64 @@ from thinker.gym_add.asyn_vector_env import AsyncVectorEnv
 import thinker.gym_add.wrapper as wrapper
 from thinker.cenv import cModelWrapper, cPerfectWrapper
 
+
+def _validate_online_env_contract(
+    real_state_space,
+    primary_action_space,
+    frame_stack_n,
+    *,
+    expected_frame_stack_n=None,
+    require_discrete=False,
+):
+    """Validate the observation/action metadata used to build ModelNet."""
+
+    frame_stack_n = int(frame_stack_n)
+    if frame_stack_n <= 0:
+        raise ValueError("frame_stack_n must be positive")
+    if expected_frame_stack_n is not None:
+        expected_frame_stack_n = int(expected_frame_stack_n)
+        if frame_stack_n != expected_frame_stack_n:
+            raise ValueError(
+                "online environment frame-stack metadata disagrees with flags: "
+                f"environment={frame_stack_n}, flags={expected_frame_stack_n}"
+            )
+
+    shape = tuple(real_state_space.shape)
+    if len(shape) == 3:
+        channel_n = int(shape[0])
+        if channel_n <= 0 or channel_n % frame_stack_n != 0:
+            raise ValueError(
+                "online observation channels must be divisible by "
+                "frame_stack_n: "
+                f"shape={shape}, frame_stack_n={frame_stack_n}"
+            )
+        frame_ch = channel_n // frame_stack_n
+    elif len(shape) == 1:
+        if frame_stack_n != 1:
+            raise ValueError(
+                "one-dimensional observations require frame_stack_n=1, "
+                f"got {frame_stack_n}"
+            )
+        frame_ch = int(shape[0])
+    else:
+        raise ValueError(
+            "environment observations must be one-dimensional or "
+            f"channel-first images, got shape {shape}"
+        )
+
+    if require_discrete:
+        if not isinstance(primary_action_space, gym.spaces.Discrete):
+            raise TypeError(
+                "EnvPool/dynamic imitation requires a Discrete primary "
+                f"action space, got {type(primary_action_space).__name__}"
+            )
+        if int(getattr(primary_action_space, "start", 0)) != 0:
+            raise ValueError(
+                "EnvPool/dynamic imitation requires zero-based Discrete actions"
+            )
+    return frame_ch
+
+
 def ray_init(flags=None, **kwargs):
     # initialize resources for Thinker wrapper
     if flags is None:
@@ -103,15 +161,15 @@ class Env(gym.Wrapper):
         self.real_state_space  = env.get_wrapper_attr('single_observation_space')
         self.real_state_shape = self.real_state_space.shape
 
-        assert len(self.real_state_shape) in [1, 3], \
-            f"env.observation_space should be 1d or 3d, not {self.real_state_shape}"
-        # assert type(env.action_space) in [gym.spaces.discrete.Discrete, gym.spaces.tuple.Tuple], \
-        #    f"env.action_space should be Discrete or Tuple, not {type(env.action_space)}"  
-        
         if self.real_state_space.dtype == 'uint8':
             self.state_dtype = 0
         elif self.real_state_space.dtype == 'float32':
-            self.state_dtype = 1                
+            self.state_dtype = 1
+        else:
+            raise TypeError(
+                "environment observations must use uint8 or float32, got "
+                f"{self.real_state_space.dtype}"
+            )
 
         self.pri_action_space = env.get_wrapper_attr('single_action_space')
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
@@ -134,12 +192,26 @@ class Env(gym.Wrapper):
 
         try:
             self.frame_stack_n = env.get_wrapper_attr('frame_stack_n')
-        except AttributeError as e:
-            self.frame_stack_n = 1        
+        except AttributeError:
+            self.frame_stack_n = 1
+        imitation_enabled = bool(
+            str(getattr(self.flags, "icopro_data_path", "")).strip()
+        )
+        expected_frame_stack_n = (
+            self.flags.frame_stack_n
+            if self.flags.envpool or imitation_enabled
+            else None
+        )
+        self.frame_ch = _validate_online_env_contract(
+            self.real_state_space,
+            self.pri_action_space,
+            self.frame_stack_n,
+            expected_frame_stack_n=expected_frame_stack_n,
+            require_discrete=self.flags.envpool or imitation_enabled,
+        )
         if self.rank == 0 and self.frame_stack_n > 1:
             self._logger.info("Detected frame stacking with %d counts" % self.frame_stack_n)
-        
-        self.frame_ch = env.observation_space.shape[0] // self.frame_stack_n
+
         self.model_mem_unroll_len = self.flags.model_mem_unroll_len
         self.pre_len = self.frame_stack_n - 1 + self.model_mem_unroll_len
         self.post_len = self.flags.model_unroll_len + self.flags.model_return_n + 1
@@ -293,6 +365,30 @@ class Env(gym.Wrapper):
     def _update_status(self):
         self.status = ray.get(self.status_ptr)
         self.status_ptr = self.model_buffer.get_status.remote()        
+
+    def _poll_model_learner(self, *, wait=False):
+        """Surface a remote ModelLearner failure while self-play is running."""
+
+        if self.rank != 0 or not hasattr(self, "r_learner"):
+            return None
+        if getattr(self, "_model_learner_result", None) is not None:
+            return self._model_learner_result
+        if wait:
+            ready = [self.r_learner]
+        else:
+            ready, _ = ray.wait([self.r_learner], num_returns=1, timeout=0)
+            if not ready:
+                return None
+        try:
+            result = ray.get(ready[0])
+        except Exception as error:
+            raise RuntimeError("model learner failed") from error
+        if result is not True:
+            raise RuntimeError(
+                f"model learner terminated without success: {result!r}"
+            )
+        self._model_learner_result = result
+        return result
 
     def reset(self, seed=None):
         if seed is None: seed = self.env_seed
@@ -449,10 +545,15 @@ class Env(gym.Wrapper):
                 self.pending_action_valid[last_step_real] = False
         if self.train_model:
             if self.parallel:
-                if self.counter % 200 == 0: self._refresh_wait()     
+                if self.counter % 200 == 0:
+                    self._refresh_wait()
             else:
                 self.status = self._train_model()
-            if self.status["finish"]:                 
+            if self.status["finish"]:
+                # A failed remote learner also sets ModelBuffer.finish in its
+                # finally block.  Resolve the future before treating that bit
+                # as successful completion.
+                self._poll_model_learner(wait=self.rank == 0)
                 if self.rank == 0 and self.train_model: 
                     self._logger.info("Finish training model")
                 self.train_model = False   
@@ -498,7 +599,9 @@ class Env(gym.Wrapper):
         self.model_buffer.write.remote(ray.put(data), rank=self.rank, idx=idx, priority=None) 
 
     def _refresh_wait(self):
+        self._poll_model_learner(wait=False)
         self._update_status()
+        self._poll_model_learner(wait=self.status["finish"] and self.rank == 0)
         if self.status["running"]: self._refresh_net()
         if self.status["processed_n"] < self.status["warm_up_n"] * 2: return         
         while self.status["replay_ratio"] < self.flags.min_replay_ratio and not self.status["finish"]:
@@ -540,12 +643,20 @@ class Env(gym.Wrapper):
         return self.env.render(*args, **kwargs)
 
     def close(self):
+        learner_error = None
+        if self.rank == 0 and hasattr(self, "r_learner"):
+            try:
+                self._poll_model_learner(wait=True)
+            except Exception as error:
+                learner_error = error
         if self.parallel:
             self.model_buffer.set_finish.remote()
         del self.model_net
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         self.env.close()
+        if learner_error is not None:
+            raise RuntimeError("model learner failed") from learner_error
     
     def decode_tree_reps(self, tree_reps):
         if self.flags.wrapper_type in [3, 4, 5]:

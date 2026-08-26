@@ -375,7 +375,13 @@ def test_perfect_tree_carry_preserves_descendant_snapshot_slots():
     _step(wrapper, model, [0], [util.PROCEED])
     _step(wrapper, model, [1], [util.PROCEED])
     _step(wrapper, model, [0], [util.STOP])
-    _step(wrapper, model, [0], [util.PROCEED])  # real action; carries child 0
+    _state, _reward, _done, _truncated, carry_info = _step(
+        wrapper, model, [0], [util.PROCEED]
+    )  # real action; carries child 0
+    assert carry_info["root_carried"].tolist() == [True]
+    assert carry_info["carried_descendant_visit_count"].tolist() == [1]
+    assert carry_info["carried_descendant_expanded_count"].tolist() == [1]
+    assert carry_info["useful_carry"].tolist() == [True]
 
     # Revisit the retained grandchild (no simulator step), then expand from it.
     step_calls_before_revisit = len(env.step_calls)

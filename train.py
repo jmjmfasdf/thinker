@@ -9,8 +9,6 @@ from thinker.self_play import SelfPlayWorker
 from thinker.logger import LogWorker
 from thinker.main import ray_init
 from thinker import util
-import sys
-sys.path.append('/home/jmme425/thinker/thinker')
 
 def set_seed(seed):
     """Set seeds for reproducibility"""
@@ -30,6 +28,7 @@ if __name__ == "__main__":
 
     st_time = time.time()
     flags = util.create_setting()
+    util.clear_run_completion(flags.ckpdir)
     
     # Set seed for reproducibility (using base_seed from config)
     set_seed(flags.base_seed)
@@ -62,7 +61,8 @@ if __name__ == "__main__":
     ray_obj_env = ray_init(flags=flags, save_flags=False, **vars(flags))
     ray_obj_env["actor_param_buffer"] = actor_param_buffer
     ray_obj_actor = {"actor_buffer": actor_buffer,
-                     "actor_param_buffer": actor_param_buffer}   
+                     "actor_param_buffer": actor_param_buffer,
+                     "model_param_buffer": ray_obj_env["param_buffer"]}
 
     if not flags.train_actor: 
         self_play_buffer = SelfPlayBuffer.options(num_cpus=1).remote(flags=flags)
@@ -88,8 +88,9 @@ if __name__ == "__main__":
         r_log_worker = log_worker.start.remote()
 
     return_codes = ray.get(r_worker)
-    if all(return_codes):
-        open(os.path.join(flags.ckpdir, 'finish'), 'a').close()
+    if not all(return_codes):
+        raise RuntimeError(f"self-play/learner failure: return_codes={return_codes}")
+    util.write_run_completion(flags.ckpdir)
     if flags.use_wandb:
         ray.get(r_log_worker)
-    logger.info("Time required: %fs" % (time.time() - st_time)) 
+    logger.info("Time required: %fs" % (time.time() - st_time))

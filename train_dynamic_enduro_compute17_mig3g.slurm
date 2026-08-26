@@ -11,27 +11,26 @@
 #SBATCH --mem=63300M
 #SBATCH --job-name=dyn-enduro-3g
 #SBATCH --time=7-00:00:00
-#SBATCH --output=/home/work/jeongmin/thinker-dynamic/slurm_logs/slurm-%x-%j.out
-#SBATCH --error=/home/work/jeongmin/thinker-dynamic/slurm_logs/slurm-%x-%j.err
+#SBATCH --output=/home/jeongmin/thinker-dynamic-imitation/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/jeongmin/thinker-dynamic-imitation/slurm_logs/slurm-%x-%j.err
 
 set -euo pipefail
 
 PROJECT_ROOT=""
 for candidate in \
-    /home/work/jeongmin/thinker-dynamic \
-    /work/jeongmin/thinker-dynamic \
-    /home/jeongmin/thinker-dynamic; do
+    /home/jeongmin/thinker-dynamic-imitation \
+    /work/jeongmin/thinker-dynamic-imitation; do
     if [ -d "$candidate/thinker" ]; then
         PROJECT_ROOT="$candidate"
         break
     fi
 done
 if [ -z "$PROJECT_ROOT" ]; then
-    echo "[setup] thinker-dynamic project root is not visible on $(hostname)"
+    echo "[setup] thinker-dynamic-imitation project root is not visible on $(hostname)"
     exit 2
 fi
 
-PYTHON_ENV="/home/jeongmin/miniconda3/envs/thinker"
+PYTHON_ENV="/home/jeongmin/miniconda-dynamic/envs/dynamic-thinker"
 PYTHON_BIN="$PYTHON_ENV/bin/python"
 if [ ! -x "$PYTHON_BIN" ]; then
     echo "[setup] missing Python environment: $PYTHON_BIN"
@@ -42,7 +41,7 @@ JOBID="$SLURM_JOB_ID"
 JOBTMP="/scratch/$USER/dt-$JOBID"
 WORKDIR="$JOBTMP/p"
 RUN_DIR="$WORKDIR/thinker"
-XPID="dynamic-enduro-v5-test-$JOBID"
+XPID="dynamic-imitation-enduro-s1-$JOBID"
 PERIODIC_STAGEOUT_SEC=300
 RAY_RUNTIME_DIR="/tmp/r$JOBID"
 TASK_TMPDIR="/tmp/t$JOBID"
@@ -86,10 +85,26 @@ rsync -a --delete \
     --exclude=__pycache__/ \
     --exclude='*.pyc' \
     --exclude=build/ \
+    --exclude='*.so' \
+    --exclude='*.cpp' \
+    --exclude=behavioral_data_block/ \
     --exclude=logs/ \
     --exclude='slurm-*.out' \
     --exclude='slurm-*.err' \
     "$PROJECT_ROOT/" "$WORKDIR/"
+
+echo "[stage-in] syncing subject-1 Enduro behavior (sessions 1-4)"
+for session in 01 02 03 04; do
+    source_dir="$PROJECT_ROOT/behavioral_data_block/sub-001/ses-$session"
+    target_dir="$WORKDIR/behavioral_data_block/sub-001/ses-$session"
+    if [ ! -d "$source_dir" ]; then
+        echo "[stage-in] missing behavioral session directory: $source_dir"
+        exit 2
+    fi
+    mkdir -p "$target_dir"
+    rsync -a --include='*/' --include='*game0.npz' --exclude='*' \
+        "$source_dir/" "$target_dir/"
+done
 
 sync_logs() {
     if [ -d "$WORKDIR/logs/thinker" ]; then
@@ -126,16 +141,35 @@ cd "$RUN_DIR"
 echo "[env] python=$PYTHON_BIN"
 "$PYTHON_BIN" --version
 
+echo "[build] rebuilding Cython extension from this staged source"
+rm -f thinker/cenv*.so
+"$PYTHON_BIN" setup.py build_ext --inplace
+
 echo "[preflight] importing Dynamic Thinker, Enduro-v5, and W&B"
-"$PYTHON_BIN" - <<'PY'
+RUN_DIR="$RUN_DIR" BEHAV_ROOT="$WORKDIR/behavioral_data_block" "$PYTHON_BIN" - <<'PY'
 import envpool
+import glob
+import os
+import thinker
 import thinker.cenv
 import wandb
 
+run_dir = os.path.realpath(os.environ["RUN_DIR"])
+for module_path in (thinker.__file__, thinker.cenv.__file__):
+    if not os.path.realpath(module_path).startswith(run_dir + os.sep):
+        raise RuntimeError(f"stale/out-of-tree import: {module_path}")
+files = sorted(glob.glob(os.path.join(
+    os.environ["BEHAV_ROOT"], "sub-001", "ses-*", "*game0.npz"
+)))
+if len(files) != 11:
+    raise RuntimeError(f"expected 11 subject-1 Enduro blocks, found {len(files)}")
+
 env = envpool.make_gymnasium("Enduro-v5", num_envs=1, seed=1)
 obs, _ = env.reset()
+print("[preflight] thinker=", thinker.__file__)
 print("[preflight] cenv=", thinker.cenv.__file__)
 print("[preflight] Enduro observation=", obs.shape, obs.dtype)
+print("[preflight] behavioral blocks=", len(files))
 env.close()
 
 api = wandb.Api(timeout=20)
@@ -152,10 +186,28 @@ ENTRYPOINT=(
     --xpid "$XPID"
     --dynamic_search True
     --wrapper_type 0
+    --rec_t 20
     --max_search_steps 20
     --max_depth 20
     --model_unroll_len 20
     --think_cost 0.0005
+    --think_cost_anneal False
+    --icopro_data_path "$WORKDIR/behavioral_data_block"
+    --icopro_subjects 1
+    --icopro_game_id 0
+    --icopro_train_sessions 1,2,3
+    --icopro_holdout_sessions 4
+    --icopro_batch_size 16
+    --batch_length 4
+    --icopro_margin 1.0
+    --icopro_margin_coef 1.0
+    --icopro_action_diff_coef 1.0
+    --icopro_pvp_coef 0.0
+    --icopro_coef 1.0
+    --icopro_supervised_freq 1
+    --action_prior_weight 1.0
+    --action_prior_ema 0.05
+    --icopro_device cuda
     --reward_clip 1
     --model_size_nn 2
     --discounting 0.99

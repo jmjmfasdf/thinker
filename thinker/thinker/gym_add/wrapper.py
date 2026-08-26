@@ -20,13 +20,26 @@ def _call_named_slot(env, method_name, slot_id):
 
 def create_envpool(name, flags, env_n=1):
     import envpool
-    kwargs = dict(
+
+    # ``stack_num`` is EnvPool's construction argument.  Thinker uses the
+    # distinct ``frame_stack_n`` attribute as replay/model metadata, so pass
+    # it explicitly instead of forwarding the EnvPool kwargs wholesale.
+    envpool_kwargs = dict(
         gray_scale=flags.grayscale,
-        episodic_life=True,        
+        episodic_life=True,
         stack_num=flags.frame_stack_n,
     )
-    env = EnvPoolWrap(envpool.make(name, env_type="gymnasium", num_envs=env_n, **kwargs), num_envs=env_n, **kwargs)
-    return env
+    env = envpool.make(
+        name,
+        env_type="gymnasium",
+        num_envs=env_n,
+        **envpool_kwargs,
+    )
+    return EnvPoolWrap(
+        env,
+        num_envs=env_n,
+        frame_stack_n=flags.frame_stack_n,
+    )
 
 def create_env_fn(name, flags):
     if "Sokoban" in name:
@@ -564,15 +577,46 @@ class VectorWrap(WrapperExtended):
         return {}
 
 
-class EnvPoolWrap(WrapperExtended):    
-    def __init__(self, env, num_envs, **kwargs):
+class EnvPoolWrap(WrapperExtended):
+    def __init__(self, env, num_envs, *, frame_stack_n):
         super().__init__(env)
-        self.num_envs = num_envs
+        self.num_envs = int(num_envs)
+        if self.num_envs <= 0:
+            raise ValueError("num_envs must be positive")
+
+        self.frame_stack_n = int(frame_stack_n)
+        if self.frame_stack_n <= 0:
+            raise ValueError("frame_stack_n must be positive")
+
         self.single_observation_space = env.observation_space
         self.single_action_space = env.action_space
+        if not isinstance(self.single_observation_space, spaces.Box):
+            raise TypeError(
+                "EnvPool observations must use a Box space, got "
+                f"{type(self.single_observation_space).__name__}"
+            )
+        if len(self.single_observation_space.shape) != 3:
+            raise ValueError(
+                "EnvPool Thinker observations must be channel-first images, "
+                f"got shape {self.single_observation_space.shape}"
+            )
+        channel_n = int(self.single_observation_space.shape[0])
+        if channel_n <= 0 or channel_n % self.frame_stack_n != 0:
+            raise ValueError(
+                "EnvPool observation channels must be divisible by "
+                "frame_stack_n: "
+                f"channels={channel_n}, frame_stack_n={self.frame_stack_n}"
+            )
+        if not isinstance(self.single_action_space, spaces.Discrete):
+            raise TypeError(
+                "EnvPool Thinker requires a Discrete action space, got "
+                f"{type(self.single_action_space).__name__}"
+            )
+        if int(getattr(self.single_action_space, "start", 0)) != 0:
+            raise ValueError("EnvPool Thinker requires zero-based Discrete actions")
+
         self.observation_space = batch_space(self.single_observation_space, n=num_envs)
         self.action_space = batch_space(self.single_action_space, n=num_envs)
-        self.frame_stack_n = kwargs.pop("frame_stack_n", 1)
 
     def reset(self, *args, **kwargs):
         env_id = kwargs.pop("env_id", None)      

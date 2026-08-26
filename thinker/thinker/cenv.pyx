@@ -34,6 +34,43 @@ cdef float maximum(vector[float]& arr):
             max_val = arr[i]
     return max_val       
 
+
+def _normalize_initial_action(initial_action, int env_n, int num_actions):
+    """Return a validated batch of discrete previous actions on CPU.
+
+    A scalar is broadcast across the vector environment; otherwise callers
+    must provide exactly one primary action per environment.  Keeping this
+    validation at the Python boundary avoids Cython's implicit float-to-int
+    casts silently changing behavioral targets.
+    """
+    if initial_action is None:
+        return torch.zeros(env_n, dtype=torch.long)
+
+    if torch.is_tensor(initial_action):
+        action_np = initial_action.detach().cpu().numpy()
+    else:
+        action_np = np.asarray(initial_action)
+
+    if action_np.ndim == 0:
+        action_np = np.full((env_n,), action_np.item(), dtype=action_np.dtype)
+    elif action_np.shape != (env_n,):
+        raise ValueError(
+            f"initial_action shape must be scalar or {(env_n,)}, "
+            f"not {action_np.shape}"
+        )
+
+    if action_np.dtype.kind not in ("i", "u"):
+        raise TypeError(
+            "initial_action must contain integer action indices, "
+            f"not dtype {action_np.dtype}"
+        )
+    if np.any(action_np < 0) or np.any(action_np >= num_actions):
+        raise ValueError(
+            f"initial_action must be in [0, {num_actions - 1}], "
+            f"not {action_np}"
+        )
+    return torch.as_tensor(action_np, dtype=torch.long)
+
 # Node-related function (we use structure instead of class to minimize Python code)
 
 cdef struct Node:
@@ -77,6 +114,23 @@ cdef bool node_expanded(Node* pnode, int t):
     Whether the node is expanded after time step t
     """
     return pnode[0].ppchildren[0].size() > 0 and t <= pnode[0].t
+
+cdef int node_descendant_visit_count(Node* pnode):
+    """Sum visits to the promoted root's immediate child branches."""
+    cdef int i
+    cdef int count = 0
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        count += pnode[0].ppchildren[0][i][0].rollout_n
+    return count
+
+cdef int node_descendant_expanded_count(Node* pnode):
+    """Count expanded immediate children below a promoted root."""
+    cdef int i
+    cdef int count = 0
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        if node_expanded(pnode[0].ppchildren[0][i], -1):
+            count += 1
+    return count
 
 cdef node_expand(Node* pnode, float r, float v, int t, bool done, float[:] logits, PyObject* encoded, bool override):
     """
@@ -340,6 +394,9 @@ cdef class cWrapper():
     cdef bool[:] tree_token_valid_event
     cdef bool[:] search_state_reset_event
     cdef bool[:] real_transition_event
+    cdef bool[:] root_carried_event
+    cdef int[:] carried_descendant_visit_count_event
+    cdef int[:] carried_descendant_expanded_count_event
     cdef bool[:] stage_end_event
     cdef bool[:] forced_stop_event
     cdef bool[:] stored_action_mask_event
@@ -491,6 +548,11 @@ cdef class cWrapper():
         self.tree_token_valid_event = np.zeros(self.env_n, dtype=np.bool_)
         self.search_state_reset_event = np.zeros(self.env_n, dtype=np.bool_)
         self.real_transition_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.root_carried_event = np.zeros(self.env_n, dtype=np.bool_)
+        self.carried_descendant_visit_count_event = np.zeros(
+            self.env_n, dtype=np.intc)
+        self.carried_descendant_expanded_count_event = np.zeros(
+            self.env_n, dtype=np.intc)
         self.stage_end_event = np.zeros(self.env_n, dtype=np.bool_)
         self.forced_stop_event = np.zeros(self.env_n, dtype=np.bool_)
         self.stored_action_mask_event = np.zeros(self.env_n, dtype=np.bool_)
@@ -542,6 +604,9 @@ cdef class cWrapper():
             self.tree_token_valid_event[i] = False
             self.search_state_reset_event[i] = False
             self.real_transition_event[i] = False
+            self.root_carried_event[i] = False
+            self.carried_descendant_visit_count_event[i] = 0
+            self.carried_descendant_expanded_count_event[i] = 0
             self.stage_end_event[i] = False
             self.forced_stop_event[i] = False
             self.stored_action_mask_event[i] = False
@@ -764,6 +829,24 @@ cdef class cWrapper():
             "tree_token_valid": torch.tensor(self.tree_token_valid_event, dtype=torch.bool, device=self.device),
             "search_state_reset": torch.tensor(self.search_state_reset_event, dtype=torch.bool, device=self.device),
             "real_transition": torch.tensor(self.real_transition_event, dtype=torch.bool, device=self.device),
+            "root_carried": torch.tensor(self.root_carried_event, dtype=torch.bool, device=self.device),
+            # Counts are captured at promotion time, before the real-state
+            # node_expand(..., override=True) refresh.  A visit count is the
+            # sum of rollout_n over the promoted root's immediate children.
+            "carried_descendant_visit_count": torch.tensor(
+                self.carried_descendant_visit_count_event,
+                dtype=torch.long, device=self.device),
+            "carried_descendant_expanded_count": torch.tensor(
+                self.carried_descendant_expanded_count_event,
+                dtype=torch.long, device=self.device),
+            "useful_carry": torch.tensor(
+                self.root_carried_event, dtype=torch.bool, device=self.device
+            ) & (
+                torch.tensor(
+                    self.carried_descendant_visit_count_event,
+                    dtype=torch.long, device=self.device
+                ) > 0
+            ),
             "stage_end": torch.tensor(self.stage_end_event, dtype=torch.bool, device=self.device),
             "forced_stop": torch.tensor(self.forced_stop_event, dtype=torch.bool, device=self.device),
             "stored_action_mask": torch.tensor(self.stored_action_mask_event, dtype=torch.bool, device=self.device),
@@ -862,12 +945,17 @@ cdef class cWrapper():
 
 cdef class cModelWrapper(cWrapper):
 
-    def reset(self, model_net, seed=None):
+    def reset(self, model_net, seed=None, initial_action=None):
         """Reset the environment and replace any previously active tree."""
         cdef int i
         cdef Node* root_node
         cdef Node* cur_node
         cdef float[:,:] model_out       
+
+        # Validate before replacing the active forest or resetting the backing
+        # environment, so a malformed behavioral batch has no side effects.
+        initial_primary = _normalize_initial_action(
+            initial_action, self.env_n, self.num_actions)
 
         # reset() may be called again by evaluators or tests.  Replace the
         # active forest instead of appending roots behind stale index-zero
@@ -890,7 +978,9 @@ cdef class cModelWrapper(cWrapper):
 
             # obtain output from model
             obs_py = torch.tensor(obs, dtype=torch.uint8 if self.state_dtype==0 else torch.float32, device=self.device)
-            pass_action = torch.zeros(self.env_n, self.raw_dim_actions, dtype=torch.long)
+            pass_action = torch.zeros(
+                self.env_n, self.raw_dim_actions, dtype=torch.long)
+            pass_action[:, 0] = initial_primary
             self.initial_per_state = model_net.initial_state(batch_size=self.env_n, device=self.device)
             model_net_out = model_net(env_state=obs_py, 
                                       done=None,
@@ -931,6 +1021,12 @@ cdef class cModelWrapper(cWrapper):
             else:
                 states = self.prepare_state(None, None)
                 info = self.prepare_info(info, self.status, False)
+            # util.init_env_out treats wrapper state/info as authoritative.
+            # Match its tuple-action shape while exposing the exact primary
+            # action supplied to ModelNet and stored in the root node.
+            info["last_pri"] = (
+                pass_action[:, 0] if self.raw_dim_actions == 1 else pass_action
+            ).to(self.device)
             return states, info
 
     def step(self, action, model_net):  
@@ -1416,6 +1512,15 @@ cdef class cModelWrapper(cWrapper):
                     not node_expanded(
                         self.root_nodes[i][0].ppchildren[0][executed_np[i]], -1) or
                     terminal_np[i])
+                self.root_carried_event[i] = not new_root
+                if not new_root:
+                    # Capture retained evidence before the actual observation
+                    # refreshes the promoted node and its child logits.
+                    root_node = self.root_nodes[i][0].ppchildren[0][executed_np[i]]
+                    self.carried_descendant_visit_count_event[i] = (
+                        node_descendant_visit_count(root_node))
+                    self.carried_descendant_expanded_count_event[i] = (
+                        node_descendant_expanded_count(root_node))
                 encoded = {
                     "real_states": obs_py[i],
                     "xs": model_net_out_1.xs[-1, i] if self.return_x else None,
@@ -2122,6 +2227,15 @@ cdef class cPerfectWrapper(cWrapper):
                     not node_expanded(
                         self.root_nodes[i][0].ppchildren[0][executed_np[i]], -1) or
                     terminal_np[i])
+                self.root_carried_event[i] = not new_root
+                if not new_root:
+                    # Capture retained evidence before the actual observation
+                    # refreshes the promoted node and its child logits.
+                    root_node = self.root_nodes[i][0].ppchildren[0][executed_np[i]]
+                    self.carried_descendant_visit_count_event[i] = (
+                        node_descendant_visit_count(root_node))
+                    self.carried_descendant_expanded_count_event[i] = (
+                        node_descendant_expanded_count(root_node))
                 if new_root:
                     root_node = node_new(
                         pparent=NULL, action=model_action_np[i], logit=0.,

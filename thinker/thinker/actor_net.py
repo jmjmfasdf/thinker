@@ -1,4 +1,5 @@
 from collections import namedtuple
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -18,6 +19,7 @@ STOP = getattr(util, "STOP", 2)
 POLICY_NONE = getattr(util, "POLICY_NONE", 0)
 POLICY_SEARCH = getattr(util, "POLICY_SEARCH", 1)
 POLICY_REAL = getattr(util, "POLICY_REAL", 2)
+ILLEGAL_CONTROL_LOGIT = -1e9
 
 
 ActorOut = namedtuple(
@@ -61,13 +63,143 @@ def compute_discrete_log_prob(logits, actions):
     return log_prob
 
 
+DynamicControlLogProbs = namedtuple(
+    "DynamicControlLogProbs", ("gate", "bout", "joint")
+)
+DynamicControlEntropy = namedtuple(
+    "DynamicControlEntropy",
+    ("gate", "bout", "continue_prob", "stop_prob"),
+)
+
+
+def _dynamic_continue_score(logits, project_gate_gradient):
+    """Exact-forward CONTINUE score with an optional common-shift gradient."""
+
+    exact_score = torch.logsumexp(logits[..., :2], dim=-1)
+    if not project_gate_gradient:
+        return exact_score
+    common_shift = logits[..., :2].mean(dim=-1)
+    # Parenthesize the zero-valued straight-through term first. Otherwise a
+    # masked -1e9 logit can cause catastrophic cancellation in the forward
+    # value before its detached copy is subtracted.
+    return exact_score.detach() + (
+        common_shift - common_shift.detach()
+    )
+
+
+def compute_dynamic_control_log_probs(
+    logits, actions, valid=None, *, project_gate_gradient=True
+):
+    """Factor a three-way Dynamic control decision without changing its head.
+
+    ``PROCEED`` and ``RESET`` share a CONTINUE gate. Conditional on that
+    gate, the bout selects between those two controls; ``STOP`` has no bout.
+    The returned ``gate + bout`` is the original three-way joint log
+    probability in the forward pass, up to floating-point roundoff. By
+    default, the gate backward pass projects PROCEED/RESET onto their common
+    shift, so gate-only rewards cannot alter their conditional preference.
+    Invalid (WAIT/forced) rows contribute exactly zero to every component.
+    """
+
+    if logits.ndim < 1 or logits.shape[-1] != 3:
+        raise ValueError(
+            "Dynamic control logits must end in three controls, got "
+            f"shape {tuple(logits.shape)}"
+        )
+    if tuple(actions.shape) != tuple(logits.shape[:-1]):
+        raise ValueError(
+            "Dynamic control actions must match the logits prefix, got "
+            f"{tuple(actions.shape)} versus {tuple(logits.shape[:-1])}"
+        )
+    if actions.dtype == torch.bool or torch.is_floating_point(actions):
+        raise TypeError("Dynamic control actions must use an integer dtype")
+    continue_score = _dynamic_continue_score(
+        logits, project_gate_gradient
+    )
+    gate_logits = torch.stack((continue_score, logits[..., STOP]), dim=-1)
+    gate_log_probs = F.log_softmax(gate_logits, dim=-1)
+    gate_log_prob = torch.where(
+        actions == STOP,
+        gate_log_probs[..., 1],
+        gate_log_probs[..., 0],
+    )
+
+    bout_log_probs = F.log_softmax(logits[..., :2], dim=-1)
+    bout_action = actions.clamp(max=RESET).unsqueeze(-1)
+    bout_log_prob = torch.gather(
+        bout_log_probs, dim=-1, index=bout_action
+    ).squeeze(-1)
+    bout_log_prob = torch.where(
+        actions == STOP, torch.zeros_like(bout_log_prob), bout_log_prob
+    )
+
+    if valid is not None:
+        if tuple(valid.shape) != tuple(actions.shape):
+            raise ValueError(
+                "Dynamic control validity must match actions, got "
+                f"{tuple(valid.shape)} versus {tuple(actions.shape)}"
+            )
+        valid = valid.to(device=logits.device, dtype=torch.bool)
+        gate_log_prob = torch.where(
+            valid, gate_log_prob, torch.zeros_like(gate_log_prob)
+        )
+        bout_log_prob = torch.where(
+            valid, bout_log_prob, torch.zeros_like(bout_log_prob)
+        )
+
+    return DynamicControlLogProbs(
+        gate=gate_log_prob,
+        bout=bout_log_prob,
+        joint=gate_log_prob + bout_log_prob,
+    )
+
+
+def compute_dynamic_control_entropy(logits, *, project_gate_gradient=True):
+    """Return positive gate/bout entropies for a three-way control head."""
+
+    if logits.ndim < 1 or logits.shape[-1] != 3:
+        raise ValueError(
+            "Dynamic control logits must end in three controls, got "
+            f"shape {tuple(logits.shape)}"
+        )
+    continue_score = _dynamic_continue_score(
+        logits, project_gate_gradient
+    )
+    gate_logits = torch.stack((continue_score, logits[..., STOP]), dim=-1)
+    gate_log_probs = F.log_softmax(gate_logits, dim=-1)
+    gate_probs = gate_log_probs.exp()
+    continue_prob = gate_probs[..., 0]
+    stop_prob = gate_probs[..., 1]
+    gate_entropy = -torch.sum(gate_probs * gate_log_probs, dim=-1)
+
+    bout_log_probs = F.log_softmax(logits[..., :2], dim=-1)
+    bout_probs = bout_log_probs.exp()
+    bout_entropy = -torch.sum(bout_probs * bout_log_probs, dim=-1)
+    return DynamicControlEntropy(
+        gate=gate_entropy,
+        bout=bout_entropy,
+        continue_prob=continue_prob,
+        stop_prob=stop_prob,
+    )
+
+
 def sample(logits, greedy, dim=-1):
-    if not greedy:
-        gumbel_noise = torch.empty_like(logits).uniform_().clamp(1e-10, 1).log().neg_().clamp(1e-10, 1).log().neg_()
-        sampled_action = (logits + gumbel_noise).argmax(dim=dim)
-        return sampled_action.detach()
-    else:
+    if greedy:
         return torch.argmax(logits, dim=dim)
+    if not torch.is_floating_point(logits):
+        raise TypeError(
+            f"categorical logits must be floating point, got {logits.dtype}"
+        )
+
+    # If E ~ Exponential(1), then -log(E) is an exact standard Gumbel draw.
+    # Clamp only a representational zero at the lower endpoint; unlike the
+    # historical intermediate clamp, this does not truncate valid Gumbel
+    # values or introduce an argmax-index tie bias.
+    exponential = torch.empty_like(logits).exponential_()
+    exponential.clamp_min_(torch.finfo(logits.dtype).tiny)
+    gumbel_noise = -exponential.log()
+    sampled_action = (logits + gumbel_noise).argmax(dim=dim)
+    return sampled_action.detach()
 
 def atanh(x, eps=1e-6):
     x = torch.clamp(x, -1.0+eps, 1.0-eps)
@@ -285,6 +417,10 @@ class ActorBaseNet(nn.Module):
         super(ActorBaseNet, self).__init__()
         self.disable_thinker = flags.wrapper_type == 1
         self.dynamic_search = bool(getattr(flags, "dynamic_search", False)) and not self.disable_thinker
+        self.dynamic_factorized_control = (
+            self.dynamic_search
+            and bool(getattr(flags, "dynamic_factorized_control", False))
+        )
         self.record_state = record_state        
 
         self.obs_space = obs_space        
@@ -295,6 +431,38 @@ class ActorBaseNet(nn.Module):
 
         self.flags = flags      
         self.tree_rep_meaning = tree_rep_meaning
+
+        # Retain the authoritative *single*-observation contract used by the
+        # online environment.  ``obs_space`` is vectorised and therefore has
+        # a leading environment axis; rebuilding a behavioral ModelNet from
+        # only ``real_states_shape`` loses dtype/range information and can
+        # silently create a checkpoint-incompatible encoder.
+        real_state_space = obs_space["real_states"]
+        if not isinstance(real_state_space, spaces.Box):
+            raise TypeError(
+                "ActorNet real_states must use a Box space, got "
+                f"{type(real_state_space).__name__}"
+            )
+        if len(real_state_space.shape) < 2 or real_state_space.shape[0] <= 0:
+            raise ValueError(
+                "ActorNet real_states must have a leading vector dimension, "
+                f"got shape {real_state_space.shape}"
+            )
+        low = np.asarray(real_state_space.low)
+        high = np.asarray(real_state_space.high)
+        single_low = low[0]
+        single_high = high[0]
+        if not np.array_equal(low, np.broadcast_to(single_low, low.shape)):
+            raise ValueError("real_states lower bounds differ across vector rows")
+        if not np.array_equal(high, np.broadcast_to(single_high, high.shape)):
+            raise ValueError("real_states upper bounds differ across vector rows")
+        self.online_real_state_space = spaces.Box(
+            low=np.array(single_low, copy=True),
+            high=np.array(single_high, copy=True),
+            dtype=real_state_space.dtype,
+        )
+        self.online_real_state_shape = self.online_real_state_space.shape
+        self.online_real_state_dtype = self.online_real_state_space.dtype
 
         self.float16 = flags.float16
         # Keep the actor/critic output channels in the single canonical order
@@ -1059,7 +1227,7 @@ class ActorNetSingle(ActorBaseNet):
                 )
                 raw_control_logits = reset_logits.view(T, B, 3)
                 search_control_logits = raw_control_logits.masked_fill(
-                    ~legal_control_mask, -1e9
+                    ~legal_control_mask, ILLEGAL_CONTROL_LOGIT
                 )
                 search_control = sample(
                     search_control_logits, greedy=greedy, dim=-1
@@ -1165,6 +1333,13 @@ class ActorNetSingle(ActorBaseNet):
                     search_control_logits, search_control
                 )
                 control_log_prob = control_log_prob * control_valid.float()
+                control_log_prob_parts = None
+                if self.dynamic_factorized_control:
+                    control_log_prob_parts = compute_dynamic_control_log_probs(
+                        search_control_logits,
+                        search_control,
+                        control_valid,
+                    )
                 c_action_log_prob = primary_log_prob + control_log_prob
 
                 if compute_loss:
@@ -1185,35 +1360,65 @@ class ActorNetSingle(ActorBaseNet):
                         )
                     else:
                         primary_entropy_loss = -torch.sum(pri_log_var, dim=-1)
-                    # Entropy of the hierarchical SEARCH policy is
-                    # H(control) + P(control != STOP) H(imaginary action).
-                    # Using the sampled primary-valid bit here would be a
-                    # biased Monte-Carlo entropy regularizer and would omit
-                    # its probability-gradient term.
-                    control_probs = F.softmax(search_control_logits, dim=-1)
-                    non_stop_prob = 1.0 - control_probs[..., STOP]
+                    if self.dynamic_factorized_control:
+                        control_entropy_parts = compute_dynamic_control_entropy(
+                            search_control_logits
+                        )
+                        non_stop_prob = control_entropy_parts.continue_prob
+                        # Conditional entropy must not reward the gate merely
+                        # for continuing. The exact-forward gate itself uses
+                        # a common-shift gradient for PROCEED/RESET.
+                        conditional_entropy_weight = non_stop_prob.detach()
+                    else:
+                        # Keep the original value and gradient graph when the
+                        # factorized objective is disabled.
+                        control_probs = F.softmax(
+                            search_control_logits, dim=-1
+                        )
+                        non_stop_prob = 1.0 - control_probs[..., STOP]
+                        conditional_entropy_weight = non_stop_prob
                     primary_entropy_weight = (
                         real_phase_mask.float()
-                        + control_valid.float() * non_stop_prob
+                        + control_valid.float() * conditional_entropy_weight
                     )
                     primary_entropy_loss = (
                         primary_entropy_loss * primary_entropy_weight
                     )
-                    control_entropy_loss = -torch.nn.CrossEntropyLoss(
-                        reduction="none"
-                    )(
-                        input=torch.flatten(search_control_logits, 0, 1),
-                        target=torch.flatten(
-                            F.softmax(search_control_logits, dim=-1), 0, 1
-                        ),
-                    ).view(T, B)
-                    control_entropy_loss = (
-                        control_entropy_loss * control_valid.float()
-                    )
+                    if self.dynamic_factorized_control:
+                        gate_entropy_loss = (
+                            -control_entropy_parts.gate
+                            * control_valid.float()
+                        )
+                        bout_entropy_loss = (
+                            -control_entropy_parts.bout
+                            * conditional_entropy_weight
+                            * control_valid.float()
+                        )
+                        control_entropy_loss = (
+                            gate_entropy_loss + bout_entropy_loss
+                        )
+                    else:
+                        # Preserve the legacy three-way entropy objective
+                        # byte-for-byte when the opt-in flag is disabled.
+                        control_entropy_loss = -torch.nn.CrossEntropyLoss(
+                            reduction="none"
+                        )(
+                            input=torch.flatten(search_control_logits, 0, 1),
+                            target=torch.flatten(
+                                F.softmax(search_control_logits, dim=-1), 0, 1
+                            ),
+                        ).view(T, B)
+                        control_entropy_loss = (
+                            control_entropy_loss * control_valid.float()
+                        )
                     entropy_loss = primary_entropy_loss + control_entropy_loss
                     misc["primary_entropy_loss"] = primary_entropy_loss
+                    if self.dynamic_factorized_control:
+                        misc["gate_entropy_loss"] = gate_entropy_loss
+                        misc["bout_entropy_loss"] = bout_entropy_loss
                     misc["control_entropy_loss"] = control_entropy_loss
                     misc["non_stop_prob"] = non_stop_prob
+                    misc["stop_prob"] = 1.0 - non_stop_prob
                 else:
                     entropy_loss = None
 
@@ -1230,6 +1435,9 @@ class ActorNetSingle(ActorBaseNet):
 
                 misc["primary_log_prob"] = primary_log_prob
                 misc["control_log_prob"] = control_log_prob
+                if self.dynamic_factorized_control:
+                    misc["gate_log_prob"] = control_log_prob_parts.gate
+                    misc["bout_log_prob"] = control_log_prob_parts.bout
                 misc["wait_mask"] = wait_phase_mask
             else:
                 # Original fixed-budget routing and loss are intentionally
@@ -1786,9 +1994,12 @@ class MCTS(ActorBaseNet):
         return actor_out, core_state    
     
     def set_real_step(self, real_step):
-        if real_step < self.flags.total_steps * 0.5:
+        schedule_total_steps = getattr(
+            self.flags, "schedule_total_steps", self.flags.total_steps
+        )
+        if real_step < schedule_total_steps * 0.5:
             self.temp = 1
-        elif real_step < self.flags.total_steps * 0.75:
+        elif real_step < schedule_total_steps * 0.75:
             self.temp = 0.5
         else:
             self.temp = 0.25

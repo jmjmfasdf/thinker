@@ -4,13 +4,21 @@ import torch
 from gymnasium import spaces
 
 from thinker import util
-from thinker.actor_net import ActorNet
+from thinker.actor_net import ActorNet, ILLEGAL_CONTROL_LOGIT
 
 
-def _flags(dynamic, *, max_search_steps=-1, max_depth=40, rec_t=40):
+def _flags(
+    dynamic,
+    *,
+    max_search_steps=-1,
+    max_depth=40,
+    rec_t=40,
+    factorized=False,
+):
     return util.create_setting(
         args=[
             "--dynamic_search", str(dynamic).lower(),
+            "--dynamic_factorized_control", str(factorized).lower(),
             "--wrapper_type", "0",
             "--max_search_steps", str(max_search_steps),
             "--max_depth", str(max_depth),
@@ -121,6 +129,32 @@ def test_dynamic_actor_routes_mixed_phases_and_joint_log_probability():
     assert out.entropy_loss[0, 2].item() == 0
 
 
+def test_dynamic_actor_keeps_illegal_control_sentinel_behavior():
+    flags = _flags(True, max_search_steps=8)
+    actor = _network(flags)
+    env_out = _env_out(flags, [util.SEARCH_PHASE])
+    legal_control_mask = env_out.legal_control_mask.clone()
+    legal_control_mask[..., util.PROCEED] = False
+    env_out = env_out._replace(legal_control_mask=legal_control_mask)
+
+    out, _ = actor(
+        env_out,
+        actor.initial_state(1),
+        clamp_action=(
+            torch.tensor([[[0]]]),
+            torch.tensor([[util.STOP]]),
+        ),
+        compute_loss=True,
+    )
+
+    assert out.search_control_logits[0, 0, util.PROCEED].item() == (
+        ILLEGAL_CONTROL_LOGIT
+    )
+    assert out.search_control[0, 0].item() == util.STOP
+    assert torch.isfinite(out.c_action_log_prob).all()
+    assert torch.isfinite(out.reg_loss).all()
+
+
 def test_dynamic_tree_gru_freezes_non_token_calls():
     flags = _flags(True)
     actor = _network(flags)
@@ -193,6 +227,67 @@ def test_dynamic_parameter_count_is_independent_of_caps_and_depth():
         state_shapes.append([tuple(state.shape) for state in actor.initial_state(3)])
     assert counts[0] == counts[1] == counts[2]
     assert state_shapes[0] == state_shapes[1] == state_shapes[2]
+
+
+def test_factorized_control_preserves_every_state_dict_shape():
+    legacy = _network(_flags(True, factorized=False))
+    factorized = _network(_flags(True, factorized=True))
+
+    assert legacy.state_dict().keys() == factorized.state_dict().keys()
+    assert {
+        key: tuple(value.shape) for key, value in legacy.state_dict().items()
+    } == {
+        key: tuple(value.shape) for key, value in factorized.state_dict().items()
+    }
+
+
+def test_factorized_actor_entropy_keeps_gate_and_conditionals_isolated():
+    torch.manual_seed(41)
+    flags = _flags(True, factorized=True)
+    actor = _network(flags)
+    env_out = _env_out(flags, [util.SEARCH_PHASE] * 3)
+    out, _ = actor(
+        env_out,
+        actor.initial_state(3),
+        clamp_action=(
+            torch.tensor([[[0], [1], [2]]]),
+            torch.tensor([[util.PROCEED, util.RESET, util.STOP]]),
+        ),
+        compute_loss=True,
+    )
+
+    primary_to_control = torch.autograd.grad(
+        out.misc["primary_entropy_loss"].sum(),
+        actor.reset.weight,
+        retain_graph=True,
+        allow_unused=True,
+    )[0]
+    assert primary_to_control is None or torch.count_nonzero(
+        primary_to_control
+    ) == 0
+
+    bout_grad = torch.autograd.grad(
+        out.misc["bout_entropy_loss"].sum(),
+        actor.reset.weight,
+        retain_graph=True,
+    )[0]
+    assert torch.count_nonzero(bout_grad[util.STOP]) == 0
+    torch.testing.assert_close(
+        bout_grad[util.PROCEED] + bout_grad[util.RESET],
+        torch.zeros_like(bout_grad[util.PROCEED]),
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+    gate_grad = torch.autograd.grad(
+        out.misc["gate_entropy_loss"].sum(), actor.reset.weight
+    )[0]
+    torch.testing.assert_close(
+        gate_grad[util.PROCEED],
+        gate_grad[util.RESET],
+        rtol=1e-6,
+        atol=1e-7,
+    )
 
 
 def test_legacy_preload_preserves_policy_reset_rows_and_critic_rows():

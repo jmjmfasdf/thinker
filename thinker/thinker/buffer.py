@@ -11,6 +11,45 @@ import torch
 from datetime import datetime
 AB_CAN_WRITE, AB_FULL, AB_FINISH = 0, 1, 2
 
+
+def validate_priorities(priority, *, context, expected_shape=None):
+    """Return priorities as an array, rejecting values that poison PER.
+
+    Zero is allowed because callers historically use it to mark entries as
+    unavailable. Negative and non-finite priorities are never meaningful and
+    must not reach the probability calculation.
+    """
+    priority = np.asarray(priority)
+    if expected_shape is not None and priority.shape != expected_shape:
+        raise ValueError(
+            f"{context} must have shape {expected_shape}, got {priority.shape}"
+        )
+    if not np.issubdtype(priority.dtype, np.number) or np.iscomplexobj(priority):
+        raise TypeError(
+            f"{context} must be a real numeric array, got dtype={priority.dtype}"
+        )
+
+    finite = np.isfinite(priority)
+    if not np.all(finite):
+        flat_idx = int(np.flatnonzero(~finite)[0])
+        first_idx = np.unravel_index(flat_idx, priority.shape)
+        invalid_n = int(np.size(priority) - np.count_nonzero(finite))
+        raise ValueError(
+            f"{context} contains {invalid_n}/{priority.size} non-finite values; "
+            f"first invalid value is {priority[first_idx]!r} at index {first_idx}"
+        )
+
+    negative = priority < 0
+    if np.any(negative):
+        flat_idx = int(np.flatnonzero(negative)[0])
+        first_idx = np.unravel_index(flat_idx, priority.shape)
+        negative_n = int(np.count_nonzero(negative))
+        raise ValueError(
+            f"{context} contains {negative_n}/{priority.size} negative values; "
+            f"first invalid value is {priority[first_idx]!r} at index {first_idx}"
+        )
+    return priority
+
 @ray.remote
 class ActorBuffer:
     def __init__(self, batch_size=32, buffer_save_size=10, buffer_interval=10000, save_dir=None):
@@ -166,18 +205,33 @@ class SModelBuffer:
             b = self.batch_size      
         else:
             b = len(idx)
-        self.processed_n += b
+
+        if priority is not None:
+            priority = validate_priorities(
+                priority,
+                context="ModelBuffer.write priority",
+                expected_shape=(b,),
+            )
+        elif self.initialized:
+            # The default for new samples is the current maximum. Validate the
+            # source first so a single NaN cannot be copied to every new entry.
+            validate_priorities(
+                self.priority, context="ModelBuffer stored priority before write"
+            )
+
         if not self.initialized: self.init_buffer(data)
         if idx is None:
             b_idx = np.arange(rank*self.batch_size, (rank+1)*self.batch_size)
         else:
             b_idx = rank*self.batch_size+idx
-        for key in self.keys:                 
+        for key in self.keys:
             assert data[key].shape[0] == b, f"{key} should have shape ({b}, *) instead of {data[key].shape} (idx: {idx}; self.batch_size:{self.batch_size})"
+
+        self.processed_n += b
+        for key in self.keys:
             self.buffer[key][self.idx[b_idx], b_idx] = data[key]                    
         
         if priority is not None:
-            assert priority.shape == (b,), f"priority should have shape ({b},) instead of {priority.shape}"
             self.priority[self.idx[b_idx], b_idx] = priority
         else:
             self.priority[self.idx[b_idx], b_idx] = max(self.priority.max(), 1e-8)
@@ -192,20 +246,82 @@ class SModelBuffer:
 
         if self.finish: return "FINISH"
         if not self.initialized: return None
-        priority_ = self.priority.copy()        
+        priority_ = self.priority.copy()
+        validate_priorities(priority_, context="ModelBuffer.read stored priority")
         for i in range(1, t + add_t + self.frame_stack_n - 1): priority_[self.idx - i] = 0.
         sample_n = np.sum((priority_ > 0).astype(np.float32)) 
         if sample_n < b or self.processed_n < self.warm_up_n: return None
 
         flat_priority = priority_.flatten()
-        p = (flat_priority**self.alpha)
-        p = p / max(p.sum(), 1e-8)
+        try:
+            alpha = float(self.alpha)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"ModelBuffer.read alpha must be a finite non-negative number, got {self.alpha!r}"
+            ) from exc
+        if not np.isfinite(alpha) or alpha < 0:
+            raise ValueError(
+                f"ModelBuffer.read alpha must be a finite non-negative number, got {self.alpha!r}"
+            )
+
+        # Keep masked/empty entries at exactly zero even for alpha == 0, for
+        # which NumPy otherwise defines 0 ** 0 as one.
+        p = np.zeros(flat_priority.shape, dtype=np.float64)
+        positive = flat_priority > 0
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+            p[positive] = np.power(flat_priority[positive], alpha)
+        if not np.all(np.isfinite(p)) or np.any(p < 0):
+            invalid_n = int(np.count_nonzero(~np.isfinite(p) | (p < 0)))
+            raise ValueError(
+                "ModelBuffer.read produced invalid unnormalized sampling "
+                f"probabilities for {invalid_n}/{p.size} entries (alpha={alpha})"
+            )
+        p_sum = float(np.sum(p, dtype=np.float64))
+        if not np.isfinite(p_sum) or p_sum <= 0:
+            raise ValueError(
+                "ModelBuffer.read sampling probability sum must be finite and "
+                f"positive, got {p_sum!r} (alpha={alpha}, positive_priorities={int(sample_n)})"
+            )
+        p /= p_sum
+        if not np.all(np.isfinite(p)) or np.any(p < 0):
+            raise ValueError("ModelBuffer.read produced invalid normalized sampling probabilities")
+        normalized_sum = float(np.sum(p, dtype=np.float64))
+        if not np.isclose(normalized_sum, 1.0, rtol=1e-10, atol=1e-12):
+            raise ValueError(
+                "ModelBuffer.read normalized sampling probabilities must sum "
+                f"to one, got {normalized_sum!r}"
+            )
+        positive_probability_n = int(np.count_nonzero(p > 0))
+        if positive_probability_n < b:
+            raise ValueError(
+                "ModelBuffer.read has too few positive sampling probabilities: "
+                f"need {b}, got {positive_probability_n} (alpha={alpha})"
+            )
         flat_idx = np.random.choice(flat_priority.size, size=b, p=p, replace=False)
         t_idx, b_idx = np.unravel_index(flat_idx, priority_.shape)
         idx = (t_idx, b_idx, self.write_time[t_idx, b_idx])
 
-        weights = (sample_n * p[flat_idx]) ** (-beta)
-        weights /= weights.max()               
+        try:
+            beta = float(beta)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"ModelBuffer.read beta must be finite, got {beta!r}"
+            ) from exc
+        if not np.isfinite(beta):
+            raise ValueError(f"ModelBuffer.read beta must be finite, got {beta!r}")
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+            weights = (sample_n * p[flat_idx]) ** (-beta)
+        if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+            raise ValueError(
+                "ModelBuffer.read produced non-finite or non-positive importance weights "
+                f"(beta={beta}, sampled_probability_min={float(p[flat_idx].min())})"
+            )
+        weight_max = float(weights.max())
+        if not np.isfinite(weight_max) or weight_max <= 0:
+            raise ValueError(
+                f"ModelBuffer.read importance-weight maximum is invalid: {weight_max!r}"
+            )
+        weights /= weight_max
 
         data = {}
         for key in self.keys:
@@ -263,6 +379,19 @@ class SModelBuffer:
     def update_priority(self, idx, priority):
         """Update priority in the buffer"""
         t_idx, b_idx, write_time = idx
+        t_idx = np.asarray(t_idx)
+        b_idx = np.asarray(b_idx)
+        write_time = np.asarray(write_time)
+        if t_idx.shape != b_idx.shape or t_idx.shape != write_time.shape:
+            raise ValueError(
+                "ModelBuffer.update_priority index arrays must have identical "
+                f"shapes, got t={t_idx.shape}, b={b_idx.shape}, write_time={write_time.shape}"
+            )
+        priority = validate_priorities(
+            priority,
+            context="ModelBuffer.update_priority priority",
+            expected_shape=t_idx.shape,
+        )
         mask = self.write_time[t_idx, b_idx] == write_time        
         t_idx, b_idx, priority = t_idx[mask], b_idx[mask], priority[mask]
         self.priority[t_idx, b_idx] = np.maximum(priority, 1e-8)
@@ -622,8 +751,16 @@ class SelfPlayBuffer:
                 })
             if forced_stop is not None:
                 stage_n = max(int(stage_end_t.sum().item()), 1)
-                stats["search/forced_stop_rate"] = (
-                    forced_stop.bool().sum().item() / stage_n
+                forced_stage_end = stage_end_t & forced_stop.bool()
+                learned_stage_end = stage_end_t & ~forced_stop.bool()
+                forced_stage_n = int(forced_stage_end.sum().item())
+                learned_stage_n = int(learned_stage_end.sum().item())
+                stats["search/forced_stop_rate"] = forced_stage_n / stage_n
+                stats["search/learned_stop_rate"] = learned_stage_n / stage_n
+                stats["search/forced_stop_count"] = forced_stage_n
+                stats["search/learned_stop_count"] = learned_stage_n
+                stats["search/stage_end_count"] = int(
+                    stage_end_t.sum().item()
                 )
             if policy_valid is not None:
                 # policy_valid is aligned with the action sampled on this

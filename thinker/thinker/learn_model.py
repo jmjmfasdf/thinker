@@ -9,10 +9,116 @@ import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from thinker.core.file_writer import FileWriter
 from thinker.core.module import guassian_kl_div
+from thinker.buffer import validate_priorities
 from thinker.model_net import ModelNet, VPNet
 import thinker.util as util
 import gc
 from collections import namedtuple
+
+
+def _raise_nonfinite_tensor(value, context):
+    finite = torch.isfinite(value)
+    invalid = ~finite
+    flat_idx = int(torch.nonzero(invalid.reshape(-1), as_tuple=False)[0].item())
+    invalid_n = int(invalid.sum().item())
+    first_value = value.detach().reshape(-1)[flat_idx].cpu().item()
+    raise FloatingPointError(
+        f"{context} contains {invalid_n}/{value.numel()} non-finite values; "
+        f"first invalid value is {first_value!r} at flat index {flat_idx} "
+        f"(shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device})"
+    )
+
+
+def _assert_finite_tensor_entries(entries):
+    by_device = {}
+    for context, value in entries:
+        if value.numel() > 0:
+            by_device.setdefault(value.device, []).append((context, value))
+
+    # Batch all healthy-path checks into one synchronization per device. Exact
+    # field diagnostics are computed only if the combined check fails.
+    for device_entries in by_device.values():
+        checks = torch.stack(
+            [torch.isfinite(value).all() for _, value in device_entries]
+        )
+        if bool(torch.all(checks).item()):
+            continue
+        for (context, value), finite in zip(device_entries, checks):
+            if not bool(finite.item()):
+                _raise_nonfinite_tensor(value, context)
+
+
+def assert_finite_tensors(value, *, context):
+    """Fail with a field-level diagnostic when a tensor tree is non-finite."""
+    entries = []
+
+    def collect(child, child_context):
+        if child is None:
+            return
+        if torch.is_tensor(child):
+            entries.append((child_context, child))
+            return
+        if isinstance(child, dict):
+            for key, item in child.items():
+                collect(item, f"{child_context}.{key}")
+            return
+        if hasattr(child, "_fields"):
+            for key in child._fields:
+                collect(getattr(child, key), f"{child_context}.{key}")
+            return
+        if isinstance(child, (tuple, list)):
+            for index, item in enumerate(child):
+                collect(item, f"{child_context}[{index}]")
+            return
+        if isinstance(child, (float, np.floating)) and not np.isfinite(child):
+            raise FloatingPointError(f"{child_context} is non-finite: {child!r}")
+
+    collect(value, context)
+    _assert_finite_tensor_entries(entries)
+
+
+def assert_optimizer_parameters_finite(optimizer, *, context):
+    entries = [
+        (
+            f"{context}.param_groups[{group_index}].params[{parameter_index}]",
+            parameter.data,
+        )
+        for group_index, group in enumerate(optimizer.param_groups)
+        for parameter_index, parameter in enumerate(group["params"])
+    ]
+    _assert_finite_tensor_entries(entries)
+
+
+GradientStepResult = namedtuple(
+    "GradientStepResult",
+    ["total_norm", "optimizer_stepped", "amp_scale_before", "amp_scale_after"],
+)
+
+
+_MODEL_OBSERVABILITY_PREFIXES = (
+    "pred_sr_hs",
+    "pred_vp_hs",
+    "pred_policy_logits",
+    "pred_value_head",
+    "pred_reward_head",
+)
+
+
+def _empty_model_observability():
+    return {
+        f"{prefix}_{suffix}": None
+        for prefix in _MODEL_OBSERVABILITY_PREFIXES
+        for suffix in ("abs_max", "rms")
+    }
+
+
+def _record_tensor_scale(observability, prefix, value):
+    """Record detached device scalars without synchronizing the accelerator."""
+    if value is None or value.numel() == 0:
+        return
+    value = value.detach().float()
+    observability[f"{prefix}_abs_max"] = torch.amax(torch.abs(value))
+    observability[f"{prefix}_rms"] = torch.sqrt(torch.mean(torch.square(value)))
 
 def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_prob, is_weights, mask=None):
     k, b, d, _ = policy.shape
@@ -41,6 +147,14 @@ def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_p
 class SModelLearner:
     def __init__(self, name, ray_obj, model_param, flags, model_net=None, device=None):
         self.flags = flags
+        self.model_float16 = getattr(
+            flags, "model_float16", getattr(flags, "float16", False)
+        )
+        if not isinstance(self.model_float16, bool):
+            raise TypeError(
+                "model_float16 must be resolved to bool before ModelLearner "
+                f"construction, got {self.model_float16!r}"
+            )
         self.time = flags.profile
         self._logger = util.logger()
 
@@ -70,11 +184,9 @@ class SModelLearner:
 
         self.step = 0
         self.real_step = 0
+        self._initialize_gradient_clip_counters()
 
-        lr_lambda = (
-            lambda epoch: 1
-            - min(epoch, self.flags.total_steps) / self.flags.total_steps
-        )
+        lr_lambda = lambda epoch: 1.0 - util.schedule_progress(self.flags, epoch)
 
         opt = getattr(flags, "model_optimizer", "adam")
         if opt == "adam":
@@ -94,7 +206,7 @@ class SModelLearner:
             self.scheduler_m = torch.optim.lr_scheduler.LambdaLR(
                 self.optimizer_m, lr_lambda
             )
-            self.scaler_m = GradScaler(init_scale=2**3) if self.flags.float16 else None
+            self.scaler_m = GradScaler(init_scale=2**3) if self.model_float16 else None
         
         param_groups = self.model_net.vp_net.parameters()
         self.optimizer_p = Optimizer(param_groups, lr=flags.model_learning_rate, **opt_args)
@@ -102,7 +214,7 @@ class SModelLearner:
         self.scheduler_p = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer_p, lr_lambda
         )
-        self.scaler_p = GradScaler(init_scale=2**3) if self.flags.float16 else None
+        self.scaler_p = GradScaler(init_scale=2**3) if self.model_float16 else None
 
         self.ckp_path = os.path.join(flags.ckpdir, "ckp_model.tar")
         if flags.ckp: self.load_checkpoint(self.ckp_path)
@@ -149,7 +261,7 @@ class SModelLearner:
         return self.model_buffer.read.remote(self.model_T, self.model_B, self.compute_beta(), add_t=self.flags.model_return_n+1)
 
     def compute_beta(self):
-        c = min(self.real_step, self.flags.total_steps) / self.flags.total_steps
+        c = util.schedule_progress(self.flags, self.real_step)
         return self.flags.priority_beta * (1 - c) + 1.0 * c
     
     def init_psteps(self, data):
@@ -171,6 +283,7 @@ class SModelLearner:
             self.start_time = self.timer()
 
     def learn_data(self):
+        successful = False
         try:
             data_ptr = self.read_buffer_ptr()
 
@@ -196,15 +309,25 @@ class SModelLearner:
                     self.replay_ratio = data["replay_ratio"]
 
                     # start consume data
-                    self.consume_data(data)
+                    model_update = self.consume_data(data)
+                    if model_update is not True:
+                        raise RuntimeError(
+                            "Model consume_data returned without completing an optimizer step"
+                        )
                     del data                
                     gc.collect()
-                    model_update = True
                 else:
                     model_update = False
 
                 # update shared buffer's weights
                 if model_update:
+                    assert_finite_tensors(
+                        self.model_net.state_dict(),
+                        context=(
+                            "published ModelNet state at "
+                            f"real_step={self.real_step}"
+                        ),
+                    )
                     self.param_buffer.set_data.remote(
                         "model_net", self.model_net.get_weights()
                     )
@@ -249,19 +372,21 @@ class SModelLearner:
                         break 
 
             self._logger.info("Terminating model-learning thread")
+            self.save_checkpoint(force=True)
             self.model_buffer.set_finish.remote()
             self.signal_buffer.update_dict_item.remote(
                 "self_play_signals", "halt", False
             )
-            self.close()
+            successful = True
             return True
 
         except Exception as e:
             self._logger.error(f"Exception detected in learn_model: {e}")
             self._logger.error(traceback.format_exc())
+            raise
         finally:
-            self.close()
-            return True
+            self.model_buffer.set_finish.remote()
+            self.close(successful=successful)
         
     def update_real_step(self, data):
         new_psteps = data["processed_n"]
@@ -269,11 +394,112 @@ class SModelLearner:
         self.real_step += new_psteps - self.last_psteps
         self.last_psteps = new_psteps
 
+    def _initialize_gradient_clip_counters(self, checkpoint=None):
+        checkpoint = {} if checkpoint is None else checkpoint
+        for branch in ("m", "p"):
+            count_key = f"model_grad_clip_count_{branch}"
+            step_key = f"model_grad_step_count_{branch}"
+            count = int(checkpoint.get(count_key, 0))
+            # A checkpoint with only a cumulative count predates the
+            # denominator field.  Using count as its lower-bound denominator
+            # preserves a valid rate while ordinary old checkpoints start at 0.
+            step_count = int(
+                checkpoint.get(step_key, count if count_key in checkpoint else 0)
+            )
+            if count < 0 or step_count < count:
+                raise ValueError(
+                    f"invalid model gradient clip counters for {branch}: "
+                    f"count={count}, steps={step_count}"
+                )
+            setattr(
+                self,
+                f"_model_grad_clip_count_{branch}",
+                torch.tensor(count, dtype=torch.long, device=self.device),
+            )
+            setattr(
+                self,
+                f"_model_grad_step_count_{branch}",
+                torch.tensor(step_count, dtype=torch.long, device=self.device),
+            )
+
+    def _record_gradient_clipping(self, branch, total_norm):
+        if branch not in ("m", "p"):
+            raise ValueError(f"unknown model gradient branch: {branch!r}")
+        if not hasattr(self, f"_model_grad_clip_count_{branch}"):
+            self._initialize_gradient_clip_counters()
+        threshold = float(getattr(self.flags, "model_grad_norm_clipping", 0.0))
+        if threshold > 0.0:
+            clipped = total_norm.detach().reshape(()).to(self.device) > threshold
+        else:
+            clipped = torch.zeros((), dtype=torch.bool, device=self.device)
+        getattr(self, f"_model_grad_clip_count_{branch}").add_(
+            clipped.to(dtype=torch.long)
+        )
+        getattr(self, f"_model_grad_step_count_{branch}").add_(1)
+        return clipped
+
+    def _record_model_tensor_scale(self, prefix, value):
+        if not hasattr(self, "_pending_model_observability"):
+            self._pending_model_observability = _empty_model_observability()
+        _record_tensor_scale(self._pending_model_observability, prefix, value)
+
+    def _model_observability_log_stats(self):
+        pending = getattr(
+            self, "_pending_model_observability", _empty_model_observability()
+        )
+        return {
+            "model/" + key: (
+                float(value.detach().cpu().item()) if value is not None else None
+            )
+            for key, value in pending.items()
+        }
+
+    def _gradient_clip_log_stats(self, m_grad_clipped, p_grad_clipped):
+        if not hasattr(self, "_model_grad_clip_count_m"):
+            self._initialize_gradient_clip_counters()
+        values = torch.stack(
+            [
+                m_grad_clipped.detach().to(self.device, dtype=torch.long),
+                p_grad_clipped.detach().to(self.device, dtype=torch.long),
+                self._model_grad_clip_count_m,
+                self._model_grad_step_count_m,
+                self._model_grad_clip_count_p,
+                self._model_grad_step_count_p,
+            ]
+        ).cpu().tolist()
+        m_current, p_current, m_count, m_steps, p_count, p_steps = (
+            int(value) for value in values
+        )
+        return {
+            "model/m_grad_clipped": m_current,
+            "model/m_grad_clip_count": m_count,
+            "model/m_grad_step_count": m_steps,
+            "model/m_grad_clip_rate": m_count / m_steps if m_steps else 0.0,
+            "model/p_grad_clipped": p_current,
+            "model/p_grad_clip_count": p_count,
+            "model/p_grad_step_count": p_steps,
+            "model/p_grad_clip_rate": p_count / p_steps if p_steps else 0.0,
+        }
+
+    def _gradient_clip_checkpoint_state(self):
+        if not hasattr(self, "_model_grad_clip_count_m"):
+            self._initialize_gradient_clip_counters()
+        return {
+            key: int(getattr(self, "_" + key).detach().cpu().item())
+            for key in (
+                "model_grad_clip_count_m",
+                "model_grad_step_count_m",
+                "model_grad_clip_count_p",
+                "model_grad_step_count_p",
+            )
+        }
+
     def consume_data(self, data, model_buffer=None):
         # model_buffer is only provided in non-parallel mode
         # which is required for updating the priorities of 
         # transition in the buffer
         self.n += 1
+        self._pending_model_observability = _empty_model_observability()
         self.update_real_step(data)
         train_model_out, is_weights, idx = data["data"], data["weights"], data["idx"]
         TrainModelOut = namedtuple('TrainModelOut', train_model_out.keys())
@@ -285,39 +511,152 @@ class SModelLearner:
         is_weights = torch.tensor(is_weights, dtype=torch.float32, device=self.device)
         del data
 
+        assert_finite_tensors(
+            train_model_out,
+            context=f"model input at real_step={self.real_step}",
+        )
+        assert_finite_tensors(
+            is_weights,
+            context=f"model importance weights at real_step={self.real_step}",
+        )
+        if bool(torch.any(is_weights < 0).item()):
+            raise ValueError(
+                f"model importance weights must be non-negative at real_step={self.real_step}"
+            )
+
         target = self.prepare_data(train_model_out)
+        assert_finite_tensors(
+            target,
+            context=f"model target at real_step={self.real_step}",
+        )
         if self.timing is not None:
             self.timing.time("convert_data")
 
         if self.flags.dual_net:
             torch.autograd.set_detect_anomaly(False)
             # compute losses for model_net
-            with autocast(enabled=self.flags.float16):
-                losses_m, pred_xs = self.compute_losses_m(
+            with autocast(enabled=self.model_float16):
+                losses_m, pred_xs, raw_pred_xs = self.compute_losses_m(
                     train_model_out, target, is_weights
                 )
-            if self.timing is not None:
-                self.timing.time("compute_losses_m")
-            total_norm_m = self.gradient_step(
-                losses_m["total_loss_m"], self.optimizer_m, self.scheduler_m, self.scaler_m
+            assert_finite_tensors(
+                losses_m,
+                context=f"model SR losses at real_step={self.real_step}",
+            )
+            assert_finite_tensors(
+                pred_xs,
+                context=f"model predicted states at real_step={self.real_step}",
+            )
+            assert_finite_tensors(
+                raw_pred_xs,
+                context=(
+                    "model raw predicted states before projection at "
+                    f"real_step={self.real_step}"
+                ),
             )
             if self.timing is not None:
-                self.timing.time("gradient_step_m")            
+                self.timing.time("compute_losses_m")
+
+            # Backpropagate SR before constructing the VP graph.  Holding both
+            # 20-step graphs at once approximately doubles peak memory in FP32.
+            step_result_m = self.gradient_step(
+                losses_m["total_loss_m"],
+                self.optimizer_m,
+                self.scheduler_m,
+                self.scaler_m,
+            )
+            if not step_result_m.optimizer_stepped:
+                raise FloatingPointError(
+                    "AMP skipped the model SR optimizer step at "
+                    f"real_step={self.real_step}; scale "
+                    f"{step_result_m.amp_scale_before!r} -> "
+                    f"{step_result_m.amp_scale_after!r}"
+                )
+            total_norm_m = step_result_m.total_norm
+            m_grad_clipped = self._record_gradient_clipping("m", total_norm_m)
+            if self.timing is not None:
+                self.timing.time("gradient_step_m")
         else:
             losses_m = {}
-            total_norm_m = torch.zeros(1, device=self.device)
             pred_xs = None
-        with autocast(enabled=self.flags.float16):
+            raw_pred_xs = None
+            step_result_m = GradientStepResult(
+                torch.zeros(1, device=self.device), True, None, None
+            )
+            total_norm_m = step_result_m.total_norm
+            m_grad_clipped = torch.zeros(
+                (), dtype=torch.bool, device=self.device
+            )
+
+        with autocast(enabled=self.model_float16):
             losses_p, priorities = self.compute_losses_p(
                 train_model_out, target, is_weights, pred_xs
             )
+        assert_finite_tensors(
+            losses_p,
+            context=f"model VP losses at real_step={self.real_step}",
+        )
+        if self.flags.priority_alpha > 0:
+            priorities = validate_priorities(
+                priorities,
+                context=f"model computed priority at real_step={self.real_step}",
+                expected_shape=(int(is_weights.shape[0]),),
+            )
         if self.timing is not None:
             self.timing.time("compute_losses_p")
-        total_norm_p = self.gradient_step(
+
+        pred_xs_abs_max = (
+            float(torch.max(torch.abs(pred_xs.detach())).item())
+            if pred_xs is not None and pred_xs.numel() > 0
+            else None
+        )
+        pred_xs_min = (
+            float(torch.min(pred_xs.detach()).item())
+            if pred_xs is not None and pred_xs.numel() > 0
+            else None
+        )
+        pred_xs_max = (
+            float(torch.max(pred_xs.detach()).item())
+            if pred_xs is not None and pred_xs.numel() > 0
+            else None
+        )
+        pred_raw_xs_abs_max = (
+            float(torch.max(torch.abs(raw_pred_xs.detach())).item())
+            if raw_pred_xs is not None and raw_pred_xs.numel() > 0
+            else None
+        )
+        pred_raw_xs_oob_fraction = (
+            float(
+                torch.mean(
+                    (
+                        (raw_pred_xs.detach() < 0.0)
+                        | (raw_pred_xs.detach() > 1.0)
+                    ).float()
+                ).item()
+            )
+            if raw_pred_xs is not None and raw_pred_xs.numel() > 0
+            else None
+        )
+        priority_min = float(np.min(priorities)) if priorities is not None else None
+        priority_max = float(np.max(priorities)) if priorities is not None else None
+
+        step_result_p = self.gradient_step(
             losses_p["total_loss_p"], self.optimizer_p, self.scheduler_p, self.scaler_p
         )
+        if not step_result_p.optimizer_stepped:
+            raise FloatingPointError(
+                "AMP skipped the model VP optimizer step at "
+                f"real_step={self.real_step}; scale "
+                f"{step_result_p.amp_scale_before!r} -> {step_result_p.amp_scale_after!r}"
+            )
+        total_norm_p = step_result_p.total_norm
+        p_grad_clipped = self._record_gradient_clipping("p", total_norm_p)
         if self.timing is not None:
             self.timing.time("gradient_step_p")
+        assert_finite_tensors(
+            self.model_net.state_dict(),
+            context=f"ModelNet state after real_step={self.real_step}",
+        )
         if self.flags.priority_alpha > 0:
             if model_buffer is None:
                 self.model_buffer.update_priority.remote(idx, priorities)
@@ -342,6 +681,10 @@ class SModelLearner:
             tot_sps = (self.step - self.sps_start_step) / (
                 self.timer() - self.sps_start_time
             )
+            observability_stats = self._model_observability_log_stats()
+            gradient_clip_stats = self._gradient_clip_log_stats(
+                m_grad_clipped, p_grad_clipped
+            )
             print_str = (
                 "[%s] Steps %i (%i[%.1f]) @ %.1f SPS (%.1f). norm_m %.2f norm_p %.2f"
                 % (
@@ -360,6 +703,7 @@ class SModelLearner:
                 "total_loss_p",
                 "img_loss",
                 "fea_loss",
+                "state_range_loss",
                 "noise_loss",
                 "done_loss",
                 "reg_loss",
@@ -370,6 +714,41 @@ class SModelLearner:
                         k,
                         losses[k].item() / self.numel_per_step,
                     )
+            if pred_xs_abs_max is not None:
+                print_str += " pred_xs_abs_max %.6f" % pred_xs_abs_max
+                print_str += " pred_xs_min %.6f pred_xs_max %.6f" % (
+                    pred_xs_min,
+                    pred_xs_max,
+                )
+            if pred_raw_xs_abs_max is not None:
+                print_str += (
+                    " pred_raw_xs_abs_max %.6f pred_raw_xs_oob_fraction %.6f"
+                    % (pred_raw_xs_abs_max, pred_raw_xs_oob_fraction)
+                )
+            if priority_min is not None:
+                print_str += " priority_min %.6f priority_max %.6f" % (
+                    priority_min,
+                    priority_max,
+                )
+            for key, value in observability_stats.items():
+                if value is not None:
+                    print_str += " %s %.6f" % (key.removeprefix("model/"), value)
+            print_str += (
+                " m_grad_clipped %d m_grad_clip %d/%d"
+                " p_grad_clipped %d p_grad_clip %d/%d"
+                % (
+                    gradient_clip_stats["model/m_grad_clipped"],
+                    gradient_clip_stats["model/m_grad_clip_count"],
+                    gradient_clip_stats["model/m_grad_step_count"],
+                    gradient_clip_stats["model/p_grad_clipped"],
+                    gradient_clip_stats["model/p_grad_clip_count"],
+                    gradient_clip_stats["model/p_grad_step_count"],
+                )
+            )
+            if step_result_m.amp_scale_after is not None:
+                print_str += " amp_scale_m %.1f" % step_result_m.amp_scale_after
+            if step_result_p.amp_scale_after is not None:
+                print_str += " amp_scale_p %.1f" % step_result_p.amp_scale_after
             self._logger.info(print_str)
             self.start_time = self.timer()
 
@@ -379,7 +758,28 @@ class SModelLearner:
                 "real_step": self.real_step,
                 "model/total_norm_m": total_norm_m.item(),
                 "model/total_norm_p": total_norm_p.item(),
+                "model/pred_xs_abs_max": pred_xs_abs_max,
+                "model/pred_xs_min": pred_xs_min,
+                "model/pred_xs_max": pred_xs_max,
+                "model/pred_raw_xs_abs_max": pred_raw_xs_abs_max,
+                "model/pred_raw_xs_oob_fraction": pred_raw_xs_oob_fraction,
+                "model/priority_min": priority_min,
+                "model/priority_max": priority_max,
+                "model/optimizer_stepped_m": int(step_result_m.optimizer_stepped),
+                "model/optimizer_stepped_p": int(step_result_p.optimizer_stepped),
+                "model/amp_scale_before_m": step_result_m.amp_scale_before,
+                "model/amp_scale_after_m": step_result_m.amp_scale_after,
+                "model/amp_scale_before_p": step_result_p.amp_scale_before,
+                "model/amp_scale_after_p": step_result_p.amp_scale_after,
+                "model/model_float16": int(self.model_float16),
+                "model/learning_rate": self.optimizer_p.param_groups[0]["lr"],
+                "model/schedule_progress": util.schedule_progress(
+                    self.flags, self.real_step
+                ),
+                "model/priority_beta": self.compute_beta(),
             }
+            stats.update(observability_stats)
+            stats.update(gradient_clip_stats)
             for k in losses.keys():
                 stats["model/" + k] = (
                     losses[k].item() / self.numel_per_step
@@ -395,6 +795,7 @@ class SModelLearner:
             self.ckp_start_time = int(time.strftime("%M")) // 10
         if self.timing is not None:
             self.timing.time("misc")
+        return True
 
     def compute_rs_loss(self, target, rs, r_enc_logits, rv_tran, is_weights):
         k, b = self.flags.model_unroll_len, target["rewards"].shape[1]
@@ -449,6 +850,28 @@ class SModelLearner:
         state_loss = torch.sum(state_loss)
         return state_loss
 
+    def compute_state_range_loss(self, raw_pred, mask, is_weights):
+        """Penalize only violations of the normalized observation interval.
+
+        The raw decoder emits the newest frame rather than the complete frame
+        stack.  Smooth-L1 is averaged over feature/pixel/channel dimensions,
+        then aggregated over valid rollout edges and PER importance weights in
+        the same way as the other state losses.  Detaching the projected target
+        makes gradients point back toward the nearest interval boundary.
+        """
+
+        interval_target = torch.clamp(raw_pred.detach(), 0.0, 1.0)
+        range_error = F.smooth_l1_loss(
+            raw_pred, interval_target, reduction="none", beta=1.0
+        )
+        reduce_dims = tuple(range(2, range_error.ndim))
+        if reduce_dims:
+            range_error = torch.mean(range_error, dim=reduce_dims)
+        range_error = range_error * mask
+        range_error = torch.sum(range_error, dim=0)
+        range_error = range_error * is_weights
+        return torch.sum(range_error)
+
     def compute_losses_m(self, train_model_out, target, is_weights):
         k, b = self.flags.model_unroll_len, train_model_out.real_state.shape[1]
         initial_per_state = {sk: getattr(train_model_out, sk)[0] for sk in train_model_out._fields if sk.startswith("per")}
@@ -471,6 +894,7 @@ class SModelLearner:
             actions=train_model_out.action[: k + 1],
             state=per_state,
             future_env_state_norm=self.model_net.normalize(train_model_out.real_state[1:k+1]) if self.flags.noise_enable else None,
+            check_raw_finite=True,
         )
         rs_loss = self.compute_rs_loss(
             target,
@@ -503,6 +927,14 @@ class SModelLearner:
             fea_loss = self.compute_state_loss(target_enc, pred_enc, target["done_mask"][1:], is_weights, self.flags.img_fea_cos)
         else:
             fea_loss = None        
+        if self.flags.model_state_projection == "clamp":
+            state_range_loss = self.compute_state_range_loss(
+                out.raw_xs,
+                target["done_mask"][1:],
+                is_weights,
+            )
+        else:
+            state_range_loss = None
         if not self.flags.fea_loss_inf_bn:
             util.restore_bn_running_stats(self.model_net.vp_net, bn_stat)
         else:
@@ -526,15 +958,28 @@ class SModelLearner:
             total_loss = total_loss + self.flags.model_done_loss_cost * done_loss
         if self.flags.model_noise_loss_cost > 0.:
             total_loss = total_loss + self.flags.model_noise_loss_cost * noise_loss
+        if self.flags.model_state_range_loss_cost > 0.0:
+            total_loss = (
+                total_loss
+                + self.flags.model_state_range_loss_cost * state_range_loss
+            )
+
+        predicted_sr_hs = out.hs[1:] if out.hs.shape[0] > 1 else out.hs
+        self._record_model_tensor_scale("pred_sr_hs", predicted_sr_hs)
+        self._record_model_tensor_scale(
+            "pred_reward_head",
+            out.r_enc_logits if out.r_enc_logits is not None else out.rs,
+        )
 
         return {
             "rs_loss": rs_loss,
             "done_loss": done_loss,
             "img_loss": img_loss,
             "fea_loss": fea_loss,
+            "state_range_loss": state_range_loss,
             "noise_loss": noise_loss,
             "total_loss_m": total_loss,
-        }, out.xs.detach()
+        }, out.xs.detach(), out.raw_xs.detach()
 
     def compute_losses_p(self, train_model_out, target, is_weights, pred_xs):
         k, b = self.flags.model_unroll_len, train_model_out.real_state.shape[1]
@@ -658,6 +1103,17 @@ class SModelLearner:
         else:
             priorities = None
 
+        self._record_model_tensor_scale("pred_vp_hs", out.hs)
+        self._record_model_tensor_scale("pred_policy_logits", policy)
+        self._record_model_tensor_scale(
+            "pred_value_head", v_enc_logits if v_enc_logits is not None else vs
+        )
+        if self._pending_model_observability["pred_reward_head_abs_max"] is None:
+            self._record_model_tensor_scale(
+                "pred_reward_head",
+                out.r_enc_logits if out.r_enc_logits is not None else out.rs,
+            )
+
         return losses, priorities
 
     def prepare_data(self, train_model_out):
@@ -745,35 +1201,89 @@ class SModelLearner:
         # gradient descent on loss
         if self.flags.model_optimizer == "sgd":
             loss = loss / self.numel_per_step
+        assert_finite_tensors(loss, context="model optimizer loss")
+
         optimizer.zero_grad()
-        if scaler is not None:
+        scaler_enabled = scaler is not None and (
+            not hasattr(scaler, "is_enabled") or scaler.is_enabled()
+        )
+        amp_scale_before = None
+        amp_scale_after = None
+        if scaler_enabled:
+            amp_scale_before = float(scaler.get_scale())
+            if not np.isfinite(amp_scale_before) or amp_scale_before <= 0:
+                raise FloatingPointError(
+                    "model AMP scale must be finite and positive before backward, "
+                    f"got {amp_scale_before!r}"
+                )
             scaler.scale(loss).backward()
         else:
             loss.backward()
                 
-        if scaler is not None:
+        if scaler_enabled:
             scaler.unscale_(optimizer)
         
-        optimize_params = optimizer.param_groups[0]["params"]
+        optimize_params = [
+            parameter
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        ]
         if self.flags.model_grad_norm_clipping > 0:
             total_norm = torch.nn.utils.clip_grad_norm_(
                 optimize_params, self.flags.model_grad_norm_clipping
             )
         else:
             total_norm = util.compute_grad_norm(optimize_params)
-        
-        if scaler is not None:
+
+        if not bool(torch.isfinite(total_norm).item()):
+            optimizer.zero_grad(set_to_none=True)
+            raise FloatingPointError(
+                f"model gradient norm is non-finite: {total_norm.detach().cpu().item()!r}"
+            )
+
+        found_inf = None
+        if scaler_enabled and hasattr(scaler, "_found_inf_per_device"):
+            found_inf_by_device = scaler._found_inf_per_device(optimizer)
+            found_inf = sum(
+                float(value.detach().cpu().item())
+                for value in found_inf_by_device.values()
+            )
+
+        if scaler_enabled:
             scaler.step(optimizer)
             scaler.update()
+            amp_scale_after = float(scaler.get_scale())
+            scale_is_valid = np.isfinite(amp_scale_after) and amp_scale_after > 0
+            if found_inf is not None:
+                optimizer_stepped = scale_is_valid and found_inf == 0.0
+            else:
+                # PyTorch backs the scale off exactly when scaler.step skipped
+                # the optimizer. This fallback also supports small fake scalers
+                # used by focused tests.
+                optimizer_stepped = (
+                    scale_is_valid
+                    and amp_scale_after >= amp_scale_before
+                )
         else:
             optimizer.step()
+            optimizer_stepped = True
 
-        scheduler.last_epoch = (
-            max(self.real_step - 1, 0)
-        )  # scheduler does not support setting epoch directly
-        scheduler.step()
+        if optimizer_stepped:
+            assert_optimizer_parameters_finite(
+                optimizer,
+                context=f"model optimizer parameters after real_step={self.real_step}",
+            )
+            scheduler.last_epoch = (
+                max(self.real_step - 1, 0)
+            )  # scheduler does not support setting epoch directly
+            scheduler.step()
         optimizer.zero_grad(set_to_none=True)
-        return total_norm
+        return GradientStepResult(
+            total_norm,
+            bool(optimizer_stepped),
+            amp_scale_before,
+            amp_scale_after,
+        )
 
     def step_per_transition(self):
         return self.step / (self.real_step - self.flags.model_warm_up_n + 1)
@@ -802,6 +1312,10 @@ class SModelLearner:
 
     def save_checkpoint(self, force=False):
         self._logger.info("Saving model checkpoint to %s" % self.ckp_path)
+        assert_finite_tensors(
+            self.model_net.state_dict(),
+            context=f"checkpoint ModelNet state at real_step={self.real_step}",
+        )
         d = {
             "step": self.step,
             "real_step": self.real_step,
@@ -810,6 +1324,9 @@ class SModelLearner:
             "model_net_state_dict": self.model_net.state_dict(),
             "flags": vars(self.flags),
         }
+        d.update(self._gradient_clip_checkpoint_state())
+        if self.scaler_p is not None:
+            d["model_scaler_p_state_dict"] = self.scaler_p.state_dict()
         if self.flags.dual_net:
             d.update(
                 {
@@ -817,6 +1334,8 @@ class SModelLearner:
                     "model_net_scheduler_m_state_dict": self.scheduler_m.state_dict(),
                 }
             )
+            if self.scaler_m is not None:
+                d["model_scaler_m_state_dict"] = self.scaler_m.state_dict()
         try:
             # Save regular checkpoint
             torch.save(d, self.ckp_path + ".tmp")
@@ -832,21 +1351,46 @@ class SModelLearner:
                 self._logger.info(f"Saved model checkpoint at step {self.real_step} to {checkpoint_path}")
         except Exception as e:       
             self._logger.error(f"Error saving model checkpoint: {e}")
+            raise
 
     def load_checkpoint(self, ckp_path: str):
         train_checkpoint = torch.load(ckp_path, torch.device("cpu"))
         self.step = train_checkpoint["step"]
         self.real_step = train_checkpoint["real_step"]
+        self._initialize_gradient_clip_counters(train_checkpoint)
         if self.flags.dual_net:
             util.load_optimizer(self.optimizer_m, train_checkpoint["model_net_optimizer_m_state_dict"])
             util.load_scheduler(self.scheduler_m, train_checkpoint["model_net_scheduler_m_state_dict"])
         util.load_optimizer(self.optimizer_p, train_checkpoint["model_net_optimizer_p_state_dict"])
         util.load_scheduler(self.scheduler_p, train_checkpoint["model_net_scheduler_p_state_dict"])
+        if self.scaler_p is not None:
+            scaler_state = train_checkpoint.get("model_scaler_p_state_dict")
+            if scaler_state is None:
+                self._logger.warning(
+                    "model checkpoint has no VP AMP scaler state; resume is not bitwise exact"
+                )
+            else:
+                self.scaler_p.load_state_dict(scaler_state)
+        if self.flags.dual_net and self.scaler_m is not None:
+            scaler_state = train_checkpoint.get("model_scaler_m_state_dict")
+            if scaler_state is None:
+                self._logger.warning(
+                    "model checkpoint has no SR AMP scaler state; resume is not bitwise exact"
+                )
+            else:
+                self.scaler_m.load_state_dict(scaler_state)
         self.model_net.set_weights(train_checkpoint["model_net_state_dict"])
+        assert_finite_tensors(
+            self.model_net.state_dict(),
+            context=f"loaded ModelNet state from {ckp_path}",
+        )
         self._logger.info("Loaded model checkpoint from %s" % ckp_path)
 
-    def close(self):
-        self.plogger.close()
+    def close(self, successful=True):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        self.plogger.close(successful=bool(successful))
 
 @ray.remote
 class ModelLearner(SModelLearner):

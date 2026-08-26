@@ -1,3 +1,4 @@
+import ast
 import time, timeit
 import os
 import re
@@ -391,10 +392,18 @@ class SLogWorker:
                 if not value:
                     value = None
                 else:
-                    value = eval(value)
+                    lowered = value.strip().lower()
+                    if lowered in {"nan", "+nan", "-nan"}:
+                        value = float("nan")
+                    elif lowered in {"inf", "+inf", "infinity", "+infinity"}:
+                        value = float("inf")
+                    elif lowered in {"-inf", "-infinity"}:
+                        value = float("-inf")
+                    else:
+                        value = ast.literal_eval(value)
                 if type(value) == str:
-                    value = eval(value)
-            except (SyntaxError, NameError, TypeError) as e:
+                    value = ast.literal_eval(value)
+            except (SyntaxError, ValueError, TypeError) as e:
                 self._logger.error(
                     f"Steps {self.real_step}: Cannot read value {value} for key {key}: {e}"
                 )

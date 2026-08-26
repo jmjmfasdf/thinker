@@ -2,6 +2,8 @@ __version__ = "1.3.0"
 __project__ = "thinker"
 
 import collections
+import hashlib
+import json
 import time
 import timeit
 import yaml
@@ -19,6 +21,112 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+
+
+_COMPLETION_CHECKPOINT_FILES = (
+    "config_c.yaml",
+    "ckp_actor.tar",
+    "ckp_model.tar",
+)
+_TRAINING_IMPLEMENTATION_FILES = (
+    "train.py",
+    "thinker/actor_net.py",
+    "thinker/bc_loader.py",
+    "thinker/cenv.pyx",
+    "thinker/dataset_env.py",
+    "thinker/dynamic_imitation.py",
+    "thinker/gym_add/wrapper.py",
+    "thinker/learn_actor.py",
+    "thinker/learn_model.py",
+    "thinker/main.py",
+    "thinker/model_net.py",
+    "thinker/self_play.py",
+    "thinker/util.py",
+)
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def clear_run_completion(ckpdir):
+    """Invalidate an earlier success marker before starting or resuming."""
+
+    marker = os.path.join(os.path.abspath(ckpdir), "finish")
+    if os.path.lexists(marker):
+        if not (os.path.isfile(marker) or os.path.islink(marker)):
+            raise IsADirectoryError(f"completion marker is not a file: {marker}")
+        os.unlink(marker)
+
+
+def write_run_completion(ckpdir):
+    """Atomically bind a success marker to final checkpoints and source."""
+
+    root = os.path.abspath(ckpdir)
+    checkpoint_files = {}
+    for name in _COMPLETION_CHECKPOINT_FILES:
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"cannot complete run without final checkpoint file: {path}"
+            )
+        checkpoint_files[name] = {
+            "sha256": _file_sha256(path),
+            "size": os.path.getsize(path),
+        }
+
+    package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sources = {}
+    for relative in _TRAINING_IMPLEMENTATION_FILES:
+        path = os.path.join(package_root, relative)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"cannot complete run without implementation source: {path}"
+            )
+        sources[relative] = {"sha256": _file_sha256(path)}
+
+    loaded_extensions = {}
+    cenv_module = sys.modules.get("thinker.cenv")
+    cenv_path = getattr(cenv_module, "__file__", None)
+    if cenv_path and os.path.isfile(cenv_path):
+        relative = os.path.relpath(os.path.abspath(cenv_path), package_root)
+        loaded_extensions[relative] = {"sha256": _file_sha256(cenv_path)}
+    if not loaded_extensions:
+        raise RuntimeError(
+            "cannot complete run before the thinker.cenv extension is loaded"
+        )
+
+    payload = {
+        "schema_version": 1,
+        "status": "complete",
+        "completed_unix": time.time(),
+        "checkpoint_files": checkpoint_files,
+        "implementation_sources": sources,
+        "loaded_extensions": loaded_extensions,
+    }
+    os.makedirs(root, exist_ok=True)
+    marker = os.path.join(root, "finish")
+    temporary = f"{marker}.tmp.{os.getpid()}"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, marker)
+        directory_fd = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return payload
 
 # Dynamic Thinker public action/phase contracts.  Keep these values in sync
 # with cenv.pyx; tests assert the mapping at the Python/Cython boundary.
@@ -41,6 +149,12 @@ _fields += ("max_rollout_depth", "step_status")
 _fields += ("last_pri", "last_reset", "cur_gate")
 _fields += ("last_search_control", "phase", "legal_control_mask")
 _fields += ("tree_token_valid", "search_state_reset", "real_transition")
+_fields += (
+    "root_carried",
+    "carried_descendant_visit_count",
+    "carried_descendant_expanded_count",
+    "useful_carry",
+)
 _fields += ("stage_end", "forced_stop", "search_steps")
 EnvOut = namedtuple("EnvOut", _fields)   
 
@@ -76,6 +190,25 @@ def get_search_budget_stats(search_steps, stage_end):
     search_steps = torch.as_tensor(search_steps)
     stage_end = torch.as_tensor(stage_end, device=search_steps.device).bool()
     ended_steps = search_steps[stage_end].float()
+    budget_bins = (
+        ("0", ended_steps == 0),
+        ("1", ended_steps == 1),
+        ("2_3", (ended_steps >= 2) & (ended_steps <= 3)),
+        ("4_7", (ended_steps >= 4) & (ended_steps <= 7)),
+        ("8_15", (ended_steps >= 8) & (ended_steps <= 15)),
+        # Dynamic production uses a finite watchdog, so this is the 16-to-cap
+        # bin.  It remains well-defined as 16+ for an uncapped legacy run.
+        ("16_cap", ended_steps >= 16),
+    )
+    bin_stats = {}
+    stage_n = int(ended_steps.numel())
+    for label, mask in budget_bins:
+        count = int(mask.sum().item())
+        bin_stats[f"search/budget_bin_{label}_count"] = count
+        bin_stats[f"search/budget_bin_{label}_fraction"] = (
+            count / stage_n if stage_n > 0 else 0.0
+        )
+
     if ended_steps.numel() == 0:
         return {
             "max_budget": 0.0,
@@ -83,6 +216,7 @@ def get_search_budget_stats(search_steps, stage_end):
             "search/mean_steps": 0.0,
             "search/median_steps": 0.0,
             "search/p95_steps": 0.0,
+            **bin_stats,
         }
 
     mean_budget = ended_steps.mean().item()
@@ -93,7 +227,85 @@ def get_search_budget_stats(search_steps, stage_end):
         "search/mean_steps": mean_budget,
         "search/median_steps": ended_steps.median().item(),
         "search/p95_steps": torch.quantile(ended_steps, 0.95).item(),
+        **bin_stats,
     }
+
+
+def get_search_depth_stop_stats(
+        search_steps, search_control, control_valid, stop_probability):
+    """Summarize behavior-policy STOP probability by decision depth.
+
+    Dynamic environment fields are post-step while ``control_valid`` and
+    ``search_control`` describe the action accepted on that row.  A
+    PROCEED/RESET increments ``search_steps``; STOP does not.  Subtracting one
+    only for accepted non-STOP controls therefore recovers the pre-decision
+    depth without reclassifying WAIT or forced rows.
+
+    Every field is always present.  Empty bins use count 0 and probability
+    0.0 so CSV schemas remain stable across unrolls.
+    """
+
+    search_steps = torch.as_tensor(search_steps)
+    search_control = torch.as_tensor(
+        search_control, device=search_steps.device
+    )
+    control_valid = torch.as_tensor(
+        control_valid, device=search_steps.device
+    ).bool()
+    stop_probability = torch.as_tensor(
+        stop_probability, device=search_steps.device
+    )
+    expected_shape = tuple(search_steps.shape)
+    for name, value in (
+        ("search_control", search_control),
+        ("control_valid", control_valid),
+        ("stop_probability", stop_probability),
+    ):
+        if tuple(value.shape) != expected_shape:
+            raise ValueError(
+                f"{name} must match search_steps shape {expected_shape}, "
+                f"got {tuple(value.shape)}"
+            )
+
+    decision_depth = search_steps.long() - (
+        control_valid & (search_control != STOP)
+    ).long()
+    valid_depth = decision_depth[control_valid].float()
+    valid_stop_probability = stop_probability[control_valid].float()
+    if torch.any(valid_depth < 0):
+        raise ValueError("valid Dynamic control has negative decision depth")
+
+    depth_bins = (
+        ("0", valid_depth == 0),
+        ("1", valid_depth == 1),
+        ("2_3", (valid_depth >= 2) & (valid_depth <= 3)),
+        ("4_7", (valid_depth >= 4) & (valid_depth <= 7)),
+        ("8_15", (valid_depth >= 8) & (valid_depth <= 15)),
+        ("16_plus", valid_depth >= 16),
+    )
+    stats = {}
+    for label, mask in depth_bins:
+        count = int(mask.sum().item())
+        stats[f"search/depth_bin_{label}_count"] = count
+        stats[f"search/depth_bin_{label}_stop_probability"] = (
+            valid_stop_probability[mask].mean().item() if count > 0 else 0.0
+        )
+
+    sample_n = int(valid_depth.numel())
+    slope = 0.0
+    if sample_n >= 2:
+        centered_depth = valid_depth - valid_depth.mean()
+        denominator = torch.sum(centered_depth.square())
+        if denominator.item() > 0.0:
+            centered_probability = (
+                valid_stop_probability - valid_stop_probability.mean()
+            )
+            slope = (
+                torch.sum(centered_depth * centered_probability) / denominator
+            ).item()
+    stats["search/depth_stop_probability_slope"] = slope
+    stats["search/depth_stop_probability_count"] = sample_n
+    return stats
 
 def init_env_out(state, info, flags, dim_actions, tuple_action):
     # minimum env_out for actor_net
@@ -120,6 +332,16 @@ def init_env_out(state, info, flags, dim_actions, tuple_action):
             "tree_token_valid": torch.ones(env_n, dtype=torch.bool, device=device),
             "search_state_reset": torch.ones(env_n, dtype=torch.bool, device=device),
             "real_transition": torch.zeros(env_n, dtype=torch.bool, device=device),
+            "root_carried": torch.zeros(env_n, dtype=torch.bool, device=device),
+            "carried_descendant_visit_count": torch.zeros(
+                env_n, dtype=torch.long, device=device
+            ),
+            "carried_descendant_expanded_count": torch.zeros(
+                env_n, dtype=torch.long, device=device
+            ),
+            "useful_carry": torch.zeros(
+                env_n, dtype=torch.bool, device=device
+            ),
             "stage_end": torch.zeros(env_n, dtype=torch.bool, device=device),
             "forced_stop": torch.zeros(env_n, dtype=torch.bool, device=device),
             "search_steps": torch.zeros(env_n, dtype=torch.long, device=device),
@@ -223,8 +445,116 @@ def create_env_out(action, state, reward, done, truncated_done, info, flags):
 def process_flags(flags):
     # Defaults are needed when resuming a configuration written by an older
     # Thinker version.
+    total_steps = getattr(flags, "total_steps", 100_000_000)
+    if (
+        isinstance(total_steps, (bool, np.bool_))
+        or not isinstance(total_steps, (int, np.integer))
+        or int(total_steps) <= 0
+    ):
+        raise ValueError(f"total_steps must be a positive integer; got {total_steps!r}")
+    flags.total_steps = int(total_steps)
+    schedule_total_steps = getattr(flags, "schedule_total_steps", -1)
+    if schedule_total_steps is None:
+        schedule_total_steps = -1
+    if (
+        isinstance(schedule_total_steps, (bool, np.bool_))
+        or not isinstance(schedule_total_steps, (int, np.integer))
+    ):
+        raise ValueError(
+            "schedule_total_steps must be -1 or a positive integer; got "
+            f"{schedule_total_steps!r}"
+        )
+    schedule_total_steps = int(schedule_total_steps)
+    if schedule_total_steps == -1:
+        schedule_total_steps = flags.total_steps
+    elif schedule_total_steps <= 0:
+        raise ValueError(
+            "schedule_total_steps must be -1 or a positive integer; got "
+            f"{schedule_total_steps!r}"
+        )
+    flags.schedule_total_steps = schedule_total_steps
+    actor_amp_max_consecutive_skips = getattr(
+        flags, "actor_amp_max_consecutive_skips", 8
+    )
+    if (
+        isinstance(actor_amp_max_consecutive_skips, (bool, np.bool_))
+        or not isinstance(actor_amp_max_consecutive_skips, (int, np.integer))
+        or int(actor_amp_max_consecutive_skips) <= 0
+    ):
+        raise ValueError(
+            "actor_amp_max_consecutive_skips must be a positive integer; got "
+            f"{actor_amp_max_consecutive_skips!r}"
+        )
+    flags.actor_amp_max_consecutive_skips = int(
+        actor_amp_max_consecutive_skips
+    )
     if not hasattr(flags, "dynamic_search"):
         flags.dynamic_search = False
+    dynamic_factorized_control = getattr(
+        flags, "dynamic_factorized_control", False
+    )
+    if not isinstance(dynamic_factorized_control, (bool, np.bool_)):
+        raise ValueError(
+            "dynamic_factorized_control must be boolean; got "
+            f"{dynamic_factorized_control!r}"
+        )
+    flags.dynamic_factorized_control = bool(dynamic_factorized_control)
+    if flags.dynamic_factorized_control and not flags.dynamic_search:
+        raise ValueError(
+            "dynamic_factorized_control requires dynamic_search=true"
+        )
+    model_float16 = getattr(flags, "model_float16", "inherit")
+    if model_float16 is None or str(model_float16).strip().lower() == "inherit":
+        flags.model_float16 = bool(getattr(flags, "float16", False))
+    elif isinstance(model_float16, bool):
+        flags.model_float16 = model_float16
+    elif str(model_float16).strip().lower() in {"true", "false"}:
+        flags.model_float16 = str(model_float16).strip().lower() == "true"
+    else:
+        raise ValueError(
+            "model_float16 must be true, false, or inherit; got "
+            f"{model_float16!r}"
+        )
+    model_state_projection = getattr(flags, "model_state_projection", "none")
+    if (
+        not isinstance(model_state_projection, str)
+        or model_state_projection not in {"none", "clamp"}
+    ):
+        raise ValueError(
+            "model_state_projection must be exactly 'none' or 'clamp'; got "
+            f"{model_state_projection!r}"
+        )
+    flags.model_state_projection = model_state_projection
+    model_state_range_loss_cost = getattr(
+        flags, "model_state_range_loss_cost", 0.0
+    )
+    if (
+        isinstance(model_state_range_loss_cost, (bool, np.bool_))
+        or not isinstance(model_state_range_loss_cost, (int, float, np.number))
+        or not np.isfinite(model_state_range_loss_cost)
+        or float(model_state_range_loss_cost) < 0.0
+    ):
+        raise ValueError(
+            "model_state_range_loss_cost must be a finite non-negative "
+            f"number; got {model_state_range_loss_cost!r}"
+        )
+    flags.model_state_range_loss_cost = float(model_state_range_loss_cost)
+    if (
+        flags.model_state_projection == "none"
+        and flags.model_state_range_loss_cost != 0.0
+    ):
+        raise ValueError(
+            "model_state_range_loss_cost requires "
+            "model_state_projection='clamp'"
+        )
+    if (
+        flags.model_state_projection == "clamp"
+        and int(getattr(flags, "model_decoder_depth", 0)) != 0
+    ):
+        raise ValueError(
+            "model_state_projection='clamp' is valid only when "
+            "model_decoder_depth=0"
+        )
     if not hasattr(flags, "max_search_steps"):
         flags.max_search_steps = -1
     if not hasattr(flags, "think_cost"):
@@ -269,6 +599,23 @@ def process_flags(flags):
     assert flags.wrapper_type != 5, "wrapper-type 5 (meta-learning) not yet supported"
 
     return flags
+
+
+def schedule_progress(flags, real_step):
+    """Return clamped schedule progress without changing the stop horizon."""
+
+    horizon = getattr(flags, "schedule_total_steps", None)
+    if horizon is None:
+        horizon = getattr(flags, "total_steps")
+    if (
+        isinstance(horizon, (bool, np.bool_))
+        or not isinstance(horizon, (int, np.integer))
+        or int(horizon) <= 0
+    ):
+        raise ValueError(
+            f"schedule_total_steps must be a positive integer; got {horizon!r}"
+        )
+    return min(max(float(real_step), 0.0) / float(horizon), 1.0)
 
 def process_flags_actor(flags):    
     if flags.drc:

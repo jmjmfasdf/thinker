@@ -11,6 +11,7 @@ model_grad_norm_clipping: 0.0 # gradient clipping norm; non-positive for no clip
 min_replay_ratio: 4. # minimum replay ratio (i.e. the number of times that the same transition is used to train a model on average)
 max_replay_ratio: 5. # maximum replay ratio (i.e. the number of times that the same transition is used to train a model on average)
 total_steps: 100000000 # total number of raw steps to train 1e8
+schedule_total_steps: -1 # schedule horizon; -1 inherits total_steps
 # replay buffer setting
 priority_alpha: 0.6 # alpha in prioritized sampling from the buffer
 priority_beta: 0.4 # beta in prioritized sampling from the buffer
@@ -28,11 +29,13 @@ model_img_loss_cost: 0.0 # cost for training model's state output (L2 loss) (dua
 model_fea_loss_cost: 10.0 # cost for training model's state output (feature loss) (dual network only)
 model_reg_loss_cost: 0.0 # cost for model regularization loss
 model_noise_loss_cost: 0.0 # cost for model noise loss
+model_state_range_loss_cost: 0.0 # Smooth-L1 cost that pulls raw depth-0 state predictions back into normalized [0, 1]
 fea_loss_inf_bn: true # whether to use inference mode for vp-net when computing feature loss
 img_fea_cos: true # whether to use cosine similarity loss for img_loss and fea_loss
 # model setting
 dual_net: true # whether to use dual network
 model_decoder_depth: 0 # decoder level; can be from 0 to 4; 0 mean predicing raw image, 4 mean predicting vp_net feature directly
+model_state_projection: 'none' # none (legacy) or clamp; clamp is valid only for bounded normalized depth-0 predictions
 model_enc_type: 0 # reward / value encoding type for the model; 0 for no encoding, 1 for scalar encoding, 2 for unbiased vector encoding, 3 for biased vector encoding
 model_enc_f_type: 0 # scalar encoding function for reward / value encoding; 0 for MuZero-like encoding, 1 for Dreamer-like encoding
 model_size_nn: 1 # model size mulitplier (integer)
@@ -53,6 +56,7 @@ reward_clip: -1 # reward clipping; if positve, the reward is clipped within the 
 wrapper_type: 0 # 0: default Thinker; 1: raw env; 2: Thinker w/ perfect model; 3: Thinker-v2; 4: Thinker-v2 w/ perfect model
 require_prob: false # whether to use prob to train model instead of sampled action
 dynamic_search: false # opt-in Dynamic Thinker search halting
+dynamic_factorized_control: false # opt-in gate/bout reward routing; false preserves legacy joint control loss
 max_search_steps: -1 # positive safety cap; -1 allows unbounded learned search (0 is invalid)
 rec_t: 40 # stage length, modified
 test_rec_t: -1 # stage length for testing; non-positive for being the same as rec_t
@@ -101,6 +105,7 @@ checkpoint_interval: 250000 # frequency in real steps to save checkpoints (set t
 profile: false # whether to output all the time statistics of the run
 parallel: false # whether to use a parallel ray actor for training the model
 float16: false # whether to use mixed precision
+model_float16: 'inherit' # model AMP: inherit actor/global float16 unless explicitly true/false
 base_seed: 1 # base seed for the gym environment
 project: ''
 # ray resources

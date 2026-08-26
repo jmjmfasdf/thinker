@@ -2,6 +2,7 @@ import os
 import time, timeit
 from collections import namedtuple
 import numpy as np
+import random
 import traceback
 import torch
 import ray
@@ -19,6 +20,11 @@ exc_list = ["action",
             "reg_loss", 
             "baseline_enc", 
             "misc",
+            # Evaluation-only carry observability remains available on
+            # EnvOut without widening the actor replay/Ray buffer schema.
+            "carried_descendant_visit_count",
+            "carried_descendant_expanded_count",
+            "useful_carry",
             ]
 _fields = (item for item in _fields if item not in exc_list)
 TrainActorOut = namedtuple("TrainActorOut", _fields)
@@ -27,6 +33,12 @@ TrainActorOut = namedtuple("TrainActorOut", _fields)
 class SelfPlayWorker:
     def __init__(self, ray_obj_actor, ray_obj_env, rank, env_n, flags):
         self._logger = util.logger()
+        worker_seed = int(getattr(flags, "base_seed", 0)) + int(rank) * int(env_n)
+        random.seed(worker_seed)
+        np.random.seed(worker_seed % (2**32))
+        torch.manual_seed(worker_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(worker_seed)
         gpu = False
         if flags.gpu_self_play > 0 and torch.cuda.is_available():
             gpu = True
@@ -168,7 +180,18 @@ class SelfPlayWorker:
                         if status == AB_FULL:
                             time.sleep(0.1)
                         else:
-                            if status == AB_FINISH: self.train_actor = False
+                            if status == AB_FINISH:
+                                # ActorBuffer FINISH is emitted from the learner's
+                                # finally block on both success and failure.  Rank
+                                # zero owns the learner future and must resolve it
+                                # before treating FINISH as a normal termination.
+                                if self.rank == 0 and hasattr(self, "r_learner"):
+                                    learner_ok = ray.get(self.r_learner)
+                                    if learner_ok is not True:
+                                        raise RuntimeError(
+                                            "actor learner terminated without success"
+                                        )
+                                self.train_actor = False
                             break
                     if self.train_actor:
                         self.actor_buffer.write.remote(
@@ -402,6 +425,23 @@ class SelfPlayWorker:
                         raise ValueError(
                             "Cannot resume actor checkpoint across "
                             "dynamic_search modes."
+                        )
+                    checkpoint_factorized = bool(checkpoint.get(
+                        "dynamic_factorized_control",
+                        checkpoint_flags.get(
+                            "dynamic_factorized_control", False
+                        ),
+                    ))
+                    run_factorized = bool(getattr(
+                        self.flags, "dynamic_factorized_control", False
+                    ))
+                    if (
+                        self.dynamic_search
+                        and checkpoint_factorized != run_factorized
+                    ):
+                        raise ValueError(
+                            "Cannot resume actor checkpoint across Dynamic "
+                            "control objectives."
                         )
                     checkpoint_arch = checkpoint.get("actor_arch_version")
                     expected_arch = 2 if self.dynamic_search else 1

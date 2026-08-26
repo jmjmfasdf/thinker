@@ -1,6 +1,7 @@
 from argparse import Namespace
 from types import MethodType
 
+import pytest
 import torch
 
 from thinker.main import Env
@@ -100,3 +101,67 @@ def test_model_buffer_uses_probability_from_real_action_storage_call():
     assert actions.tolist() == [4, 3]
     torch.testing.assert_close(probabilities[0], first_prob[0])
     torch.testing.assert_close(probabilities[1], second_prob[1])
+
+
+def test_env_close_propagates_model_learner_failure_after_cleanup(monkeypatch):
+    class _Core:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    env = Env.__new__(Env)
+    env.rank = 0
+    env.r_learner = object()
+    env.parallel = False
+    env.model_net = object()
+    env.env = _Core()
+    monkeypatch.setattr(
+        "thinker.main.ray.get",
+        lambda _ref: (_ for _ in ()).throw(RuntimeError("model failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="model learner failed"):
+        env.close()
+    assert env.env.closed is True
+
+
+def test_env_poll_surfaces_model_learner_failure_before_close(monkeypatch):
+    env = Env.__new__(Env)
+    env.rank = 0
+    env.r_learner = object()
+    monkeypatch.setattr(
+        "thinker.main.ray.wait",
+        lambda refs, num_returns, timeout: (refs, []),
+    )
+    monkeypatch.setattr(
+        "thinker.main.ray.get",
+        lambda _ref: (_ for _ in ()).throw(RuntimeError("priority NaN")),
+    )
+
+    with pytest.raises(RuntimeError, match="model learner failed") as exc_info:
+        env._poll_model_learner(wait=False)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+def test_env_poll_caches_successful_model_learner_result(monkeypatch):
+    env = Env.__new__(Env)
+    env.rank = 0
+    env.r_learner = object()
+    calls = {"wait": 0, "get": 0}
+
+    def fake_wait(refs, num_returns, timeout):
+        calls["wait"] += 1
+        return refs, []
+
+    def fake_get(_ref):
+        calls["get"] += 1
+        return True
+
+    monkeypatch.setattr("thinker.main.ray.wait", fake_wait)
+    monkeypatch.setattr("thinker.main.ray.get", fake_get)
+
+    assert env._poll_model_learner(wait=False) is True
+    assert env._poll_model_learner(wait=False) is True
+    assert calls == {"wait": 1, "get": 1}
