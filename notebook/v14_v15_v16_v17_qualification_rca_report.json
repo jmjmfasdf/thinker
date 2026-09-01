@@ -1,0 +1,3323 @@
+{
+ "surface": "report",
+ "manifest": {
+  "version": 1,
+  "surface": "report",
+  "title": "Enduro VoC V14-V17 Qualification RCA: RMSE Recovery, Sign-Support Failure",
+  "description": "Technical V14-V17 frozen qualification RCA with visual evidence, exact provenance, strict causal limits, and ranked V18 semantic deltas.",
+  "generatedAt": "2026-08-28T16:03:34Z",
+  "sources": [
+   {
+    "id": "prior_report",
+    "label": "Complete prior V14-V16 RCA report (SHA-256 2bcdf68840c8dac4fd0d6569c108a6c5fe0e679e92a4f0f6380f3b90ae999c10)",
+    "path": "notebook/v14_v15_v16_qualification_rca_report.json"
+   },
+   {
+    "id": "prior_rca_notebook",
+    "label": "Executed frozen V14-V16 RCA notebook (SHA-256 d32ebb602bdf38f8392878f7e76b3e91d32528203565843429dad4d0ad3bc87a)",
+    "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb"
+   },
+   {
+    "id": "rca_notebook",
+    "label": "Executed frozen V14-V17 RCA notebook (SHA-256 b4d75b0a11953ef02abd3133e8949fb3d9949b1df56422f704b23b58767708f3; 663425 bytes; 3693 lines; 17 cells; 8 executed code cells; 3 visually QA-passed charts)",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb"
+   },
+   {
+    "id": "headline_sql",
+    "label": "Reviewed V14-V17 qualification headline metrics",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes the exact heldout RMSE, V17 denominator failure, full-run sign-extinction/reappearance landmarks, gradient, and cadence headline values.",
+     "sql": "WITH materialized(v14_heldout_ema_rmse, v15_heldout_ema_rmse, v16_heldout_ema_rmse, v17_heldout_ema_rmse, rmse_ceiling, v17_rmse_margin_to_ceiling, v17_absolute_rmse_improvement_vs_v16, v17_relative_rmse_improvement_vs_v16, v17_total_trailing5_endpoints, v17_defined_trailing5_endpoints, v17_undefined_trailing5_endpoints, v17_invalid_endpoint_steps, v17_w1_online_positive_support, v17_w1_online_negative_support, v17_w1_ema_positive_support, v17_w1_ema_negative_support, v17_online_positive_last_step_before_full_run_extinction, v17_online_positive_full_run_extinction_start_step, v17_online_positive_full_run_extinction_end_step, v17_online_positive_reappearance_step_after_full_run_extinction, v17_ema_positive_last_step_before_full_run_extinction, v17_ema_positive_full_run_extinction_start_step, v17_ema_positive_full_run_extinction_end_step, v17_ema_positive_reappearance_step_after_full_run_extinction, v17_positive_reappearance_lag_real_steps, v17_canonical_raw_norm_median, v17_canonical_raw_norm_p95, v17_canonical_raw_norm_max, v17_nominal_clip_boundary, v17_canonical_boundary_exceedances, v17_canonical_rows, v17_all_q_updates, v17_all_median_real_step_gap, v17_canonical_median_real_step_gap, v17_train_ema_rmse, v17_qualification_decision, retry_primary_fixed_status, v16_eligible_trailing_endpoints, v16_undefined_trailing_endpoints, v16_w3_positive_sign_support, v16_w3_negative_sign_support, v16_zero_positive_endpoint_steps) AS (VALUES (0.5247954789453232, 0.5637126651551874, 0.643399622874774, 0.4739621233029751, 0.5, -0.026037876697024898, 0.16943749957179893, 0.2633472161745063, 32, 25, 7, '74544, 75568, 76576, 77616, 78656, 79680, 80656', 1454, 10264, 0, 11718, 62128, 62992, 75568, 76576, 69424, 70416, 80656, 81520, 4944, 509.1683654785156, 2808.359375, 4498.3056640625, 1608.0, 5, 36, 143, 784.0, 800.0, 0.6696040559045617, 'FAIL', 'none; irreversible no-retry failure', 48, 5, 1, 11722, '95344, 96368, 97392, 98416, 99408')) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "Frozen seed-1 fresh 100k qualifications only",
+      "Canonical actor rows satisfy 70000 < real_step <= 100000",
+      "Terminal overshoots excluded",
+      "No omission, repair, interpolation, retry, primary, or fixed evaluation",
+      "Full-run sign landmarks and cadence use all 143 logged VoC-Q update rows"
+     ],
+     "metric_definitions": [
+      "Heldout EMA RMSE is support-weighted selected-action TD RMSE.",
+      "Trailing-five endpoints are defined only when independently pooled positive-sign and negative-sign supports are both nonzero.",
+      "Raw norm boundary exceedance means logged actor/voc_total_norm > 1608 before clipping.",
+      "Retained V16 denominator context: 48 eligible trailing-five endpoints, five undefined endpoints at 95344/96368/97392/98416/99408, and W3 support of 1 positive versus 11722 negative.",
+      "Full-run positive-support landmarks use all 143 logged VoC-Q update rows: online is positive through 62128, zero on every logged row 62992-75568, and first canonically reappears at 76576; EMA is positive through 69424, zero on every logged row 70416-80656, and first canonically reappears at 81520."
+     ]
+    }
+   },
+   {
+    "id": "window_sql",
+    "label": "Reviewed V14-V17 window and full RMSE rows",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes W1, W2, W3, and Full support-weighted calibration rows for the four observed 2x2 cells.",
+     "sql": "WITH materialized(version, schema_version, loss, reconstruction, window_label, window_order, canonical_rows, heldout_support, support_share, ema_rmse, online_rmse, ema_sse, threshold_sse, excess_sse, sse_share, full_ema_rmse, rmse_ceiling, design_cell) AS (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W1 (70k-80k]', 1, 32, 3647, 0.4734519019, 0.3070468494240733, 0.3069186481, 343.8310189523, 911.75, -567.9189810477, 0.16207087859592553, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W2 (80k-90k]', 2, 19, 2485, 0.3226015838, 0.4805763254032396, 0.4812888845, 573.9197072771, 621.25, -47.3302927229, 0.270527282516125, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W3 (90k-100k]', 3, 12, 1571, 0.2039465143, 0.8753410807478021, 0.8748756785, 1203.7347740099, 392.75, 810.9847740099, 0.5674018388879494, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Full (70k-100k]', 4, 63, 7703, 1.0, 0.5247954789453232, 0.5248123566562356, 2121.4855002393, 1925.75, 195.7355002393001, 1.0, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W1 (70k-80k]', 1, 19, 2452, 0.3007113073, 0.6350000482991449, 0.6355039321, 988.7078504055, 613.0, 375.7078504055, 0.38157656190278516, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W2 (80k-90k]', 2, 26, 3509, 0.430340937, 0.5262197892944133, 0.527617819, 971.6675986575, 877.25, 94.4175986575, 0.3750001392787582, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W3 (90k-100k]', 3, 13, 2193, 0.2689477557, 0.536296424979157, 0.537270896, 630.7371849918, 548.25, 82.4871849918, 0.24342329881845667, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Full (70k-100k]', 4, 58, 8154, 1.0, 0.5637126651551874, 0.5646944857965209, 2591.1126340548, 2038.5, 552.6126340547999, 1.0, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W1 (70k-80k]', 1, 32, 4621, 0.6132714001, 0.42412219735332535, 0.4225059308, 831.223808528, 1155.25, -324.026191472, 0.26648521176430207, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W2 (80k-90k]', 2, 10, 1452, 0.1927007299, 0.9513859413944138, 0.9580587217, 1314.2563241692, 363.0, 951.2563241692, 0.4213424486469157, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W3 (90k-100k]', 3, 10, 1462, 0.1940278699, 0.8161048402729425, 0.8102244292, 973.7316352833, 365.5, 608.2316352833, 0.31217233958876617, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Full (70k-100k]', 4, 52, 7535, 1.0, 0.643399622874774, 0.6432134673573406, 3119.21176798055, 1883.75, 1235.4617679805501, 1.0, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'W1 (70k-80k]', 1, 10, 1461, 0.25417536534446766, 0.5044903887648509, 0.4994767302, 371.8399169923, 365.25, 6.5899169923000045, 0.28797313686709375, 0.4739621233029751, 0.5, 'Huber x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'W2 (80k-90k]', 2, 12, 1909, 0.3321155184411969, 0.3328853383580048, 0.3386498776, 211.5413459745, 477.25, -265.7086540255, 0.16382917000980668, 0.4739621233029751, 0.5, 'Huber x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'W3 (90k-100k]', 3, 14, 2378, 0.4137091162143354, 0.5455878532763281, 0.5363071119, 707.8499992183, 594.5, 113.34999921830001, 0.5481976931230996, 0.4739621233029751, 0.5, 'Huber x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Full (70k-100k]', 4, 36, 5748, 1.0, 0.4739621233029751, 0.4695661556492494, 1291.2312621851, 1437.0, -145.76873781490008, 1.0, 0.4739621233029751, 0.5, 'Huber x common mode')) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "W1=(70000,80000], W2=(80000,90000], W3=(90000,100000], Full=(70000,100000]",
+      "Support-weighted within version and window",
+      "Separately generated trajectories are not paired"
+     ],
+     "metric_definitions": [
+      "EMA RMSE = sqrt(sum(n_i * rmse_i^2) / sum(n_i)).",
+      "Threshold SSE = 0.25 * heldout support for a 0.5 RMSE ceiling.",
+      "SSE share is window EMA SSE divided by version Full EMA SSE."
+     ]
+    }
+   },
+   {
+    "id": "sign_sql",
+    "label": "Reviewed V17 online/EMA sign-support trajectory",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes every V17 canonical positive-support row, the seven invalid trailing-five endpoint markers, and exact reappearance landmarks after the full-run extinction intervals.",
+     "sql": "WITH materialized(version, real_step, window, online_negative, ema_negative, invalid_trailing5_endpoint, online_positive_reappearance_step_after_full_run_extinction, ema_positive_reappearance_step_after_full_run_extinction, positive_reappearance_lag_real_steps, support_series, support_count) AS (VALUES ('v17', 70416, 'W1', 1152, 1152, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 70416, 'W1', 1152, 1152, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 71456, 'W1', 1184, 1184, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 71456, 'W1', 1184, 1184, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 72480, 'W1', 1175, 1175, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 72480, 'W1', 1175, 1175, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 73504, 'W1', 1170, 1170, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 73504, 'W1', 1170, 1170, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 74544, 'W1', 1188, 1188, 'yes', 76576, 81520, 4944, 'Online positive', 0), ('v17', 74544, 'W1', 1188, 1188, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 74544, 'W1', 1188, 1188, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 75568, 'W1', 1180, 1180, 'yes', 76576, 81520, 4944, 'Online positive', 0), ('v17', 75568, 'W1', 1180, 1180, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 75568, 'W1', 1180, 1180, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 76576, 'W1', 1078, 1154, 'yes', 76576, 81520, 4944, 'Online positive', 76), ('v17', 76576, 'W1', 1078, 1154, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 76576, 'W1', 1078, 1154, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 77616, 'W1', 875, 1175, 'yes', 76576, 81520, 4944, 'Online positive', 300), ('v17', 77616, 'W1', 875, 1175, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 77616, 'W1', 875, 1175, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 78656, 'W1', 722, 1164, 'yes', 76576, 81520, 4944, 'Online positive', 442), ('v17', 78656, 'W1', 722, 1164, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 78656, 'W1', 722, 1164, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 79680, 'W1', 540, 1176, 'yes', 76576, 81520, 4944, 'Online positive', 636), ('v17', 79680, 'W1', 540, 1176, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 79680, 'W1', 540, 1176, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 80656, 'W2', 193, 1104, 'yes', 76576, 81520, 4944, 'Online positive', 910), ('v17', 80656, 'W2', 193, 1104, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 80656, 'W2', 193, 1104, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 81520, 'W2', 353, 967, 'no', 76576, 81520, 4944, 'Online positive', 920), ('v17', 81520, 'W2', 353, 967, 'no', 76576, 81520, 4944, 'EMA positive', 306), ('v17', 82400, 'W2', 218, 961, 'no', 76576, 81520, 4944, 'Online positive', 1015), ('v17', 82400, 'W2', 218, 961, 'no', 76576, 81520, 4944, 'EMA positive', 272), ('v17', 83248, 'W2', 8, 888, 'no', 76576, 81520, 4944, 'Online positive', 1258), ('v17', 83248, 'W2', 8, 888, 'no', 76576, 81520, 4944, 'EMA positive', 378), ('v17', 84048, 'W2', 1, 849, 'no', 76576, 81520, 4944, 'Online positive', 1343), ('v17', 84048, 'W2', 1, 849, 'no', 76576, 81520, 4944, 'EMA positive', 495), ('v17', 84864, 'W2', 1, 867, 'no', 76576, 81520, 4944, 'Online positive', 1362), ('v17', 84864, 'W2', 1, 867, 'no', 76576, 81520, 4944, 'EMA positive', 496), ('v17', 85632, 'W2', 17, 808, 'no', 76576, 81520, 4944, 'Online positive', 1329), ('v17', 85632, 'W2', 17, 808, 'no', 76576, 81520, 4944, 'EMA positive', 538), ('v17', 86400, 'W2', 377, 772, 'no', 76576, 81520, 4944, 'Online positive', 974), ('v17', 86400, 'W2', 377, 772, 'no', 76576, 81520, 4944, 'EMA positive', 579), ('v17', 87216, 'W2', 345, 866, 'no', 76576, 81520, 4944, 'Online positive', 909), ('v17', 87216, 'W2', 345, 866, 'no', 76576, 81520, 4944, 'EMA positive', 387), ('v17', 88032, 'W2', 291, 905, 'no', 76576, 81520, 4944, 'Online positive', 908), ('v17', 88032, 'W2', 291, 905, 'no', 76576, 81520, 4944, 'EMA positive', 294), ('v17', 88816, 'W2', 320, 849, 'no', 76576, 81520, 4944, 'Online positive', 899), ('v17', 88816, 'W2', 320, 849, 'no', 76576, 81520, 4944, 'EMA positive', 370), ('v17', 89664, 'W2', 493, 891, 'no', 76576, 81520, 4944, 'Online positive', 826), ('v17', 89664, 'W2', 493, 891, 'no', 76576, 81520, 4944, 'EMA positive', 428), ('v17', 90464, 'W3', 736, 848, 'no', 76576, 81520, 4944, 'Online positive', 590), ('v17', 90464, 'W3', 736, 848, 'no', 76576, 81520, 4944, 'EMA positive', 478), ('v17', 91200, 'W3', 747, 766, 'no', 76576, 81520, 4944, 'Online positive', 583), ('v17', 91200, 'W3', 747, 766, 'no', 76576, 81520, 4944, 'EMA positive', 564), ('v17', 91968, 'W3', 779, 779, 'no', 76576, 81520, 4944, 'Online positive', 570), ('v17', 91968, 'W3', 779, 779, 'no', 76576, 81520, 4944, 'EMA positive', 570), ('v17', 92768, 'W3', 829, 818, 'no', 76576, 81520, 4944, 'Online positive', 590), ('v17', 92768, 'W3', 829, 818, 'no', 76576, 81520, 4944, 'EMA positive', 601), ('v17', 93568, 'W3', 996, 807, 'no', 76576, 81520, 4944, 'Online positive', 426), ('v17', 93568, 'W3', 996, 807, 'no', 76576, 81520, 4944, 'EMA positive', 615), ('v17', 94352, 'W3', 1005, 797, 'no', 76576, 81520, 4944, 'Online positive', 387), ('v17', 94352, 'W3', 1005, 797, 'no', 76576, 81520, 4944, 'EMA positive', 595), ('v17', 95152, 'W3', 1073, 832, 'no', 76576, 81520, 4944, 'Online positive', 325), ('v17', 95152, 'W3', 1073, 832, 'no', 76576, 81520, 4944, 'EMA positive', 566), ('v17', 95888, 'W3', 974, 759, 'no', 76576, 81520, 4944, 'Online positive', 342), ('v17', 95888, 'W3', 974, 759, 'no', 76576, 81520, 4944, 'EMA positive', 557), ('v17', 96608, 'W3', 933, 737, 'no', 76576, 81520, 4944, 'Online positive', 375), ('v17', 96608, 'W3', 933, 737, 'no', 76576, 81520, 4944, 'EMA positive', 571), ('v17', 97264, 'W3', 898, 663, 'no', 76576, 81520, 4944, 'Online positive', 468), ('v17', 97264, 'W3', 898, 663, 'no', 76576, 81520, 4944, 'EMA positive', 703), ('v17', 97936, 'W3', 900, 650, 'no', 76576, 81520, 4944, 'Online positive', 440), ('v17', 97936, 'W3', 900, 650, 'no', 76576, 81520, 4944, 'EMA positive', 690), ('v17', 98624, 'W3', 981, 666, 'no', 76576, 81520, 4944, 'Online positive', 360), ('v17', 98624, 'W3', 981, 666, 'no', 76576, 81520, 4944, 'EMA positive', 675), ('v17', 99328, 'W3', 955, 772, 'no', 76576, 81520, 4944, 'Online positive', 335), ('v17', 99328, 'W3', 955, 772, 'no', 76576, 81520, 4944, 'EMA positive', 518), ('v17', 100000, 'W3', 963, 738, 'no', 76576, 81520, 4944, 'Online positive', 317), ('v17', 100000, 'W3', 963, 738, 'no', 76576, 81520, 4944, 'EMA positive', 542)) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "V17 only",
+      "70000 < real_step <= 100000",
+      "Online and EMA positive counts are logged row values",
+      "Invalid endpoint markers follow strict pooled trailing-five denominator logic"
+     ],
+     "metric_definitions": [
+      "Online support is positive through real_step 62128, zero on every logged VoC-Q update row from 62992 through 75568, and first canonically reappears after this full-run extinction interval at 76576.",
+      "EMA support is positive through real_step 69424, zero on every logged VoC-Q update row from 70416 through 80656, and first canonically reappears after this full-run extinction interval at 81520.",
+      "An invalid endpoint is a failure, not a zero gap or a negative gap."
+     ]
+    }
+   },
+   {
+    "id": "gradient_sql",
+    "label": "Reviewed raw VoC-Q gradient and cadence diagnostics",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes canonical raw-norm summaries, boundary counts, update counts, and real-step gap medians.",
+     "sql": "WITH materialized(version, schema_version, loss, reconstruction, statistic, statistic_order, raw_q_total_norm, nominal_clip_boundary, canonical_boundary_exceedances, canonical_rows, canonical_boundary_exceedance_rate, all_boundary_exceedances, all_rows, all_boundary_exceedance_rate, canonical_max_norm, all_max_norm, all_q_updates, all_median_real_step_gap, canonical_q_updates, canonical_median_real_step_gap) AS (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Mean', 1, 128.95252648610918, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Median', 2, 62.38666915893555, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'P95', 3, 443.18048400878894, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Maximum', 4, 886.306884765625, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Mean', 1, 181.82969428753032, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Median', 2, 131.73944091796875, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'P95', 3, 537.2278793334957, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Maximum', 4, 802.5406494140625, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Mean', 1, 696.7852480961726, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Median', 2, 428.2610778808594, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'P95', 3, 1842.8370300292963, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Maximum', 4, 2687.010986328125, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Mean', 1, 861.2543914582994, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Median', 2, 509.1683654785156, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'P95', 3, 2808.359375, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Maximum', 4, 4498.3056640625, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0)) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "Canonical norm statistics use 70000 < real_step <= 100000",
+      "All-run cadence retains all complete actor CSV rows",
+      "Boundary is 1608"
+     ],
+     "metric_definitions": [
+      "Logged actor/voc_total_norm is a pre-clipping raw total norm.",
+      "Cadence is observed row/update timing, not a controlled treatment.",
+      "P95 is the pandas linear quantile used by the frozen notebook."
+     ]
+    }
+   },
+   {
+    "id": "integrity_sql",
+    "label": "Frozen artifact and provenance hash inventory",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes exact source, data, protocol, launch, CSV, checkpoint, config, and finish hashes for all four frozen runs.",
+     "sql": "WITH materialized(version, snapshot_id, xpid, schema_version, source_manifest_sha256, data_manifest_sha256, protocol_sha256, launch_provenance_sha256, actor_csv_sha256, model_csv_sha256, actor_checkpoint_sha256, model_checkpoint_sha256, config_sha256, finish_sha256, artifact_rehash_status, qualification_attempt) AS (VALUES ('v14', 'di-voc-v14-sealed-eps25-final-eKgdrk', 'enduro-voc-v14-sealed-eps25-seed1-qual-fresh-100k', 7, '4fa507706250f349acfb6034453f1e8c70681c54e9e52718d848cd81755dbfea', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', 'f422089ec4df7479f89477a3e6e63744dc74d06d1ceab9d5ea10397b34500972', '0e9f4ad97ea5774ccc579da43118546b1c837d6e21ceaa3b9be8d7d330af5b54', '6d72052279a59983d102bed3db767b3792b115d221f155cdd10d4dc29bbe85a8', 'b38dfd254fab250394ca463c4371c573b8c37f332e5f5f0b43c6d9b5fbfc3f64', 'a86094cc3131bbe55bd5ac5995203cf8f3830ab36fbaf60e630306b0fe1d107c', '6d6c2ff3ba5335337476998eb13be6ea80e9962d5ffabc67ade3020cb362af7a', '97d6a78d78d0d49dbd3e038fa77f268c29d4b21244c98d345060505f70c40350', '5ea6592e5f57cafb908902eed9decd7535e78d4e9b9fa33c23f7bf00b16f3b4e', 'PASS', '1_of_1_no_retry'), ('v15', 'di-voc-v15-halfsq-eps25-final-CKcYfI', 'enduro-voc-v15-halfsq-eps25-seed1-qual-fresh-100k', 8, '1c2d619479a63d75f0b23c41ef293f611b3631432356067a2db425a30ec62cdf', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', 'cf5838f577ac55db2990669ebfd712c6cbbeee28e8b5388075833b69f4206b90', 'ad1e625579aad7e9c400a4a85130939400ed1e0696b8c71987ce8e3bbfda9ccd', '359eb6540a6265a2a5b8e77fa8ac01420b5f0077a3b84d67800f0308f448e341', '360e6d475d635f734e4b14ddfff7a0022ba7997131785ce2ee7a39ea28b6839b', 'ee41fa3f0916f5b726b6cd448e12989abbe01554a69c6f4eb5ab8ed434cd2c7c', '8d215ce13489735e685ed1d271ad857b69f23f0b35213447d0d90f67f96b82b8', 'edd3ce926dbb048543a1ea11ee0bca29bef2f83c88877f3ae1e4d85308e234b2', 'e2d00bf7baa7276cca91bf1c73e025991e5d1c1ddfc6236ab8cec71c845d8184', 'PASS', '1_of_1_no_retry'), ('v16', 'di-voc-v16-commonmode-eps25-final-mZ6A2C', 'enduro-voc-v16-commonmode-eps25-seed1-qual-fresh-100k', 9, 'f90b970c647b06884f1101a3b39d862eed97aec51d69013614b6b671f54112ea', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', '1814d68f667748358746c42f4578e17acbb950e9e0adac04a8d78c9352fdb84c', '1b712c604387725ccdc4aa1dbdcb016f4b4cb5c9b0effa22f150e27daf035325', '45da4532357f5f150fad15c47bf1cdbb5ec52738ff3a68678afb5dca73ed20d5', 'ef5e39aba9ad5b7c0c2b4bef34ba91bb6f3adf1bcdc940abe9915504b8b18225', 'c05a2237b495ff36fe633446e8236a93d2e07da9038f01781ac3b5026e947b7d', 'd1ce735542c5dd4a89b4e8cdc550946b5417700a956468820a69e4d80ed9ea58', '2c91aa82c4744a8f44320ec5cc95f797384c4467c17607420b1dc3a94d9fea6b', '1b5f3449f685f876a10bbad21bacad4c0cd28479d53bcb0197f18308e2cb286f', 'PASS', '1_of_1_no_retry'), ('v17', 'di-voc-v17-huber-common-eps25-final-Tmc42l', 'enduro-voc-v17-huber-common-eps25-seed1-qual-fresh-100k', 10, '87d17a63953caf41f62b92454e13ff92498c590eef9f6e156282e9e7e1d767ac', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', '9d032579808f5cc07253e654feea9f4f80fe45151701fd4864896bf486c267a1', '17aebc1ec40196fa51205eb8ea208fb96b04750941abd44c9fc2bba589232905', 'e50308619550a45e8bc722bd152722f96723f2b448885ae2e5ec65227f21d030', '2801e56a80dc8e3db20dcf0f22109a259e0a7fd6b31e4d1d2054fdd2ef75b564', '1054956ebbb8a1b75cb1d2eed54611c90d785c83ee3fc9a7d6d40e2c85430eb0', 'aca6d46ba749fd5394525918f6a6a822f0ac7f3377b7c953b511662012bf1a15', 'f5d900bd2b6d0b25a628869b3dc90424e4a8018e888e88ace81a4f88d217b971', '65f4c77efedbaaeaffe4a90cde00c8c4292942a3b5e3a5c7a39eba4b3acebff7', 'PASS', '1_of_1_no_retry')) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "One immutable snapshot and one 1_of_1_no_retry qualification per version",
+      "Hashes were re-read from exact frozen paths",
+      "No source, run, notebook, or report mutation during evidence collection"
+     ],
+     "metric_definitions": [
+      "artifact_rehash_status PASS means every listed byte hash matched the frozen notebook contract.",
+      "The V17 source manifest covers 1066 paths; the shared data manifest covers 11 paths."
+     ]
+    }
+   },
+   {
+    "id": "version_sql",
+    "label": "Exact V14-V17 2x2 qualification comparison",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes loss, reconstruction, population, train/heldout RMSE, denominator, raw-norm, cadence, and final decision fields.",
+     "sql": "WITH materialized(version, schema, design_cell, q_regression_loss, q_reconstruction, learnable_common_mode, canonical_rows, heldout_support, heldout_ema_rmse, train_ema_rmse, heldout_ema_sse, threshold_excess_sse, rmse_gate, undefined_trailing_endpoints, canonical_raw_norm_boundary_exceedances, all_q_updates, all_median_real_step_gap, hard_failures, qualification_decision) AS (VALUES ('v14', 'schema 7', 'Huber x centered-only', 'Huber beta=1', 'Centered / no common mode', 'No', 63, 7703, 0.5247954789453232, 0.5865118456123475, 2121.4855002393, 195.7355002393001, 'FAIL', 0, '0/63', 204, 448.0, 'Heldout EMA RMSE', 'FAIL'), ('v15', 'schema 8', 'Half-MSE x centered-only', 'Half-MSE', 'Centered / no common mode', 'No', 58, 8154, 0.5637126651551874, 0.48913625344503686, 2591.1126340548, 552.6126340547999, 'FAIL', 0, '0/58', 149, 784.0, 'Heldout EMA RMSE', 'FAIL'), ('v16', 'schema 9', 'Half-MSE x common mode', 'Half-MSE', 'Raw-head mean + centered residual', 'Yes', 52, 7535, 0.643399622874774, 0.5999551130525911, 3119.21176798055, 1235.4617679805501, 'FAIL', 5, '7/52', 250, 192.0, 'Heldout EMA RMSE; trailing-five denominator validity', 'FAIL'), ('v17', 'schema 10', 'Huber x common mode', 'Huber beta=1', 'Raw-head mean + centered residual', 'Yes', 36, 5748, 0.4739621233029751, 0.6696040559045617, 1291.2312621851, -145.76873781490008, 'PASS', 7, '5/36', 143, 784.0, 'Trailing-five denominator validity', 'FAIL')) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "Strict canonical population 70000 < real_step <= 100000",
+      "Unchanged heldout EMA RMSE ceiling <= 0.5",
+      "All denominator failures remain failures"
+     ],
+     "metric_definitions": [
+      "The four observed cells are separate single-seed closed-loop runs, not a randomized factorial.",
+      "Threshold-excess SSE = heldout EMA SSE - 0.25 * heldout support.",
+      "Overall qualification requires every hard gate; V17 clears RMSE but fails denominator validity."
+     ]
+    }
+   },
+   {
+    "id": "mechanism_sql",
+    "label": "Frozen V17 code and mechanism evidence",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes exact code-line, hash, algebra, state-path, and causal-limit evidence used in the mechanism audit.",
+     "sql": "WITH materialized(mechanism, frozen_observation, geometry_or_state, code_reference, code_sha256, what_it_cannot_prove) AS (VALUES ('Raw action-row head', 'Parameters, storage, and forward outputs use exact [CONTINUE, STOP] rows.', 'Raw rows are not reinterpreted as stored common/difference coordinates.', 'thinker/thinker/actor_net.py:1348-1350', 'bdfb3b46be65919e86708b08e456f5abb7cd7abfa5a1c82a117aeabc2c5ca0f0', 'The raw basis alone does not identify the source of a closed-loop sign-support collapse.'), ('Schema-10 common-mode reconstruction', 'c=(q_C+q_S)/2 is added to a policy-centered residual; common shifts survive reconstruction.', 'Selected-Q gradients generally contain both common and action-difference components.', 'thinker/thinker/learn_actor.py:819-831', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'The reconstruction does not isolate optimizer-coordinate effects from visitation or targets.'), ('Selected-action beta-1 Huber objective', 'V17 applies SmoothL1 beta=1 to selected reconstructed Q versus the detached target.', 'Per-example residual slope is bounded outside the quadratic region before batch aggregation.', 'thinker/thinker/learn_actor.py:838-869', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'Lower pooled heldout RMSE does not identify Huber as the cause in an unpaired on-policy run.'), ('Raw-gradient clipping then Adam', 'The unchanged nominal boundary is 0.5 x 201 x 16 = 1608; Adam stores rowwise raw-head moments.', 'A nonlinear rowwise denominator can mix common/difference update coordinates even when raw gradients are clipped first.', 'thinker/thinker/learn_actor.py:2964-2970,4054-4089', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'Logged raw total norm is not a post-clip parameter delta and does not identify causal clipping pressure.'), ('EMA and exact projection', 'EMA updates raw Q rows; the gate is projected exactly from the EMA raw-row difference.', 'Online support is positive through 62128, zero on logged rows 62992-75568, and first canonically reappears after that full-run extinction interval at 76576; EMA is positive through 69424, zero on logged rows 70416-80656, and first canonically reappears at 81520.', 'thinker/thinker/learn_actor.py:119-310,2702-2808', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'Observed lag cannot predict the counterfactual trajectory under tau=1.'), ('Target and detached feature path', 'Q targets and detached features preserve the audited actor/value interfaces and state transaction.', 'V17 train EMA RMSE is 0.6696040559 while heldout EMA RMSE is 0.4739621233.', 'thinker/thinker/actor_net.py:2176-2184; thinker/thinker/learn_actor.py:4327-4335,5028-5094', 'actor_net bdfb3b46...; learn_actor 7e26e652...', 'Aggregate CSV moments do not expose event-level target/value distributions or paired counterfactual residuals.'), ('Behavior-policy feedback', 'Projected EMA Q differences feed the epsilon-greedy VoC behavior decision.', 'Changed Q signs can change later state/action composition, which changes subsequent training examples.', 'thinker/thinker/actor_net.py:221-364', 'bdfb3b46be65919e86708b08e456f5abb7cd7abfa5a1c82a117aeabc2c5ca0f0', 'CSV/checkpoint snapshots cannot separate policy feedback from objective, optimizer, or cadence.'), ('Persisted-surface invariants', 'V17 binds exact229 complete surface, exact209 projection, schema10, seal1, and no persisted derived identities.', 'Complete SHA ec3c4455... and projection SHA bd386ad1... were independently audited.', 'frozen V17 create_setting and checkpoint-contract audit', 'complete ec3c445584c77a3ed82e2855bba7addbb000124da9231e90f311e9a014e85beb; projection bd386ad1c78f030409562dea5c34d8866cc128cf99b7f39938f6a090f5987407', 'Surface integrity establishes identity and mechanics, not numerical qualification or causality.')) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "Frozen V17 source manifest only",
+      "Read-only code inspection",
+      "No implementation, launch, evaluation, retry, or counterfactual execution"
+     ],
+     "metric_definitions": [
+      "Common coordinate is the equal-row direction; difference coordinate is the antisymmetric row direction.",
+      "Mechanism observations are implementation facts or frozen associations, never treatment-effect estimates."
+     ]
+    }
+   },
+   {
+    "id": "checkpoint_sql",
+    "label": "Frozen V16/V17 checkpoint coordinate diagnostics",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes bitwise step-480 parity, terminal coordinate norms, frozen-denominator leakage ratios, and exact projection evidence.",
+     "sql": "WITH materialized(diagnostic, key_path_or_formula, common_value, difference_value, scalar_or_status, checkpoint_sha256, interpretation) AS (VALUES ('Step-480 V16/V17 parity', 'actor_net_state_dict.voc_head.{weight,bias}; voc_ema_gate_head_state_dict.{weight,bias}; actor_net_state_dict.voc_gate_head.{weight,bias}; voc_optimizer_state_dict.state.{0,1}.{step,exp_avg,exp_avg_sq}', 'bitwise equal', 'bitwise equal', 'true', 'v16 3a9f8f9199726902bf789afe7910f61c89f437cb4099476bcb709ecf6a06873c; v17 d93d16150136f67e8a9d200aefb31b7c2ecbb8a58ed01af4e092c02ce4669b66', 'V16 and V17 begin from the same audited Q, EMA, gate, and Q-Adam tensors at step 480.'), ('V17 terminal online weight norm', 'actor_net_state_dict.voc_head.weight; c=(row0+row1)/sqrt(2), d=(row0-row1)/sqrt(2)', '0.09197670854694069', '0.04772993647417535', 'nonzero in both coordinates', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'The raw head did not collapse to an all-zero tensor or lose the difference coordinate.'), ('V17 terminal EMA weight norm', 'voc_ema_gate_head_state_dict.weight; same orthonormal transform', '0.08804985021047274', '0.04523736449366637', 'nonzero in both coordinates', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'EMA retains both coordinates despite the earlier zero-positive support window.'), ('V17 online minus EMA norm', 'actor_net_state_dict.voc_head.weight - voc_ema_gate_head_state_dict.weight', '0.016672458740732386', '0.005328437961923289', 'online differs from EMA', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Frozen terminal tensors retain a measurable online/EMA separation.'), ('V17 Adam first-moment norm', 'voc_optimizer_state_dict.state.0.exp_avg; same orthonormal transform', '118.41179575543109', '61.27793259647075', 'Adam step 143', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Both common and difference components are present in the frozen raw-row first moment.'), ('Frozen denominator common-to-difference leakage', 'Apply frozen rowwise sqrt(vhat)+epsilon denominator to a common-only first moment', 'intended coordinate', 'leakage coordinate', '0.312531749799473', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Diagnostic ratio under the frozen denominator; not an actual next step or treatment effect.'), ('Frozen denominator difference-to-common leakage', 'Apply frozen rowwise sqrt(vhat)+epsilon denominator to a difference-only first moment', 'leakage coordinate', 'intended coordinate', '0.3289216882682968', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Diagnostic ratio under the frozen denominator; not a counterfactual optimizer run.'), ('Terminal projection identity', 'voc_gate_head = 20 x (EMA CONTINUE row - EMA STOP row), weight and bias', 'not applicable', 'exact raw-row difference', 'bitwise true', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'The gate projection is mechanically exact at the frozen terminal checkpoint.')) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "Four named checkpoints SHA-verified; V16 step480, V17 step480, and V17 terminal deserialized on CPU",
+      "No tensor mutation, optimizer step, environment action, or counterfactual training",
+      "V17 terminal step 100000"
+     ],
+     "metric_definitions": [
+      "c=(row0+row1)/sqrt(2), d=(row0-row1)/sqrt(2).",
+      "Leakage ratios apply a frozen rowwise Adam denominator to isolated first moments and are not actual next updates.",
+      "Projection identity is checked bitwise on terminal weight and bias."
+     ]
+    }
+   },
+   {
+    "id": "candidate_sql",
+    "label": "Ranked V18 semantic-delta candidates",
+    "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+    "query": {
+     "engine": "DuckDB",
+     "language": "sql",
+     "executed_at": "2026-08-28T16:03:34Z",
+     "description": "Materializes the consensus ranking, exact preservation contract, falsifiers, and deliberate limits for three future hypotheses.",
+     "sql": "WITH materialized(candidate_rank, candidate, semantic_delta, preserved_contract, identity, why_ranked_here, falsifier_or_limit) AS (VALUES (1, 'Schema-11 orthonormal common/difference Adam adapter', 'After unchanged raw-gradient clipping, map g_C/g_S to g_m=(g_C+g_S)/sqrt(2) and g_d=(g_C-g_S)/sqrt(2), maintain Adam moments in [common,difference] rows, then inverse-map update deltas to raw C/S parameters.', 'Raw parameters, storage, forward outputs [CONTINUE, STOP], Huber/common reconstruction, EMA, projection, tensor shapes, exact229/exact209, and persisted keys remain unchanged.', 'Derived-only voc_q_optimizer_coordinates=\"orthonormal_common_difference_adam\"; no new persisted key.', 'Directly isolates the audited nonlinear Adam coordinate coupling while preserving the represented Q function and raw-row wire surface.', 'The unchanged hard gates still fail; frozen leakage ratios are diagnostic rather than causal or predictive.'), (2, 'Tau=1 EMA sensitivity', 'Change only the EMA lag semantic so the projected behavior gate tracks the current raw Q head.', 'Keep schema-10 raw head, Huber/common objective, optimizer, projection formula, shapes, persisted keys, and acceptance gates.', 'Use the existing derived setting surface; add no persisted identity.', 'Online positive support first canonically reappeared after its full-run extinction interval 4944 real steps before EMA positive support first canonically reappeared after its own interval; a no-lag target cannot repair the two earliest frozen invalid endpoints.', 'A future fresh trajectory still loses denominator validity or other unchanged gates; the observed lag is not a counterfactual.'), (3, 'Deterministic VoC update cadence per real-step budget', 'Operationally broader cadence intervention; exact mechanism and value are intentionally unspecified pending a separate contract.', 'Do not map this proposal to actor_unroll_len or bundle it with objective, optimizer-coordinate, EMA, or gate changes.', 'Would require an explicit prospective identity contract; none is proposed here.', 'V17 logged 143 updates with median all-run gap 784 versus V16 250/192, a material but policy-coupled confound.', 'No existing knob or value is inferred from the frozen evidence; cadence association has unknown causal direction.')) SELECT * FROM materialized",
+     "tables_used": [],
+     "filters": [
+      "Recommendation only",
+      "No causal/pass prediction",
+      "No implementation, launch, retry, primary, or fixed evaluation authorization"
+     ],
+     "metric_definitions": [
+      "Rank 1 keeps raw [CONTINUE, STOP] parameter/storage/forward semantics and changes only optimizer coordinates after clipping.",
+      "Rank 2 changes EMA lag only.",
+      "Rank 3 is deterministic VoC update cadence per real-step budget; its exact mechanism and value are intentionally unspecified."
+     ]
+    }
+   }
+  ],
+  "blocks": [
+   {
+    "id": "title",
+    "type": "markdown",
+    "body": "# Enduro VoC V14-V17 Qualification RCA: RMSE Recovery, Sign-Support Failure"
+   },
+   {
+    "id": "technical_summary",
+    "type": "markdown",
+    "sourceId": "headline_sql",
+    "body": "## Technical summary\n\n- **V17 closes the previously unobserved Huber-plus-common cell and clears the pooled RMSE gate, but qualification still fails.** Heldout EMA RMSE is **0.4739621233** (N=5,748), versus **0.6433996229** in V16 and the unchanged **0.5** ceiling. Seven of 32 eligible trailing-five endpoints have zero positive-sign support, so the one permitted V17 attempt is an irreversible **FAIL** with no retry, primary, or fixed evaluation. Retained V16 context is **five of 48** undefined endpoints at **95,344, 96,368, 97,392, 98,416, and 99,408**, with W3 sign support **1 positive / 11,722 negative**.\n- **The failure includes early positive-support extinction followed by reappearance, not evidence of an all-zero terminal head.** Online support is positive through **62,128**, zero on every logged VoC-Q update row from **62,992–75,568**, and first canonically reappears after that full-run extinction interval at **76,576**. EMA support is positive through **69,424**, zero on every logged row from **70,416–80,656**, and first canonically reappears after that full-run extinction interval at **81,520**, a **4,944-step** reappearance lag. W2/W3 retain positive support, while frozen terminal online/EMA tensors retain nonzero common and difference norms.\n- **The strongest immediate V18 semantic delta is schema-11 optimizer-coordinate separation.** Keep raw head parameters, storage, forward outputs, EMA, and projection in exact [CONTINUE, STOP] rows. After unchanged raw-gradient clipping, map gradients to orthonormal common/difference coordinates, maintain Adam moments there, and inverse-map updates to raw rows. This is a falsifiable design recommendation, not a causal attribution or pass prediction."
+   },
+   {
+    "id": "headline_metrics",
+    "type": "metric-strip",
+    "cardIds": [
+     "v17_rmse_card",
+     "v17_denominator_card",
+     "v17_reappearance_card",
+     "v17_gradient_card"
+    ]
+   },
+   {
+    "id": "key_findings_window",
+    "type": "markdown",
+    "sourceId": "window_sql",
+    "body": "## Key findings with visual evidence: the 2x2 closes descriptively\n\n**The four observed cells do not form a causal factorial, but the comparison is decision-relevant.** V14/V15/V16/V17 heldout EMA RMSE is **0.524795/0.563713/0.643400/0.473962** for Huber-centered, half-MSE-centered, half-MSE-common, and Huber-common respectively. V17 improves absolute RMSE by **0.1694375** versus V16, yet W1 is slightly above the ceiling (**0.504490**) and W3 rises to **0.545588** after W2 reaches **0.332885**. The Full bar cannot override the separate denominator gate."
+   },
+   {
+    "id": "window_chart_block",
+    "type": "chart",
+    "chartId": "window_rmse_chart"
+   },
+   {
+    "id": "key_findings_sign",
+    "type": "markdown",
+    "sourceId": "headline_sql",
+    "body": "## Key findings with visual evidence: online support reappears before EMA support\n\n**V17 W1 contains 1,454 online positive observations but zero EMA positive observations.** The EMA side is 0 positive / 11,718 negative through W1. Online support is positive through **62,128**, zero on every logged VoC-Q update row from **62,992–75,568**, and first canonically reappears after that full-run extinction interval at **76,576**. EMA support is positive through **69,424**, zero on every logged row from **70,416–80,656**, and first canonically reappears after that full-run extinction interval at **81,520**. The seven invalid trailing-five endpoints are **74,544, 75,568, 76,576, 77,616, 78,656, 79,680, and 80,656**. Because the two earliest endpoints precede online reappearance, tau=1 cannot retroactively make those frozen endpoints denominator-valid."
+   },
+   {
+    "id": "sign_chart_block",
+    "type": "chart",
+    "chartId": "sign_reappearance_chart"
+   },
+   {
+    "id": "key_findings_optimizer",
+    "type": "markdown",
+    "sourceId": "gradient_sql",
+    "body": "## Key findings with visual evidence: raw-gradient pressure remains high and cadence differs\n\n**V17 canonical raw VoC-Q total-norm median/p95/maximum is 509.17/2,808.36/4,498.31.** Five of 36 canonical rows and 14 of 143 all-run rows exceed the nominal **1,608** boundary. V17 has **143** logged Q updates with median all-run real-step gap **784**, versus V16 **250/192**. These are pre-clipping norms and policy-coupled cadence observations; neither is a parameter-step norm nor an isolated treatment."
+   },
+   {
+    "id": "gradient_chart_block",
+    "type": "chart",
+    "chartId": "gradient_norm_chart"
+   },
+   {
+    "id": "scope_data_definitions",
+    "type": "markdown",
+    "sourceId": "integrity_sql",
+    "body": "## Scope, data, and decision definitions\n\nThe evidence population is one frozen, fresh, seed-1 100k qualification per version. Canonical rows satisfy **70,000 < real_step <= 100,000**; terminal overshoots are excluded. Heldout EMA RMSE pools row SSE by heldout support. A trailing-five endpoint is defined only when independently pooled positive-sign and negative-sign supports are both nonzero. Undefined endpoints are failures, never zeros, nonnegative gaps, omissions, or repair candidates. Every listed CSV, checkpoint, config, finish, protocol, launch, source-manifest, and data-manifest hash was re-read from the immutable snapshots."
+   },
+   {
+    "id": "integrity_table_block",
+    "type": "table",
+    "tableId": "integrity_table"
+   },
+   {
+    "id": "methodology_2x2",
+    "type": "markdown",
+    "sourceId": "version_sql",
+    "body": "## Methodology: frozen 2x2 and strict qualification arithmetic\n\nThe observed design crosses beta-1 Huber versus half-MSE with centered-only versus learnable common-mode reconstruction. It is a **descriptive 2x2**: each cell is a separately generated single-seed trajectory with different states, actions, supports, update timing, and optimizer history. V14 and V15 fail heldout RMSE; V16 fails RMSE and denominator validity; V17 clears RMSE but fails denominator validity. No mechanics pass, favorable window, or lower aggregate error substitutes for the conjunction of all hard gates."
+   },
+   {
+    "id": "version_table_block",
+    "type": "table",
+    "tableId": "version_comparison_table"
+   },
+   {
+    "id": "mechanism",
+    "type": "markdown",
+    "sourceId": "mechanism_sql",
+    "body": "## Mechanism: selected-Q geometry and closed-loop state path\n\nFor raw action rows C and S, schema10 reconstructs a learnable common coordinate plus a policy-centered residual. The selected-action Huber gradient therefore generally has both equal-row and antisymmetric components. Existing global clipping scales the raw gradient jointly, then ordinary rowwise Adam applies coordinate-dependent nonlinear denominators; orthonormal common/difference directions are not guaranteed to remain separated. EMA operates on raw rows, exact projection uses the EMA row difference, and that projected signal affects epsilon-greedy behavior, feeding subsequent state/action composition back into training. This algebra motivates a coordinate-isolation test but does not identify it as the historical cause."
+   },
+   {
+    "id": "mechanism_table_block",
+    "type": "table",
+    "tableId": "mechanism_table"
+   },
+   {
+    "id": "checkpoint_evidence",
+    "type": "markdown",
+    "sourceId": "checkpoint_sql",
+    "body": "## Frozen checkpoint evidence\n\nHash-bound step-480 checkpoints make V16 and V17 bitwise equal for online Q, EMA Q, projected gate, and both Q-Adam states. At the V17 terminal checkpoint, online, EMA, online-minus-EMA, and Adam first-moment tensors all retain nonzero common/difference structure. Applying the frozen raw-row Adam denominators to isolated coordinate moments produces **31.2532% common-to-difference** and **32.8922% difference-to-common** leakage diagnostics. Those ratios are static algebra on frozen tensors, not actual optimizer steps, counterfactual trajectories, or causal effects."
+   },
+   {
+    "id": "checkpoint_table_block",
+    "type": "table",
+    "tableId": "checkpoint_table"
+   },
+   {
+    "id": "limitations_robustness",
+    "type": "markdown",
+    "body": "## Limitations and robustness\n\n- **No causal identification.** There is one unpaired on-policy trajectory per version, no randomized factor assignment, no replicated seeds, no paired state sequence, and no counterfactual action residuals.\n- **CSV limits.** Aggregate row telemetry exposes supports, moments, norms, timing, and gates, but not event-level target/value distributions, exact post-clip parameter deltas, or how an alternative optimizer would have changed visitation.\n- **Checkpoint limits.** Frozen tensors establish parity, non-collapse counterevidence, projection integrity, and coordinate algebra at observed states. They cannot reveal the path under tau=1, orthonormal Adam, or a changed cadence.\n- **Definition versus model collapse.** The seven failures are strictly denominator/composition failures: pooled trailing windows contain no EMA-positive samples. Later positive-support reappearance and nonzero terminal tensors argue against permanent all-zero collapse, but do not rule out an earlier representational or behavioral collapse.\n- **No rescue interpretation.** V17 is failed with no retry, primary, fixed evaluation, resume, threshold change, endpoint repair, or post-hoc reweighting."
+   },
+   {
+    "id": "ranked_next_steps",
+    "type": "markdown",
+    "sourceId": "candidate_sql",
+    "body": "## Ranked next steps\n\n1. **Schema-11 orthonormal common/difference Adam adapter.** Preserve raw [CONTINUE, STOP] parameters, storage, and forward outputs. After existing raw-gradient clipping, form g_m=(g_C+g_S)/sqrt(2) and g_d=(g_C-g_S)/sqrt(2), maintain Adam moment rows as [common, difference], and inverse-map update deltas to raw C/S parameters. EMA/projection remain raw; Huber/common/tau stay unchanged. Use only derived identity voc_q_optimizer_coordinates=\"orthonormal_common_difference_adam\"; add no persisted key.\n2. **Tau=1 sensitivity.** Hold the optimizer and schema10 objective fixed, changing EMA lag only. The observed 4,944-step positive-reappearance lag motivates the test but does not show that it would make a fresh run pass.\n3. **Deterministic VoC update cadence per real-step budget.** Treat this as an operationally broader alternative whose exact mechanism and value are intentionally unspecified. Do not map it to actor_unroll_len or infer a setting from the V16/V17 cadence confound.\n\nEvery option requires a new prospective contract and unchanged hard-gate interpretation. The ranking is not implementation, launch authorization, causal attribution, or a pass forecast."
+   },
+   {
+    "id": "candidate_table_block",
+    "type": "table",
+    "tableId": "candidate_table"
+   },
+   {
+    "id": "further_questions",
+    "type": "markdown",
+    "body": "## Further questions\n\n- Under schema11, do common/difference moment histories remain separated after raw-gradient clipping while raw-row forward, EMA, projection, checkpoint tensor shapes, exact229/exact209, and persisted-key identities remain unchanged?\n- Does sign support remain denominator-valid throughout W1 without shifting error into W2/W3 or changing the strict support population?\n- Which event-level target, value, selected-action residual, and post-clip update diagnostics are required to distinguish target-distribution shift, behavior-policy feedback, and optimizer geometry?\n- If tau=1 is tested independently, does online-to-EMA lag shrink without creating a different hard-gate failure?\n- What prospective operational contract could define deterministic updates per real-step budget without bundling an objective, EMA, or actor-unroll change?"
+   }
+  ],
+  "cards": [
+   {
+    "id": "v17_rmse_card",
+    "description": "V17 support-weighted heldout EMA selected-action TD RMSE; lower is better.",
+    "dataset": "headline",
+    "sourceId": "headline_sql",
+    "metrics": [
+     {
+      "label": "V17 heldout EMA RMSE",
+      "field": "v17_heldout_ema_rmse",
+      "format": "number"
+     },
+     {
+      "label": "Ceiling",
+      "field": "rmse_ceiling",
+      "format": "number"
+     },
+     {
+      "label": "Absolute improvement vs V16",
+      "field": "v17_absolute_rmse_improvement_vs_v16",
+      "format": "number",
+      "signed": true
+     }
+    ]
+   },
+   {
+    "id": "v17_denominator_card",
+    "description": "Strict trailing-five denominator eligibility and V17 invalid endpoints.",
+    "dataset": "headline",
+    "sourceId": "headline_sql",
+    "metrics": [
+     {
+      "label": "Undefined endpoints",
+      "field": "v17_undefined_trailing5_endpoints",
+      "format": "number"
+     },
+     {
+      "label": "Eligible endpoints",
+      "field": "v17_total_trailing5_endpoints",
+      "format": "number"
+     },
+     {
+      "label": "Defined endpoints",
+      "field": "v17_defined_trailing5_endpoints",
+      "format": "number"
+     }
+    ]
+   },
+   {
+    "id": "v17_reappearance_card",
+    "description": "Real-step lag between the first canonical online and EMA positive-support reappearances after their respective full-run extinction intervals.",
+    "dataset": "headline",
+    "sourceId": "headline_sql",
+    "metrics": [
+     {
+      "label": "Positive reappearance lag",
+      "field": "v17_positive_reappearance_lag_real_steps",
+      "format": "number"
+     },
+     {
+      "label": "Online reappearance step",
+      "field": "v17_online_positive_reappearance_step_after_full_run_extinction",
+      "format": "number"
+     },
+     {
+      "label": "EMA reappearance step",
+      "field": "v17_ema_positive_reappearance_step_after_full_run_extinction",
+      "format": "number"
+     }
+    ]
+   },
+   {
+    "id": "v17_gradient_card",
+    "description": "V17 canonical pre-clipping raw VoC-Q norm distribution versus the unchanged nominal boundary.",
+    "dataset": "headline",
+    "sourceId": "headline_sql",
+    "metrics": [
+     {
+      "label": "Canonical raw norm p95",
+      "field": "v17_canonical_raw_norm_p95",
+      "format": "number"
+     },
+     {
+      "label": "Canonical raw norm median",
+      "field": "v17_canonical_raw_norm_median",
+      "format": "number"
+     },
+     {
+      "label": "Nominal boundary",
+      "field": "v17_nominal_clip_boundary",
+      "format": "number"
+     }
+    ]
+   }
+  ],
+  "charts": [
+   {
+    "id": "window_rmse_chart",
+    "title": "Heldout EMA TD RMSE by qualification window and Full population",
+    "subtitle": "Four separately generated 2x2 cells; W1/W2/W3 and Full use support-weighted selected-action TD error.",
+    "intent": "comparison",
+    "question": "How do the four observed loss/reconstruction cells differ across fixed windows and the Full gate?",
+    "rationale": "Grouped bars compare discrete preregistered windows and the pooled result without implying paired trajectories.",
+    "type": "bar",
+    "dataset": "window_rmse",
+    "sourceId": "window_sql",
+    "encodings": {
+     "x": {
+      "field": "window_label",
+      "type": "ordinal",
+      "label": "Qualification window"
+     },
+     "y": {
+      "field": "ema_rmse",
+      "type": "quantitative",
+      "label": "Heldout EMA TD RMSE"
+     },
+     "color": {
+      "field": "version",
+      "type": "nominal",
+      "label": "Version"
+     },
+     "tooltip": [
+      {
+       "field": "design_cell",
+       "type": "nominal",
+       "label": "Design cell"
+      },
+      {
+       "field": "heldout_support",
+       "type": "quantitative",
+       "label": "Heldout support"
+      },
+      {
+       "field": "canonical_rows",
+       "type": "quantitative",
+       "label": "Canonical rows"
+      },
+      {
+       "field": "support_share",
+       "type": "quantitative",
+       "format": "percent",
+       "label": "Share of version support"
+      },
+      {
+       "field": "ema_sse",
+       "type": "quantitative",
+       "label": "Heldout EMA SSE"
+      },
+      {
+       "field": "online_rmse",
+       "type": "quantitative",
+       "label": "Heldout online RMSE"
+      },
+      {
+       "field": "loss",
+       "type": "nominal",
+       "label": "Q loss"
+      },
+      {
+       "field": "reconstruction",
+       "type": "nominal",
+       "label": "Reconstruction"
+      }
+     ]
+    },
+    "yAxisTitle": "RMSE (raw TD units)",
+    "valueFormat": "number",
+    "referenceLines": [
+     {
+      "axis": "y",
+      "value": 0.5,
+      "label": "Qualification ceiling",
+      "color": "neutral",
+      "lineStyle": "dashed"
+     }
+    ],
+    "palette": {
+     "kind": "categorical",
+     "name": "version-comparison"
+    },
+    "legend": {
+     "position": "bottom",
+     "interactive": true,
+     "title": "Version"
+    },
+    "labels": {
+     "values": "all"
+    },
+    "layout": "full"
+   },
+   {
+    "id": "sign_reappearance_chart",
+    "title": "V17 canonical online and EMA positive support around full-run extinction and reappearance",
+    "subtitle": "Every canonical actor row; invalid trailing-five endpoints are plotted at zero and remain hard failures.",
+    "intent": "trend",
+    "question": "How did positive support evolve in the canonical population around the first canonical reappearance after each full-run extinction interval, relative to invalid endpoints?",
+    "rationale": "A multi-series line preserves the full 36-row ordered canonical trajectory; invalid endpoints are a distinct labeled series, while source definitions retain the preceding full-run extinction intervals.",
+    "type": "line",
+    "dataset": "sign_reappearance",
+    "sourceId": "sign_sql",
+    "encodings": {
+     "x": {
+      "field": "real_step",
+      "type": "quantitative",
+      "label": "Real step"
+     },
+     "y": {
+      "field": "support_count",
+      "type": "quantitative",
+      "label": "Per-row positive support"
+     },
+     "color": {
+      "field": "support_series",
+      "type": "nominal",
+      "label": "Observed series"
+     },
+     "tooltip": [
+      {
+       "field": "window",
+       "type": "nominal",
+       "label": "Window"
+      },
+      {
+       "field": "online_negative",
+       "type": "quantitative",
+       "label": "Online negative"
+      },
+      {
+       "field": "ema_negative",
+       "type": "quantitative",
+       "label": "EMA negative"
+      },
+      {
+       "field": "invalid_trailing5_endpoint",
+       "type": "nominal",
+       "label": "Invalid trailing-5 endpoint"
+      },
+      {
+       "field": "positive_reappearance_lag_real_steps",
+       "type": "quantitative",
+       "label": "Positive reappearance lag"
+      }
+     ]
+    },
+    "yAxisTitle": "Per-row positive support",
+    "valueFormat": "number",
+    "referenceLines": [
+     {
+      "axis": "x",
+      "value": 76576,
+      "label": "Online reappears after extinction",
+      "color": "neutral",
+      "lineStyle": "dashed"
+     },
+     {
+      "axis": "x",
+      "value": 81520,
+      "label": "EMA reappears after extinction",
+      "color": "neutral",
+      "lineStyle": "dashed"
+     }
+    ],
+    "palette": {
+     "kind": "categorical",
+     "name": "version-comparison"
+    },
+    "legend": {
+     "position": "bottom",
+     "interactive": true,
+     "title": "Series"
+    },
+    "layout": "full"
+   },
+   {
+    "id": "gradient_norm_chart",
+    "title": "Canonical raw VoC-Q gradient summaries with cadence context",
+    "subtitle": "Pre-clipping norms for 70k < real_step <= 100k; tooltips retain all-run and canonical update cadence.",
+    "intent": "comparison",
+    "question": "How do raw Q-gradient scale and observed update cadence differ across V14-V17?",
+    "rationale": "Grouped bars compare same-unit distribution summaries; cadence remains tooltip context because it has different units.",
+    "type": "bar",
+    "dataset": "gradient_norms",
+    "sourceId": "gradient_sql",
+    "encodings": {
+     "x": {
+      "field": "statistic",
+      "type": "ordinal",
+      "label": "Distribution statistic"
+     },
+     "y": {
+      "field": "raw_q_total_norm",
+      "type": "quantitative",
+      "label": "Raw VoC-Q total gradient norm"
+     },
+     "color": {
+      "field": "version",
+      "type": "nominal",
+      "label": "Version"
+     },
+     "tooltip": [
+      {
+       "field": "canonical_boundary_exceedances",
+       "type": "quantitative",
+       "label": "Canonical > 1,608"
+      },
+      {
+       "field": "canonical_rows",
+       "type": "quantitative",
+       "label": "Canonical updates"
+      },
+      {
+       "field": "all_boundary_exceedances",
+       "type": "quantitative",
+       "label": "All-run > 1,608"
+      },
+      {
+       "field": "all_q_updates",
+       "type": "quantitative",
+       "label": "All-run updates"
+      },
+      {
+       "field": "all_median_real_step_gap",
+       "type": "quantitative",
+       "label": "All-run median step gap"
+      },
+      {
+       "field": "canonical_median_real_step_gap",
+       "type": "quantitative",
+       "label": "Canonical median step gap"
+      },
+      {
+       "field": "loss",
+       "type": "nominal",
+       "label": "Q loss"
+      },
+      {
+       "field": "reconstruction",
+       "type": "nominal",
+       "label": "Reconstruction"
+      }
+     ]
+    },
+    "yAxisTitle": "Raw total gradient norm",
+    "valueFormat": "number",
+    "referenceLines": [
+     {
+      "axis": "y",
+      "value": 1608.0,
+      "label": "Nominal clipping boundary",
+      "color": "neutral",
+      "lineStyle": "dashed"
+     }
+    ],
+    "palette": {
+     "kind": "categorical",
+     "name": "version-comparison"
+    },
+    "legend": {
+     "position": "bottom",
+     "interactive": true,
+     "title": "Version"
+    },
+    "labels": {
+     "values": "all"
+    },
+    "layout": "full"
+   }
+  ],
+  "tables": [
+   {
+    "id": "integrity_table",
+    "title": "Frozen V14-V17 artifact integrity inventory",
+    "subtitle": "Exact SHA-256 bindings; full rich rows include every CSV, checkpoint, config, finish, protocol, source, data, and launch hash.",
+    "dataset": "integrity",
+    "sourceId": "integrity_sql",
+    "defaultSort": {
+     "field": "version",
+     "direction": "asc"
+    },
+    "density": "compact",
+    "columns": [
+     {
+      "field": "version",
+      "label": "Version",
+      "type": "text"
+     },
+     {
+      "field": "snapshot_id",
+      "label": "Snapshot",
+      "type": "text"
+     },
+     {
+      "field": "schema_version",
+      "label": "Schema",
+      "type": "number"
+     },
+     {
+      "field": "actor_csv_sha256",
+      "label": "Actor CSV SHA-256",
+      "type": "text"
+     },
+     {
+      "field": "actor_checkpoint_sha256",
+      "label": "Actor checkpoint SHA-256",
+      "type": "text"
+     },
+     {
+      "field": "source_manifest_sha256",
+      "label": "Source manifest SHA-256",
+      "type": "text"
+     },
+     {
+      "field": "protocol_sha256",
+      "label": "Protocol SHA-256",
+      "type": "text"
+     },
+     {
+      "field": "artifact_rehash_status",
+      "label": "Rehash",
+      "type": "text"
+     },
+     {
+      "field": "qualification_attempt",
+      "label": "Attempt",
+      "type": "text"
+     }
+    ]
+   },
+   {
+    "id": "version_comparison_table",
+    "title": "Exact V14-V17 qualification and 2x2 comparison",
+    "subtitle": "Frozen seed-1 100k runs; strict 70k < real_step <= 100k population; terminal overshoots excluded.",
+    "dataset": "version_comparison",
+    "sourceId": "version_sql",
+    "defaultSort": {
+     "field": "version",
+     "direction": "asc"
+    },
+    "density": "compact",
+    "columns": [
+     {
+      "field": "version",
+      "label": "Version",
+      "type": "text"
+     },
+     {
+      "field": "schema",
+      "label": "Schema",
+      "type": "text"
+     },
+     {
+      "field": "design_cell",
+      "label": "Observed 2x2 cell",
+      "type": "text"
+     },
+     {
+      "field": "canonical_rows",
+      "label": "Rows",
+      "type": "number"
+     },
+     {
+      "field": "heldout_support",
+      "label": "Heldout N",
+      "type": "number"
+     },
+     {
+      "field": "heldout_ema_rmse",
+      "label": "Heldout EMA RMSE",
+      "type": "number"
+     },
+     {
+      "field": "train_ema_rmse",
+      "label": "Train EMA RMSE",
+      "type": "number"
+     },
+     {
+      "field": "rmse_gate",
+      "label": "RMSE gate",
+      "type": "text"
+     },
+     {
+      "field": "undefined_trailing_endpoints",
+      "label": "Undefined endpoints",
+      "type": "number"
+     },
+     {
+      "field": "canonical_raw_norm_boundary_exceedances",
+      "label": "Raw norm > 1,608",
+      "type": "text"
+     },
+     {
+      "field": "all_q_updates",
+      "label": "All updates",
+      "type": "number"
+     },
+     {
+      "field": "all_median_real_step_gap",
+      "label": "Median gap",
+      "type": "number"
+     },
+     {
+      "field": "qualification_decision",
+      "label": "Decision",
+      "type": "text"
+     }
+    ]
+   },
+   {
+    "id": "mechanism_table",
+    "title": "Code and state-mechanism evidence",
+    "subtitle": "Exact implementation facts are separated from what the frozen evidence cannot identify.",
+    "dataset": "mechanism_evidence",
+    "sourceId": "mechanism_sql",
+    "defaultSort": {
+     "field": "mechanism",
+     "direction": "asc"
+    },
+    "density": "compact",
+    "columns": [
+     {
+      "field": "mechanism",
+      "label": "Mechanism",
+      "type": "text"
+     },
+     {
+      "field": "frozen_observation",
+      "label": "Frozen observation",
+      "type": "text"
+     },
+     {
+      "field": "geometry_or_state",
+      "label": "Geometry / state implication",
+      "type": "text"
+     },
+     {
+      "field": "code_reference",
+      "label": "Exact code reference",
+      "type": "text"
+     },
+     {
+      "field": "code_sha256",
+      "label": "Code SHA-256",
+      "type": "text"
+     },
+     {
+      "field": "what_it_cannot_prove",
+      "label": "Cannot prove",
+      "type": "text"
+     }
+    ]
+   },
+   {
+    "id": "checkpoint_table",
+    "title": "Frozen coordinate/checkpoint diagnostics",
+    "subtitle": "Read-only CPU tensor inspection; values are observations or static algebra, never counterfactual updates.",
+    "dataset": "checkpoint_diagnostics",
+    "sourceId": "checkpoint_sql",
+    "defaultSort": {
+     "field": "diagnostic",
+     "direction": "asc"
+    },
+    "density": "compact",
+    "columns": [
+     {
+      "field": "diagnostic",
+      "label": "Diagnostic",
+      "type": "text"
+     },
+     {
+      "field": "key_path_or_formula",
+      "label": "Key path / formula",
+      "type": "text"
+     },
+     {
+      "field": "common_value",
+      "label": "Common",
+      "type": "text"
+     },
+     {
+      "field": "difference_value",
+      "label": "Difference",
+      "type": "text"
+     },
+     {
+      "field": "scalar_or_status",
+      "label": "Scalar / status",
+      "type": "text"
+     },
+     {
+      "field": "checkpoint_sha256",
+      "label": "Checkpoint SHA-256",
+      "type": "text"
+     },
+     {
+      "field": "interpretation",
+      "label": "Bounded interpretation",
+      "type": "text"
+     }
+    ]
+   },
+   {
+    "id": "candidate_table",
+    "title": "Ranked V18 semantic-delta candidates",
+    "subtitle": "Falsifiable future hypotheses only; no implementation, launch, retry, causal attribution, or pass forecast.",
+    "dataset": "candidates",
+    "sourceId": "candidate_sql",
+    "defaultSort": {
+     "field": "candidate_rank",
+     "direction": "asc"
+    },
+    "density": "compact",
+    "columns": [
+     {
+      "field": "candidate_rank",
+      "label": "Rank",
+      "type": "number"
+     },
+     {
+      "field": "candidate",
+      "label": "Candidate",
+      "type": "text"
+     },
+     {
+      "field": "semantic_delta",
+      "label": "Semantic delta",
+      "type": "text"
+     },
+     {
+      "field": "preserved_contract",
+      "label": "Preserved contract",
+      "type": "text"
+     },
+     {
+      "field": "identity",
+      "label": "Identity",
+      "type": "text"
+     },
+     {
+      "field": "why_ranked_here",
+      "label": "Why ranked here",
+      "type": "text"
+     },
+     {
+      "field": "falsifier_or_limit",
+      "label": "Falsifier / limit",
+      "type": "text"
+     }
+    ]
+   }
+  ]
+ },
+ "snapshot": {
+  "version": 1,
+  "generatedAt": "2026-08-28T16:03:34Z",
+  "status": "ready",
+  "datasets": {
+   "headline": [
+    {
+     "v14_heldout_ema_rmse": 0.5247954789453232,
+     "v15_heldout_ema_rmse": 0.5637126651551874,
+     "v16_heldout_ema_rmse": 0.643399622874774,
+     "v17_heldout_ema_rmse": 0.4739621233029751,
+     "rmse_ceiling": 0.5,
+     "v17_rmse_margin_to_ceiling": -0.026037876697024898,
+     "v17_absolute_rmse_improvement_vs_v16": 0.16943749957179893,
+     "v17_relative_rmse_improvement_vs_v16": 0.2633472161745063,
+     "v17_total_trailing5_endpoints": 32,
+     "v17_defined_trailing5_endpoints": 25,
+     "v17_undefined_trailing5_endpoints": 7,
+     "v17_invalid_endpoint_steps": "74544, 75568, 76576, 77616, 78656, 79680, 80656",
+     "v17_w1_online_positive_support": 1454,
+     "v17_w1_online_negative_support": 10264,
+     "v17_w1_ema_positive_support": 0,
+     "v17_w1_ema_negative_support": 11718,
+     "v17_online_positive_last_step_before_full_run_extinction": 62128,
+     "v17_online_positive_full_run_extinction_start_step": 62992,
+     "v17_online_positive_full_run_extinction_end_step": 75568,
+     "v17_online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "v17_ema_positive_last_step_before_full_run_extinction": 69424,
+     "v17_ema_positive_full_run_extinction_start_step": 70416,
+     "v17_ema_positive_full_run_extinction_end_step": 80656,
+     "v17_ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "v17_positive_reappearance_lag_real_steps": 4944,
+     "v17_canonical_raw_norm_median": 509.1683654785156,
+     "v17_canonical_raw_norm_p95": 2808.359375,
+     "v17_canonical_raw_norm_max": 4498.3056640625,
+     "v17_nominal_clip_boundary": 1608.0,
+     "v17_canonical_boundary_exceedances": 5,
+     "v17_canonical_rows": 36,
+     "v17_all_q_updates": 143,
+     "v17_all_median_real_step_gap": 784.0,
+     "v17_canonical_median_real_step_gap": 800.0,
+     "v17_train_ema_rmse": 0.6696040559045617,
+     "v17_qualification_decision": "FAIL",
+     "retry_primary_fixed_status": "none; irreversible no-retry failure",
+     "v16_eligible_trailing_endpoints": 48,
+     "v16_undefined_trailing_endpoints": 5,
+     "v16_w3_positive_sign_support": 1,
+     "v16_w3_negative_sign_support": 11722,
+     "v16_zero_positive_endpoint_steps": "95344, 96368, 97392, 98416, 99408"
+    }
+   ],
+   "window_rmse": [
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "W1 (70k-80k]",
+     "window_order": 1,
+     "canonical_rows": 32,
+     "heldout_support": 3647,
+     "support_share": 0.4734519019,
+     "ema_rmse": 0.3070468494240733,
+     "online_rmse": 0.3069186481,
+     "ema_sse": 343.8310189523,
+     "threshold_sse": 911.75,
+     "excess_sse": -567.9189810477,
+     "sse_share": 0.16207087859592553,
+     "full_ema_rmse": 0.5247954789453232,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x centered-only"
+    },
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "W2 (80k-90k]",
+     "window_order": 2,
+     "canonical_rows": 19,
+     "heldout_support": 2485,
+     "support_share": 0.3226015838,
+     "ema_rmse": 0.4805763254032396,
+     "online_rmse": 0.4812888845,
+     "ema_sse": 573.9197072771,
+     "threshold_sse": 621.25,
+     "excess_sse": -47.3302927229,
+     "sse_share": 0.270527282516125,
+     "full_ema_rmse": 0.5247954789453232,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x centered-only"
+    },
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "W3 (90k-100k]",
+     "window_order": 3,
+     "canonical_rows": 12,
+     "heldout_support": 1571,
+     "support_share": 0.2039465143,
+     "ema_rmse": 0.8753410807478021,
+     "online_rmse": 0.8748756785,
+     "ema_sse": 1203.7347740099,
+     "threshold_sse": 392.75,
+     "excess_sse": 810.9847740099,
+     "sse_share": 0.5674018388879494,
+     "full_ema_rmse": 0.5247954789453232,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x centered-only"
+    },
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "Full (70k-100k]",
+     "window_order": 4,
+     "canonical_rows": 63,
+     "heldout_support": 7703,
+     "support_share": 1.0,
+     "ema_rmse": 0.5247954789453232,
+     "online_rmse": 0.5248123566562356,
+     "ema_sse": 2121.4855002393,
+     "threshold_sse": 1925.75,
+     "excess_sse": 195.7355002393001,
+     "sse_share": 1.0,
+     "full_ema_rmse": 0.5247954789453232,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x centered-only"
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "W1 (70k-80k]",
+     "window_order": 1,
+     "canonical_rows": 19,
+     "heldout_support": 2452,
+     "support_share": 0.3007113073,
+     "ema_rmse": 0.6350000482991449,
+     "online_rmse": 0.6355039321,
+     "ema_sse": 988.7078504055,
+     "threshold_sse": 613.0,
+     "excess_sse": 375.7078504055,
+     "sse_share": 0.38157656190278516,
+     "full_ema_rmse": 0.5637126651551874,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x centered-only"
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "W2 (80k-90k]",
+     "window_order": 2,
+     "canonical_rows": 26,
+     "heldout_support": 3509,
+     "support_share": 0.430340937,
+     "ema_rmse": 0.5262197892944133,
+     "online_rmse": 0.527617819,
+     "ema_sse": 971.6675986575,
+     "threshold_sse": 877.25,
+     "excess_sse": 94.4175986575,
+     "sse_share": 0.3750001392787582,
+     "full_ema_rmse": 0.5637126651551874,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x centered-only"
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "W3 (90k-100k]",
+     "window_order": 3,
+     "canonical_rows": 13,
+     "heldout_support": 2193,
+     "support_share": 0.2689477557,
+     "ema_rmse": 0.536296424979157,
+     "online_rmse": 0.537270896,
+     "ema_sse": 630.7371849918,
+     "threshold_sse": 548.25,
+     "excess_sse": 82.4871849918,
+     "sse_share": 0.24342329881845667,
+     "full_ema_rmse": 0.5637126651551874,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x centered-only"
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "window_label": "Full (70k-100k]",
+     "window_order": 4,
+     "canonical_rows": 58,
+     "heldout_support": 8154,
+     "support_share": 1.0,
+     "ema_rmse": 0.5637126651551874,
+     "online_rmse": 0.5646944857965209,
+     "ema_sse": 2591.1126340548,
+     "threshold_sse": 2038.5,
+     "excess_sse": 552.6126340547999,
+     "sse_share": 1.0,
+     "full_ema_rmse": 0.5637126651551874,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x centered-only"
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "W1 (70k-80k]",
+     "window_order": 1,
+     "canonical_rows": 32,
+     "heldout_support": 4621,
+     "support_share": 0.6132714001,
+     "ema_rmse": 0.42412219735332535,
+     "online_rmse": 0.4225059308,
+     "ema_sse": 831.223808528,
+     "threshold_sse": 1155.25,
+     "excess_sse": -324.026191472,
+     "sse_share": 0.26648521176430207,
+     "full_ema_rmse": 0.643399622874774,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x common mode"
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "W2 (80k-90k]",
+     "window_order": 2,
+     "canonical_rows": 10,
+     "heldout_support": 1452,
+     "support_share": 0.1927007299,
+     "ema_rmse": 0.9513859413944138,
+     "online_rmse": 0.9580587217,
+     "ema_sse": 1314.2563241692,
+     "threshold_sse": 363.0,
+     "excess_sse": 951.2563241692,
+     "sse_share": 0.4213424486469157,
+     "full_ema_rmse": 0.643399622874774,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x common mode"
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "W3 (90k-100k]",
+     "window_order": 3,
+     "canonical_rows": 10,
+     "heldout_support": 1462,
+     "support_share": 0.1940278699,
+     "ema_rmse": 0.8161048402729425,
+     "online_rmse": 0.8102244292,
+     "ema_sse": 973.7316352833,
+     "threshold_sse": 365.5,
+     "excess_sse": 608.2316352833,
+     "sse_share": 0.31217233958876617,
+     "full_ema_rmse": 0.643399622874774,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x common mode"
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "Full (70k-100k]",
+     "window_order": 4,
+     "canonical_rows": 52,
+     "heldout_support": 7535,
+     "support_share": 1.0,
+     "ema_rmse": 0.643399622874774,
+     "online_rmse": 0.6432134673573406,
+     "ema_sse": 3119.21176798055,
+     "threshold_sse": 1883.75,
+     "excess_sse": 1235.4617679805501,
+     "sse_share": 1.0,
+     "full_ema_rmse": 0.643399622874774,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Half-MSE x common mode"
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "W1 (70k-80k]",
+     "window_order": 1,
+     "canonical_rows": 10,
+     "heldout_support": 1461,
+     "support_share": 0.25417536534446766,
+     "ema_rmse": 0.5044903887648509,
+     "online_rmse": 0.4994767302,
+     "ema_sse": 371.8399169923,
+     "threshold_sse": 365.25,
+     "excess_sse": 6.5899169923000045,
+     "sse_share": 0.28797313686709375,
+     "full_ema_rmse": 0.4739621233029751,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x common mode"
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "W2 (80k-90k]",
+     "window_order": 2,
+     "canonical_rows": 12,
+     "heldout_support": 1909,
+     "support_share": 0.3321155184411969,
+     "ema_rmse": 0.3328853383580048,
+     "online_rmse": 0.3386498776,
+     "ema_sse": 211.5413459745,
+     "threshold_sse": 477.25,
+     "excess_sse": -265.7086540255,
+     "sse_share": 0.16382917000980668,
+     "full_ema_rmse": 0.4739621233029751,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x common mode"
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "W3 (90k-100k]",
+     "window_order": 3,
+     "canonical_rows": 14,
+     "heldout_support": 2378,
+     "support_share": 0.4137091162143354,
+     "ema_rmse": 0.5455878532763281,
+     "online_rmse": 0.5363071119,
+     "ema_sse": 707.8499992183,
+     "threshold_sse": 594.5,
+     "excess_sse": 113.34999921830001,
+     "sse_share": 0.5481976931230996,
+     "full_ema_rmse": 0.4739621233029751,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x common mode"
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "window_label": "Full (70k-100k]",
+     "window_order": 4,
+     "canonical_rows": 36,
+     "heldout_support": 5748,
+     "support_share": 1.0,
+     "ema_rmse": 0.4739621233029751,
+     "online_rmse": 0.4695661556492494,
+     "ema_sse": 1291.2312621851,
+     "threshold_sse": 1437.0,
+     "excess_sse": -145.76873781490008,
+     "sse_share": 1.0,
+     "full_ema_rmse": 0.4739621233029751,
+     "rmse_ceiling": 0.5,
+     "design_cell": "Huber x common mode"
+    }
+   ],
+   "gradient_norms": [
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "Mean",
+     "statistic_order": 1,
+     "raw_q_total_norm": 128.95252648610918,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 63,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 0,
+     "all_rows": 204,
+     "all_boundary_exceedance_rate": 0.0,
+     "canonical_max_norm": 886.306884765625,
+     "all_max_norm": 1551.61767578125,
+     "all_q_updates": 204,
+     "all_median_real_step_gap": 448.0,
+     "canonical_q_updates": 63,
+     "canonical_median_real_step_gap": 480.0
+    },
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "Median",
+     "statistic_order": 2,
+     "raw_q_total_norm": 62.38666915893555,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 63,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 0,
+     "all_rows": 204,
+     "all_boundary_exceedance_rate": 0.0,
+     "canonical_max_norm": 886.306884765625,
+     "all_max_norm": 1551.61767578125,
+     "all_q_updates": 204,
+     "all_median_real_step_gap": 448.0,
+     "canonical_q_updates": 63,
+     "canonical_median_real_step_gap": 480.0
+    },
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "P95",
+     "statistic_order": 3,
+     "raw_q_total_norm": 443.18048400878894,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 63,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 0,
+     "all_rows": 204,
+     "all_boundary_exceedance_rate": 0.0,
+     "canonical_max_norm": 886.306884765625,
+     "all_max_norm": 1551.61767578125,
+     "all_q_updates": 204,
+     "all_median_real_step_gap": 448.0,
+     "canonical_q_updates": 63,
+     "canonical_median_real_step_gap": 480.0
+    },
+    {
+     "version": "v14",
+     "schema_version": 7,
+     "loss": "Huber beta=1",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "Maximum",
+     "statistic_order": 4,
+     "raw_q_total_norm": 886.306884765625,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 63,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 0,
+     "all_rows": 204,
+     "all_boundary_exceedance_rate": 0.0,
+     "canonical_max_norm": 886.306884765625,
+     "all_max_norm": 1551.61767578125,
+     "all_q_updates": 204,
+     "all_median_real_step_gap": 448.0,
+     "canonical_q_updates": 63,
+     "canonical_median_real_step_gap": 480.0
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "Mean",
+     "statistic_order": 1,
+     "raw_q_total_norm": 181.82969428753032,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 58,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 1,
+     "all_rows": 149,
+     "all_boundary_exceedance_rate": 0.006711409395973154,
+     "canonical_max_norm": 802.5406494140625,
+     "all_max_norm": 1767.575439453125,
+     "all_q_updates": 149,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 58,
+     "canonical_median_real_step_gap": 544.0
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "Median",
+     "statistic_order": 2,
+     "raw_q_total_norm": 131.73944091796875,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 58,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 1,
+     "all_rows": 149,
+     "all_boundary_exceedance_rate": 0.006711409395973154,
+     "canonical_max_norm": 802.5406494140625,
+     "all_max_norm": 1767.575439453125,
+     "all_q_updates": 149,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 58,
+     "canonical_median_real_step_gap": 544.0
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "P95",
+     "statistic_order": 3,
+     "raw_q_total_norm": 537.2278793334957,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 58,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 1,
+     "all_rows": 149,
+     "all_boundary_exceedance_rate": 0.006711409395973154,
+     "canonical_max_norm": 802.5406494140625,
+     "all_max_norm": 1767.575439453125,
+     "all_q_updates": 149,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 58,
+     "canonical_median_real_step_gap": 544.0
+    },
+    {
+     "version": "v15",
+     "schema_version": 8,
+     "loss": "Half-MSE",
+     "reconstruction": "Centered / no common mode",
+     "statistic": "Maximum",
+     "statistic_order": 4,
+     "raw_q_total_norm": 802.5406494140625,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 0,
+     "canonical_rows": 58,
+     "canonical_boundary_exceedance_rate": 0.0,
+     "all_boundary_exceedances": 1,
+     "all_rows": 149,
+     "all_boundary_exceedance_rate": 0.006711409395973154,
+     "canonical_max_norm": 802.5406494140625,
+     "all_max_norm": 1767.575439453125,
+     "all_q_updates": 149,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 58,
+     "canonical_median_real_step_gap": 544.0
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "Mean",
+     "statistic_order": 1,
+     "raw_q_total_norm": 696.7852480961726,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 7,
+     "canonical_rows": 52,
+     "canonical_boundary_exceedance_rate": 0.1346153846153846,
+     "all_boundary_exceedances": 35,
+     "all_rows": 250,
+     "all_boundary_exceedance_rate": 0.14,
+     "canonical_max_norm": 2687.010986328125,
+     "all_max_norm": 9307.25390625,
+     "all_q_updates": 250,
+     "all_median_real_step_gap": 192.0,
+     "canonical_q_updates": 52,
+     "canonical_median_real_step_gap": 496.0
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "Median",
+     "statistic_order": 2,
+     "raw_q_total_norm": 428.2610778808594,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 7,
+     "canonical_rows": 52,
+     "canonical_boundary_exceedance_rate": 0.1346153846153846,
+     "all_boundary_exceedances": 35,
+     "all_rows": 250,
+     "all_boundary_exceedance_rate": 0.14,
+     "canonical_max_norm": 2687.010986328125,
+     "all_max_norm": 9307.25390625,
+     "all_q_updates": 250,
+     "all_median_real_step_gap": 192.0,
+     "canonical_q_updates": 52,
+     "canonical_median_real_step_gap": 496.0
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "P95",
+     "statistic_order": 3,
+     "raw_q_total_norm": 1842.8370300292963,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 7,
+     "canonical_rows": 52,
+     "canonical_boundary_exceedance_rate": 0.1346153846153846,
+     "all_boundary_exceedances": 35,
+     "all_rows": 250,
+     "all_boundary_exceedance_rate": 0.14,
+     "canonical_max_norm": 2687.010986328125,
+     "all_max_norm": 9307.25390625,
+     "all_q_updates": 250,
+     "all_median_real_step_gap": 192.0,
+     "canonical_q_updates": 52,
+     "canonical_median_real_step_gap": 496.0
+    },
+    {
+     "version": "v16",
+     "schema_version": 9,
+     "loss": "Half-MSE",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "Maximum",
+     "statistic_order": 4,
+     "raw_q_total_norm": 2687.010986328125,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 7,
+     "canonical_rows": 52,
+     "canonical_boundary_exceedance_rate": 0.1346153846153846,
+     "all_boundary_exceedances": 35,
+     "all_rows": 250,
+     "all_boundary_exceedance_rate": 0.14,
+     "canonical_max_norm": 2687.010986328125,
+     "all_max_norm": 9307.25390625,
+     "all_q_updates": 250,
+     "all_median_real_step_gap": 192.0,
+     "canonical_q_updates": 52,
+     "canonical_median_real_step_gap": 496.0
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "Mean",
+     "statistic_order": 1,
+     "raw_q_total_norm": 861.2543914582994,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 5,
+     "canonical_rows": 36,
+     "canonical_boundary_exceedance_rate": 0.1388888888888889,
+     "all_boundary_exceedances": 14,
+     "all_rows": 143,
+     "all_boundary_exceedance_rate": 0.0979020979020979,
+     "canonical_max_norm": 4498.3056640625,
+     "all_max_norm": 4555.32568359375,
+     "all_q_updates": 143,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 36,
+     "canonical_median_real_step_gap": 800.0
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "Median",
+     "statistic_order": 2,
+     "raw_q_total_norm": 509.1683654785156,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 5,
+     "canonical_rows": 36,
+     "canonical_boundary_exceedance_rate": 0.1388888888888889,
+     "all_boundary_exceedances": 14,
+     "all_rows": 143,
+     "all_boundary_exceedance_rate": 0.0979020979020979,
+     "canonical_max_norm": 4498.3056640625,
+     "all_max_norm": 4555.32568359375,
+     "all_q_updates": 143,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 36,
+     "canonical_median_real_step_gap": 800.0
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "P95",
+     "statistic_order": 3,
+     "raw_q_total_norm": 2808.359375,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 5,
+     "canonical_rows": 36,
+     "canonical_boundary_exceedance_rate": 0.1388888888888889,
+     "all_boundary_exceedances": 14,
+     "all_rows": 143,
+     "all_boundary_exceedance_rate": 0.0979020979020979,
+     "canonical_max_norm": 4498.3056640625,
+     "all_max_norm": 4555.32568359375,
+     "all_q_updates": 143,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 36,
+     "canonical_median_real_step_gap": 800.0
+    },
+    {
+     "version": "v17",
+     "schema_version": 10,
+     "loss": "Huber beta=1",
+     "reconstruction": "Raw-head mean + centered residual",
+     "statistic": "Maximum",
+     "statistic_order": 4,
+     "raw_q_total_norm": 4498.3056640625,
+     "nominal_clip_boundary": 1608.0,
+     "canonical_boundary_exceedances": 5,
+     "canonical_rows": 36,
+     "canonical_boundary_exceedance_rate": 0.1388888888888889,
+     "all_boundary_exceedances": 14,
+     "all_rows": 143,
+     "all_boundary_exceedance_rate": 0.0979020979020979,
+     "canonical_max_norm": 4498.3056640625,
+     "all_max_norm": 4555.32568359375,
+     "all_q_updates": 143,
+     "all_median_real_step_gap": 784.0,
+     "canonical_q_updates": 36,
+     "canonical_median_real_step_gap": 800.0
+    }
+   ],
+   "integrity": [
+    {
+     "version": "v14",
+     "snapshot_id": "di-voc-v14-sealed-eps25-final-eKgdrk",
+     "xpid": "enduro-voc-v14-sealed-eps25-seed1-qual-fresh-100k",
+     "schema_version": 7,
+     "source_manifest_sha256": "4fa507706250f349acfb6034453f1e8c70681c54e9e52718d848cd81755dbfea",
+     "data_manifest_sha256": "23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343",
+     "protocol_sha256": "f422089ec4df7479f89477a3e6e63744dc74d06d1ceab9d5ea10397b34500972",
+     "launch_provenance_sha256": "0e9f4ad97ea5774ccc579da43118546b1c837d6e21ceaa3b9be8d7d330af5b54",
+     "actor_csv_sha256": "6d72052279a59983d102bed3db767b3792b115d221f155cdd10d4dc29bbe85a8",
+     "model_csv_sha256": "b38dfd254fab250394ca463c4371c573b8c37f332e5f5f0b43c6d9b5fbfc3f64",
+     "actor_checkpoint_sha256": "a86094cc3131bbe55bd5ac5995203cf8f3830ab36fbaf60e630306b0fe1d107c",
+     "model_checkpoint_sha256": "6d6c2ff3ba5335337476998eb13be6ea80e9962d5ffabc67ade3020cb362af7a",
+     "config_sha256": "97d6a78d78d0d49dbd3e038fa77f268c29d4b21244c98d345060505f70c40350",
+     "finish_sha256": "5ea6592e5f57cafb908902eed9decd7535e78d4e9b9fa33c23f7bf00b16f3b4e",
+     "artifact_rehash_status": "PASS",
+     "qualification_attempt": "1_of_1_no_retry"
+    },
+    {
+     "version": "v15",
+     "snapshot_id": "di-voc-v15-halfsq-eps25-final-CKcYfI",
+     "xpid": "enduro-voc-v15-halfsq-eps25-seed1-qual-fresh-100k",
+     "schema_version": 8,
+     "source_manifest_sha256": "1c2d619479a63d75f0b23c41ef293f611b3631432356067a2db425a30ec62cdf",
+     "data_manifest_sha256": "23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343",
+     "protocol_sha256": "cf5838f577ac55db2990669ebfd712c6cbbeee28e8b5388075833b69f4206b90",
+     "launch_provenance_sha256": "ad1e625579aad7e9c400a4a85130939400ed1e0696b8c71987ce8e3bbfda9ccd",
+     "actor_csv_sha256": "359eb6540a6265a2a5b8e77fa8ac01420b5f0077a3b84d67800f0308f448e341",
+     "model_csv_sha256": "360e6d475d635f734e4b14ddfff7a0022ba7997131785ce2ee7a39ea28b6839b",
+     "actor_checkpoint_sha256": "ee41fa3f0916f5b726b6cd448e12989abbe01554a69c6f4eb5ab8ed434cd2c7c",
+     "model_checkpoint_sha256": "8d215ce13489735e685ed1d271ad857b69f23f0b35213447d0d90f67f96b82b8",
+     "config_sha256": "edd3ce926dbb048543a1ea11ee0bca29bef2f83c88877f3ae1e4d85308e234b2",
+     "finish_sha256": "e2d00bf7baa7276cca91bf1c73e025991e5d1c1ddfc6236ab8cec71c845d8184",
+     "artifact_rehash_status": "PASS",
+     "qualification_attempt": "1_of_1_no_retry"
+    },
+    {
+     "version": "v16",
+     "snapshot_id": "di-voc-v16-commonmode-eps25-final-mZ6A2C",
+     "xpid": "enduro-voc-v16-commonmode-eps25-seed1-qual-fresh-100k",
+     "schema_version": 9,
+     "source_manifest_sha256": "f90b970c647b06884f1101a3b39d862eed97aec51d69013614b6b671f54112ea",
+     "data_manifest_sha256": "23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343",
+     "protocol_sha256": "1814d68f667748358746c42f4578e17acbb950e9e0adac04a8d78c9352fdb84c",
+     "launch_provenance_sha256": "1b712c604387725ccdc4aa1dbdcb016f4b4cb5c9b0effa22f150e27daf035325",
+     "actor_csv_sha256": "45da4532357f5f150fad15c47bf1cdbb5ec52738ff3a68678afb5dca73ed20d5",
+     "model_csv_sha256": "ef5e39aba9ad5b7c0c2b4bef34ba91bb6f3adf1bcdc940abe9915504b8b18225",
+     "actor_checkpoint_sha256": "c05a2237b495ff36fe633446e8236a93d2e07da9038f01781ac3b5026e947b7d",
+     "model_checkpoint_sha256": "d1ce735542c5dd4a89b4e8cdc550946b5417700a956468820a69e4d80ed9ea58",
+     "config_sha256": "2c91aa82c4744a8f44320ec5cc95f797384c4467c17607420b1dc3a94d9fea6b",
+     "finish_sha256": "1b5f3449f685f876a10bbad21bacad4c0cd28479d53bcb0197f18308e2cb286f",
+     "artifact_rehash_status": "PASS",
+     "qualification_attempt": "1_of_1_no_retry"
+    },
+    {
+     "version": "v17",
+     "snapshot_id": "di-voc-v17-huber-common-eps25-final-Tmc42l",
+     "xpid": "enduro-voc-v17-huber-common-eps25-seed1-qual-fresh-100k",
+     "schema_version": 10,
+     "source_manifest_sha256": "87d17a63953caf41f62b92454e13ff92498c590eef9f6e156282e9e7e1d767ac",
+     "data_manifest_sha256": "23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343",
+     "protocol_sha256": "9d032579808f5cc07253e654feea9f4f80fe45151701fd4864896bf486c267a1",
+     "launch_provenance_sha256": "17aebc1ec40196fa51205eb8ea208fb96b04750941abd44c9fc2bba589232905",
+     "actor_csv_sha256": "e50308619550a45e8bc722bd152722f96723f2b448885ae2e5ec65227f21d030",
+     "model_csv_sha256": "2801e56a80dc8e3db20dcf0f22109a259e0a7fd6b31e4d1d2054fdd2ef75b564",
+     "actor_checkpoint_sha256": "1054956ebbb8a1b75cb1d2eed54611c90d785c83ee3fc9a7d6d40e2c85430eb0",
+     "model_checkpoint_sha256": "aca6d46ba749fd5394525918f6a6a822f0ac7f3377b7c953b511662012bf1a15",
+     "config_sha256": "f5d900bd2b6d0b25a628869b3dc90424e4a8018e888e88ace81a4f88d217b971",
+     "finish_sha256": "65f4c77efedbaaeaffe4a90cde00c8c4292942a3b5e3a5c7a39eba4b3acebff7",
+     "artifact_rehash_status": "PASS",
+     "qualification_attempt": "1_of_1_no_retry"
+    }
+   ],
+   "version_comparison": [
+    {
+     "version": "v14",
+     "schema": "schema 7",
+     "design_cell": "Huber x centered-only",
+     "q_regression_loss": "Huber beta=1",
+     "q_reconstruction": "Centered / no common mode",
+     "learnable_common_mode": "No",
+     "canonical_rows": 63,
+     "heldout_support": 7703,
+     "heldout_ema_rmse": 0.5247954789453232,
+     "train_ema_rmse": 0.5865118456123475,
+     "heldout_ema_sse": 2121.4855002393,
+     "threshold_excess_sse": 195.7355002393001,
+     "rmse_gate": "FAIL",
+     "undefined_trailing_endpoints": 0,
+     "canonical_raw_norm_boundary_exceedances": "0/63",
+     "all_q_updates": 204,
+     "all_median_real_step_gap": 448.0,
+     "hard_failures": "Heldout EMA RMSE",
+     "qualification_decision": "FAIL"
+    },
+    {
+     "version": "v15",
+     "schema": "schema 8",
+     "design_cell": "Half-MSE x centered-only",
+     "q_regression_loss": "Half-MSE",
+     "q_reconstruction": "Centered / no common mode",
+     "learnable_common_mode": "No",
+     "canonical_rows": 58,
+     "heldout_support": 8154,
+     "heldout_ema_rmse": 0.5637126651551874,
+     "train_ema_rmse": 0.48913625344503686,
+     "heldout_ema_sse": 2591.1126340548,
+     "threshold_excess_sse": 552.6126340547999,
+     "rmse_gate": "FAIL",
+     "undefined_trailing_endpoints": 0,
+     "canonical_raw_norm_boundary_exceedances": "0/58",
+     "all_q_updates": 149,
+     "all_median_real_step_gap": 784.0,
+     "hard_failures": "Heldout EMA RMSE",
+     "qualification_decision": "FAIL"
+    },
+    {
+     "version": "v16",
+     "schema": "schema 9",
+     "design_cell": "Half-MSE x common mode",
+     "q_regression_loss": "Half-MSE",
+     "q_reconstruction": "Raw-head mean + centered residual",
+     "learnable_common_mode": "Yes",
+     "canonical_rows": 52,
+     "heldout_support": 7535,
+     "heldout_ema_rmse": 0.643399622874774,
+     "train_ema_rmse": 0.5999551130525911,
+     "heldout_ema_sse": 3119.21176798055,
+     "threshold_excess_sse": 1235.4617679805501,
+     "rmse_gate": "FAIL",
+     "undefined_trailing_endpoints": 5,
+     "canonical_raw_norm_boundary_exceedances": "7/52",
+     "all_q_updates": 250,
+     "all_median_real_step_gap": 192.0,
+     "hard_failures": "Heldout EMA RMSE; trailing-five denominator validity",
+     "qualification_decision": "FAIL"
+    },
+    {
+     "version": "v17",
+     "schema": "schema 10",
+     "design_cell": "Huber x common mode",
+     "q_regression_loss": "Huber beta=1",
+     "q_reconstruction": "Raw-head mean + centered residual",
+     "learnable_common_mode": "Yes",
+     "canonical_rows": 36,
+     "heldout_support": 5748,
+     "heldout_ema_rmse": 0.4739621233029751,
+     "train_ema_rmse": 0.6696040559045617,
+     "heldout_ema_sse": 1291.2312621851,
+     "threshold_excess_sse": -145.76873781490008,
+     "rmse_gate": "PASS",
+     "undefined_trailing_endpoints": 7,
+     "canonical_raw_norm_boundary_exceedances": "5/36",
+     "all_q_updates": 143,
+     "all_median_real_step_gap": 784.0,
+     "hard_failures": "Trailing-five denominator validity",
+     "qualification_decision": "FAIL"
+    }
+   ],
+   "mechanism_evidence": [
+    {
+     "mechanism": "Raw action-row head",
+     "frozen_observation": "Parameters, storage, and forward outputs use exact [CONTINUE, STOP] rows.",
+     "geometry_or_state": "Raw rows are not reinterpreted as stored common/difference coordinates.",
+     "code_reference": "thinker/thinker/actor_net.py:1348-1350",
+     "code_sha256": "bdfb3b46be65919e86708b08e456f5abb7cd7abfa5a1c82a117aeabc2c5ca0f0",
+     "what_it_cannot_prove": "The raw basis alone does not identify the source of a closed-loop sign-support collapse."
+    },
+    {
+     "mechanism": "Schema-10 common-mode reconstruction",
+     "frozen_observation": "c=(q_C+q_S)/2 is added to a policy-centered residual; common shifts survive reconstruction.",
+     "geometry_or_state": "Selected-Q gradients generally contain both common and action-difference components.",
+     "code_reference": "thinker/thinker/learn_actor.py:819-831",
+     "code_sha256": "7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b",
+     "what_it_cannot_prove": "The reconstruction does not isolate optimizer-coordinate effects from visitation or targets."
+    },
+    {
+     "mechanism": "Selected-action beta-1 Huber objective",
+     "frozen_observation": "V17 applies SmoothL1 beta=1 to selected reconstructed Q versus the detached target.",
+     "geometry_or_state": "Per-example residual slope is bounded outside the quadratic region before batch aggregation.",
+     "code_reference": "thinker/thinker/learn_actor.py:838-869",
+     "code_sha256": "7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b",
+     "what_it_cannot_prove": "Lower pooled heldout RMSE does not identify Huber as the cause in an unpaired on-policy run."
+    },
+    {
+     "mechanism": "Raw-gradient clipping then Adam",
+     "frozen_observation": "The unchanged nominal boundary is 0.5 x 201 x 16 = 1608; Adam stores rowwise raw-head moments.",
+     "geometry_or_state": "A nonlinear rowwise denominator can mix common/difference update coordinates even when raw gradients are clipped first.",
+     "code_reference": "thinker/thinker/learn_actor.py:2964-2970,4054-4089",
+     "code_sha256": "7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b",
+     "what_it_cannot_prove": "Logged raw total norm is not a post-clip parameter delta and does not identify causal clipping pressure."
+    },
+    {
+     "mechanism": "EMA and exact projection",
+     "frozen_observation": "EMA updates raw Q rows; the gate is projected exactly from the EMA raw-row difference.",
+     "geometry_or_state": "Online support is positive through 62128, zero on logged rows 62992-75568, and first canonically reappears after that full-run extinction interval at 76576; EMA is positive through 69424, zero on logged rows 70416-80656, and first canonically reappears at 81520.",
+     "code_reference": "thinker/thinker/learn_actor.py:119-310,2702-2808",
+     "code_sha256": "7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b",
+     "what_it_cannot_prove": "Observed lag cannot predict the counterfactual trajectory under tau=1."
+    },
+    {
+     "mechanism": "Target and detached feature path",
+     "frozen_observation": "Q targets and detached features preserve the audited actor/value interfaces and state transaction.",
+     "geometry_or_state": "V17 train EMA RMSE is 0.6696040559 while heldout EMA RMSE is 0.4739621233.",
+     "code_reference": "thinker/thinker/actor_net.py:2176-2184; thinker/thinker/learn_actor.py:4327-4335,5028-5094",
+     "code_sha256": "actor_net bdfb3b46...; learn_actor 7e26e652...",
+     "what_it_cannot_prove": "Aggregate CSV moments do not expose event-level target/value distributions or paired counterfactual residuals."
+    },
+    {
+     "mechanism": "Behavior-policy feedback",
+     "frozen_observation": "Projected EMA Q differences feed the epsilon-greedy VoC behavior decision.",
+     "geometry_or_state": "Changed Q signs can change later state/action composition, which changes subsequent training examples.",
+     "code_reference": "thinker/thinker/actor_net.py:221-364",
+     "code_sha256": "bdfb3b46be65919e86708b08e456f5abb7cd7abfa5a1c82a117aeabc2c5ca0f0",
+     "what_it_cannot_prove": "CSV/checkpoint snapshots cannot separate policy feedback from objective, optimizer, or cadence."
+    },
+    {
+     "mechanism": "Persisted-surface invariants",
+     "frozen_observation": "V17 binds exact229 complete surface, exact209 projection, schema10, seal1, and no persisted derived identities.",
+     "geometry_or_state": "Complete SHA ec3c4455... and projection SHA bd386ad1... were independently audited.",
+     "code_reference": "frozen V17 create_setting and checkpoint-contract audit",
+     "code_sha256": "complete ec3c445584c77a3ed82e2855bba7addbb000124da9231e90f311e9a014e85beb; projection bd386ad1c78f030409562dea5c34d8866cc128cf99b7f39938f6a090f5987407",
+     "what_it_cannot_prove": "Surface integrity establishes identity and mechanics, not numerical qualification or causality."
+    }
+   ],
+   "checkpoint_diagnostics": [
+    {
+     "diagnostic": "Step-480 V16/V17 parity",
+     "key_path_or_formula": "actor_net_state_dict.voc_head.{weight,bias}; voc_ema_gate_head_state_dict.{weight,bias}; actor_net_state_dict.voc_gate_head.{weight,bias}; voc_optimizer_state_dict.state.{0,1}.{step,exp_avg,exp_avg_sq}",
+     "common_value": "bitwise equal",
+     "difference_value": "bitwise equal",
+     "scalar_or_status": "true",
+     "checkpoint_sha256": "v16 3a9f8f9199726902bf789afe7910f61c89f437cb4099476bcb709ecf6a06873c; v17 d93d16150136f67e8a9d200aefb31b7c2ecbb8a58ed01af4e092c02ce4669b66",
+     "interpretation": "V16 and V17 begin from the same audited Q, EMA, gate, and Q-Adam tensors at step 480."
+    },
+    {
+     "diagnostic": "V17 terminal online weight norm",
+     "key_path_or_formula": "actor_net_state_dict.voc_head.weight; c=(row0+row1)/sqrt(2), d=(row0-row1)/sqrt(2)",
+     "common_value": "0.09197670854694069",
+     "difference_value": "0.04772993647417535",
+     "scalar_or_status": "nonzero in both coordinates",
+     "checkpoint_sha256": "7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c",
+     "interpretation": "The raw head did not collapse to an all-zero tensor or lose the difference coordinate."
+    },
+    {
+     "diagnostic": "V17 terminal EMA weight norm",
+     "key_path_or_formula": "voc_ema_gate_head_state_dict.weight; same orthonormal transform",
+     "common_value": "0.08804985021047274",
+     "difference_value": "0.04523736449366637",
+     "scalar_or_status": "nonzero in both coordinates",
+     "checkpoint_sha256": "7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c",
+     "interpretation": "EMA retains both coordinates despite the earlier zero-positive support window."
+    },
+    {
+     "diagnostic": "V17 online minus EMA norm",
+     "key_path_or_formula": "actor_net_state_dict.voc_head.weight - voc_ema_gate_head_state_dict.weight",
+     "common_value": "0.016672458740732386",
+     "difference_value": "0.005328437961923289",
+     "scalar_or_status": "online differs from EMA",
+     "checkpoint_sha256": "7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c",
+     "interpretation": "Frozen terminal tensors retain a measurable online/EMA separation."
+    },
+    {
+     "diagnostic": "V17 Adam first-moment norm",
+     "key_path_or_formula": "voc_optimizer_state_dict.state.0.exp_avg; same orthonormal transform",
+     "common_value": "118.41179575543109",
+     "difference_value": "61.27793259647075",
+     "scalar_or_status": "Adam step 143",
+     "checkpoint_sha256": "7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c",
+     "interpretation": "Both common and difference components are present in the frozen raw-row first moment."
+    },
+    {
+     "diagnostic": "Frozen denominator common-to-difference leakage",
+     "key_path_or_formula": "Apply frozen rowwise sqrt(vhat)+epsilon denominator to a common-only first moment",
+     "common_value": "intended coordinate",
+     "difference_value": "leakage coordinate",
+     "scalar_or_status": "0.312531749799473",
+     "checkpoint_sha256": "7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c",
+     "interpretation": "Diagnostic ratio under the frozen denominator; not an actual next step or treatment effect."
+    },
+    {
+     "diagnostic": "Frozen denominator difference-to-common leakage",
+     "key_path_or_formula": "Apply frozen rowwise sqrt(vhat)+epsilon denominator to a difference-only first moment",
+     "common_value": "leakage coordinate",
+     "difference_value": "intended coordinate",
+     "scalar_or_status": "0.3289216882682968",
+     "checkpoint_sha256": "7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c",
+     "interpretation": "Diagnostic ratio under the frozen denominator; not a counterfactual optimizer run."
+    },
+    {
+     "diagnostic": "Terminal projection identity",
+     "key_path_or_formula": "voc_gate_head = 20 x (EMA CONTINUE row - EMA STOP row), weight and bias",
+     "common_value": "not applicable",
+     "difference_value": "exact raw-row difference",
+     "scalar_or_status": "bitwise true",
+     "checkpoint_sha256": "7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c",
+     "interpretation": "The gate projection is mechanically exact at the frozen terminal checkpoint."
+    }
+   ],
+   "candidates": [
+    {
+     "candidate_rank": 1,
+     "candidate": "Schema-11 orthonormal common/difference Adam adapter",
+     "semantic_delta": "After unchanged raw-gradient clipping, map g_C/g_S to g_m=(g_C+g_S)/sqrt(2) and g_d=(g_C-g_S)/sqrt(2), maintain Adam moments in [common,difference] rows, then inverse-map update deltas to raw C/S parameters.",
+     "preserved_contract": "Raw parameters, storage, forward outputs [CONTINUE, STOP], Huber/common reconstruction, EMA, projection, tensor shapes, exact229/exact209, and persisted keys remain unchanged.",
+     "identity": "Derived-only voc_q_optimizer_coordinates=\"orthonormal_common_difference_adam\"; no new persisted key.",
+     "why_ranked_here": "Directly isolates the audited nonlinear Adam coordinate coupling while preserving the represented Q function and raw-row wire surface.",
+     "falsifier_or_limit": "The unchanged hard gates still fail; frozen leakage ratios are diagnostic rather than causal or predictive."
+    },
+    {
+     "candidate_rank": 2,
+     "candidate": "Tau=1 EMA sensitivity",
+     "semantic_delta": "Change only the EMA lag semantic so the projected behavior gate tracks the current raw Q head.",
+     "preserved_contract": "Keep schema-10 raw head, Huber/common objective, optimizer, projection formula, shapes, persisted keys, and acceptance gates.",
+     "identity": "Use the existing derived setting surface; add no persisted identity.",
+     "why_ranked_here": "Online positive support first canonically reappeared after its full-run extinction interval 4944 real steps before EMA positive support first canonically reappeared after its own interval; a no-lag target cannot repair the two earliest frozen invalid endpoints.",
+     "falsifier_or_limit": "A future fresh trajectory still loses denominator validity or other unchanged gates; the observed lag is not a counterfactual."
+    },
+    {
+     "candidate_rank": 3,
+     "candidate": "Deterministic VoC update cadence per real-step budget",
+     "semantic_delta": "Operationally broader cadence intervention; exact mechanism and value are intentionally unspecified pending a separate contract.",
+     "preserved_contract": "Do not map this proposal to actor_unroll_len or bundle it with objective, optimizer-coordinate, EMA, or gate changes.",
+     "identity": "Would require an explicit prospective identity contract; none is proposed here.",
+     "why_ranked_here": "V17 logged 143 updates with median all-run gap 784 versus V16 250/192, a material but policy-coupled confound.",
+     "falsifier_or_limit": "No existing knob or value is inferred from the frozen evidence; cadence association has unknown causal direction."
+    }
+   ],
+   "sign_reappearance": [
+    {
+     "version": "v17",
+     "real_step": 70416,
+     "window": "W1",
+     "online_negative": 1152,
+     "ema_negative": 1152,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 70416,
+     "window": "W1",
+     "online_negative": 1152,
+     "ema_negative": 1152,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 71456,
+     "window": "W1",
+     "online_negative": 1184,
+     "ema_negative": 1184,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 71456,
+     "window": "W1",
+     "online_negative": 1184,
+     "ema_negative": 1184,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 72480,
+     "window": "W1",
+     "online_negative": 1175,
+     "ema_negative": 1175,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 72480,
+     "window": "W1",
+     "online_negative": 1175,
+     "ema_negative": 1175,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 73504,
+     "window": "W1",
+     "online_negative": 1170,
+     "ema_negative": 1170,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 73504,
+     "window": "W1",
+     "online_negative": 1170,
+     "ema_negative": 1170,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 74544,
+     "window": "W1",
+     "online_negative": 1188,
+     "ema_negative": 1188,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 74544,
+     "window": "W1",
+     "online_negative": 1188,
+     "ema_negative": 1188,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 74544,
+     "window": "W1",
+     "online_negative": 1188,
+     "ema_negative": 1188,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Invalid trailing-5 endpoint",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 75568,
+     "window": "W1",
+     "online_negative": 1180,
+     "ema_negative": 1180,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 75568,
+     "window": "W1",
+     "online_negative": 1180,
+     "ema_negative": 1180,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 75568,
+     "window": "W1",
+     "online_negative": 1180,
+     "ema_negative": 1180,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Invalid trailing-5 endpoint",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 76576,
+     "window": "W1",
+     "online_negative": 1078,
+     "ema_negative": 1154,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 76
+    },
+    {
+     "version": "v17",
+     "real_step": 76576,
+     "window": "W1",
+     "online_negative": 1078,
+     "ema_negative": 1154,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 76576,
+     "window": "W1",
+     "online_negative": 1078,
+     "ema_negative": 1154,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Invalid trailing-5 endpoint",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 77616,
+     "window": "W1",
+     "online_negative": 875,
+     "ema_negative": 1175,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 300
+    },
+    {
+     "version": "v17",
+     "real_step": 77616,
+     "window": "W1",
+     "online_negative": 875,
+     "ema_negative": 1175,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 77616,
+     "window": "W1",
+     "online_negative": 875,
+     "ema_negative": 1175,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Invalid trailing-5 endpoint",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 78656,
+     "window": "W1",
+     "online_negative": 722,
+     "ema_negative": 1164,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 442
+    },
+    {
+     "version": "v17",
+     "real_step": 78656,
+     "window": "W1",
+     "online_negative": 722,
+     "ema_negative": 1164,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 78656,
+     "window": "W1",
+     "online_negative": 722,
+     "ema_negative": 1164,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Invalid trailing-5 endpoint",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 79680,
+     "window": "W1",
+     "online_negative": 540,
+     "ema_negative": 1176,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 636
+    },
+    {
+     "version": "v17",
+     "real_step": 79680,
+     "window": "W1",
+     "online_negative": 540,
+     "ema_negative": 1176,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 79680,
+     "window": "W1",
+     "online_negative": 540,
+     "ema_negative": 1176,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Invalid trailing-5 endpoint",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 80656,
+     "window": "W2",
+     "online_negative": 193,
+     "ema_negative": 1104,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 910
+    },
+    {
+     "version": "v17",
+     "real_step": 80656,
+     "window": "W2",
+     "online_negative": 193,
+     "ema_negative": 1104,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 80656,
+     "window": "W2",
+     "online_negative": 193,
+     "ema_negative": 1104,
+     "invalid_trailing5_endpoint": "yes",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Invalid trailing-5 endpoint",
+     "support_count": 0
+    },
+    {
+     "version": "v17",
+     "real_step": 81520,
+     "window": "W2",
+     "online_negative": 353,
+     "ema_negative": 967,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 920
+    },
+    {
+     "version": "v17",
+     "real_step": 81520,
+     "window": "W2",
+     "online_negative": 353,
+     "ema_negative": 967,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 306
+    },
+    {
+     "version": "v17",
+     "real_step": 82400,
+     "window": "W2",
+     "online_negative": 218,
+     "ema_negative": 961,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 1015
+    },
+    {
+     "version": "v17",
+     "real_step": 82400,
+     "window": "W2",
+     "online_negative": 218,
+     "ema_negative": 961,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 272
+    },
+    {
+     "version": "v17",
+     "real_step": 83248,
+     "window": "W2",
+     "online_negative": 8,
+     "ema_negative": 888,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 1258
+    },
+    {
+     "version": "v17",
+     "real_step": 83248,
+     "window": "W2",
+     "online_negative": 8,
+     "ema_negative": 888,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 378
+    },
+    {
+     "version": "v17",
+     "real_step": 84048,
+     "window": "W2",
+     "online_negative": 1,
+     "ema_negative": 849,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 1343
+    },
+    {
+     "version": "v17",
+     "real_step": 84048,
+     "window": "W2",
+     "online_negative": 1,
+     "ema_negative": 849,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 495
+    },
+    {
+     "version": "v17",
+     "real_step": 84864,
+     "window": "W2",
+     "online_negative": 1,
+     "ema_negative": 867,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 1362
+    },
+    {
+     "version": "v17",
+     "real_step": 84864,
+     "window": "W2",
+     "online_negative": 1,
+     "ema_negative": 867,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 496
+    },
+    {
+     "version": "v17",
+     "real_step": 85632,
+     "window": "W2",
+     "online_negative": 17,
+     "ema_negative": 808,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 1329
+    },
+    {
+     "version": "v17",
+     "real_step": 85632,
+     "window": "W2",
+     "online_negative": 17,
+     "ema_negative": 808,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 538
+    },
+    {
+     "version": "v17",
+     "real_step": 86400,
+     "window": "W2",
+     "online_negative": 377,
+     "ema_negative": 772,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 974
+    },
+    {
+     "version": "v17",
+     "real_step": 86400,
+     "window": "W2",
+     "online_negative": 377,
+     "ema_negative": 772,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 579
+    },
+    {
+     "version": "v17",
+     "real_step": 87216,
+     "window": "W2",
+     "online_negative": 345,
+     "ema_negative": 866,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 909
+    },
+    {
+     "version": "v17",
+     "real_step": 87216,
+     "window": "W2",
+     "online_negative": 345,
+     "ema_negative": 866,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 387
+    },
+    {
+     "version": "v17",
+     "real_step": 88032,
+     "window": "W2",
+     "online_negative": 291,
+     "ema_negative": 905,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 908
+    },
+    {
+     "version": "v17",
+     "real_step": 88032,
+     "window": "W2",
+     "online_negative": 291,
+     "ema_negative": 905,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 294
+    },
+    {
+     "version": "v17",
+     "real_step": 88816,
+     "window": "W2",
+     "online_negative": 320,
+     "ema_negative": 849,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 899
+    },
+    {
+     "version": "v17",
+     "real_step": 88816,
+     "window": "W2",
+     "online_negative": 320,
+     "ema_negative": 849,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 370
+    },
+    {
+     "version": "v17",
+     "real_step": 89664,
+     "window": "W2",
+     "online_negative": 493,
+     "ema_negative": 891,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 826
+    },
+    {
+     "version": "v17",
+     "real_step": 89664,
+     "window": "W2",
+     "online_negative": 493,
+     "ema_negative": 891,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 428
+    },
+    {
+     "version": "v17",
+     "real_step": 90464,
+     "window": "W3",
+     "online_negative": 736,
+     "ema_negative": 848,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 590
+    },
+    {
+     "version": "v17",
+     "real_step": 90464,
+     "window": "W3",
+     "online_negative": 736,
+     "ema_negative": 848,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 478
+    },
+    {
+     "version": "v17",
+     "real_step": 91200,
+     "window": "W3",
+     "online_negative": 747,
+     "ema_negative": 766,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 583
+    },
+    {
+     "version": "v17",
+     "real_step": 91200,
+     "window": "W3",
+     "online_negative": 747,
+     "ema_negative": 766,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 564
+    },
+    {
+     "version": "v17",
+     "real_step": 91968,
+     "window": "W3",
+     "online_negative": 779,
+     "ema_negative": 779,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 570
+    },
+    {
+     "version": "v17",
+     "real_step": 91968,
+     "window": "W3",
+     "online_negative": 779,
+     "ema_negative": 779,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 570
+    },
+    {
+     "version": "v17",
+     "real_step": 92768,
+     "window": "W3",
+     "online_negative": 829,
+     "ema_negative": 818,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 590
+    },
+    {
+     "version": "v17",
+     "real_step": 92768,
+     "window": "W3",
+     "online_negative": 829,
+     "ema_negative": 818,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 601
+    },
+    {
+     "version": "v17",
+     "real_step": 93568,
+     "window": "W3",
+     "online_negative": 996,
+     "ema_negative": 807,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 426
+    },
+    {
+     "version": "v17",
+     "real_step": 93568,
+     "window": "W3",
+     "online_negative": 996,
+     "ema_negative": 807,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 615
+    },
+    {
+     "version": "v17",
+     "real_step": 94352,
+     "window": "W3",
+     "online_negative": 1005,
+     "ema_negative": 797,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 387
+    },
+    {
+     "version": "v17",
+     "real_step": 94352,
+     "window": "W3",
+     "online_negative": 1005,
+     "ema_negative": 797,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 595
+    },
+    {
+     "version": "v17",
+     "real_step": 95152,
+     "window": "W3",
+     "online_negative": 1073,
+     "ema_negative": 832,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 325
+    },
+    {
+     "version": "v17",
+     "real_step": 95152,
+     "window": "W3",
+     "online_negative": 1073,
+     "ema_negative": 832,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 566
+    },
+    {
+     "version": "v17",
+     "real_step": 95888,
+     "window": "W3",
+     "online_negative": 974,
+     "ema_negative": 759,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 342
+    },
+    {
+     "version": "v17",
+     "real_step": 95888,
+     "window": "W3",
+     "online_negative": 974,
+     "ema_negative": 759,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 557
+    },
+    {
+     "version": "v17",
+     "real_step": 96608,
+     "window": "W3",
+     "online_negative": 933,
+     "ema_negative": 737,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 375
+    },
+    {
+     "version": "v17",
+     "real_step": 96608,
+     "window": "W3",
+     "online_negative": 933,
+     "ema_negative": 737,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 571
+    },
+    {
+     "version": "v17",
+     "real_step": 97264,
+     "window": "W3",
+     "online_negative": 898,
+     "ema_negative": 663,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 468
+    },
+    {
+     "version": "v17",
+     "real_step": 97264,
+     "window": "W3",
+     "online_negative": 898,
+     "ema_negative": 663,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 703
+    },
+    {
+     "version": "v17",
+     "real_step": 97936,
+     "window": "W3",
+     "online_negative": 900,
+     "ema_negative": 650,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 440
+    },
+    {
+     "version": "v17",
+     "real_step": 97936,
+     "window": "W3",
+     "online_negative": 900,
+     "ema_negative": 650,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 690
+    },
+    {
+     "version": "v17",
+     "real_step": 98624,
+     "window": "W3",
+     "online_negative": 981,
+     "ema_negative": 666,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 360
+    },
+    {
+     "version": "v17",
+     "real_step": 98624,
+     "window": "W3",
+     "online_negative": 981,
+     "ema_negative": 666,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 675
+    },
+    {
+     "version": "v17",
+     "real_step": 99328,
+     "window": "W3",
+     "online_negative": 955,
+     "ema_negative": 772,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 335
+    },
+    {
+     "version": "v17",
+     "real_step": 99328,
+     "window": "W3",
+     "online_negative": 955,
+     "ema_negative": 772,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 518
+    },
+    {
+     "version": "v17",
+     "real_step": 100000,
+     "window": "W3",
+     "online_negative": 963,
+     "ema_negative": 738,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "Online positive",
+     "support_count": 317
+    },
+    {
+     "version": "v17",
+     "real_step": 100000,
+     "window": "W3",
+     "online_negative": 963,
+     "ema_negative": 738,
+     "invalid_trailing5_endpoint": "no",
+     "online_positive_reappearance_step_after_full_run_extinction": 76576,
+     "ema_positive_reappearance_step_after_full_run_extinction": 81520,
+     "positive_reappearance_lag_real_steps": 4944,
+     "support_series": "EMA positive",
+     "support_count": 542
+    }
+   ]
+  }
+ },
+ "sources": [
+  {
+   "id": "prior_report",
+   "label": "Complete prior V14-V16 RCA report (SHA-256 2bcdf68840c8dac4fd0d6569c108a6c5fe0e679e92a4f0f6380f3b90ae999c10)",
+   "path": "notebook/v14_v15_v16_qualification_rca_report.json"
+  },
+  {
+   "id": "prior_rca_notebook",
+   "label": "Executed frozen V14-V16 RCA notebook (SHA-256 d32ebb602bdf38f8392878f7e76b3e91d32528203565843429dad4d0ad3bc87a)",
+   "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb"
+  },
+  {
+   "id": "rca_notebook",
+   "label": "Executed frozen V14-V17 RCA notebook (SHA-256 b4d75b0a11953ef02abd3133e8949fb3d9949b1df56422f704b23b58767708f3; 663425 bytes; 3693 lines; 17 cells; 8 executed code cells; 3 visually QA-passed charts)",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb"
+  },
+  {
+   "id": "headline_sql",
+   "label": "Reviewed V14-V17 qualification headline metrics",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes the exact heldout RMSE, V17 denominator failure, full-run sign-extinction/reappearance landmarks, gradient, and cadence headline values.",
+    "sql": "WITH materialized(v14_heldout_ema_rmse, v15_heldout_ema_rmse, v16_heldout_ema_rmse, v17_heldout_ema_rmse, rmse_ceiling, v17_rmse_margin_to_ceiling, v17_absolute_rmse_improvement_vs_v16, v17_relative_rmse_improvement_vs_v16, v17_total_trailing5_endpoints, v17_defined_trailing5_endpoints, v17_undefined_trailing5_endpoints, v17_invalid_endpoint_steps, v17_w1_online_positive_support, v17_w1_online_negative_support, v17_w1_ema_positive_support, v17_w1_ema_negative_support, v17_online_positive_last_step_before_full_run_extinction, v17_online_positive_full_run_extinction_start_step, v17_online_positive_full_run_extinction_end_step, v17_online_positive_reappearance_step_after_full_run_extinction, v17_ema_positive_last_step_before_full_run_extinction, v17_ema_positive_full_run_extinction_start_step, v17_ema_positive_full_run_extinction_end_step, v17_ema_positive_reappearance_step_after_full_run_extinction, v17_positive_reappearance_lag_real_steps, v17_canonical_raw_norm_median, v17_canonical_raw_norm_p95, v17_canonical_raw_norm_max, v17_nominal_clip_boundary, v17_canonical_boundary_exceedances, v17_canonical_rows, v17_all_q_updates, v17_all_median_real_step_gap, v17_canonical_median_real_step_gap, v17_train_ema_rmse, v17_qualification_decision, retry_primary_fixed_status, v16_eligible_trailing_endpoints, v16_undefined_trailing_endpoints, v16_w3_positive_sign_support, v16_w3_negative_sign_support, v16_zero_positive_endpoint_steps) AS (VALUES (0.5247954789453232, 0.5637126651551874, 0.643399622874774, 0.4739621233029751, 0.5, -0.026037876697024898, 0.16943749957179893, 0.2633472161745063, 32, 25, 7, '74544, 75568, 76576, 77616, 78656, 79680, 80656', 1454, 10264, 0, 11718, 62128, 62992, 75568, 76576, 69424, 70416, 80656, 81520, 4944, 509.1683654785156, 2808.359375, 4498.3056640625, 1608.0, 5, 36, 143, 784.0, 800.0, 0.6696040559045617, 'FAIL', 'none; irreversible no-retry failure', 48, 5, 1, 11722, '95344, 96368, 97392, 98416, 99408')) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "Frozen seed-1 fresh 100k qualifications only",
+     "Canonical actor rows satisfy 70000 < real_step <= 100000",
+     "Terminal overshoots excluded",
+     "No omission, repair, interpolation, retry, primary, or fixed evaluation",
+     "Full-run sign landmarks and cadence use all 143 logged VoC-Q update rows"
+    ],
+    "metric_definitions": [
+     "Heldout EMA RMSE is support-weighted selected-action TD RMSE.",
+     "Trailing-five endpoints are defined only when independently pooled positive-sign and negative-sign supports are both nonzero.",
+     "Raw norm boundary exceedance means logged actor/voc_total_norm > 1608 before clipping.",
+     "Retained V16 denominator context: 48 eligible trailing-five endpoints, five undefined endpoints at 95344/96368/97392/98416/99408, and W3 support of 1 positive versus 11722 negative.",
+     "Full-run positive-support landmarks use all 143 logged VoC-Q update rows: online is positive through 62128, zero on every logged row 62992-75568, and first canonically reappears at 76576; EMA is positive through 69424, zero on every logged row 70416-80656, and first canonically reappears at 81520."
+    ]
+   }
+  },
+  {
+   "id": "window_sql",
+   "label": "Reviewed V14-V17 window and full RMSE rows",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes W1, W2, W3, and Full support-weighted calibration rows for the four observed 2x2 cells.",
+    "sql": "WITH materialized(version, schema_version, loss, reconstruction, window_label, window_order, canonical_rows, heldout_support, support_share, ema_rmse, online_rmse, ema_sse, threshold_sse, excess_sse, sse_share, full_ema_rmse, rmse_ceiling, design_cell) AS (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W1 (70k-80k]', 1, 32, 3647, 0.4734519019, 0.3070468494240733, 0.3069186481, 343.8310189523, 911.75, -567.9189810477, 0.16207087859592553, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W2 (80k-90k]', 2, 19, 2485, 0.3226015838, 0.4805763254032396, 0.4812888845, 573.9197072771, 621.25, -47.3302927229, 0.270527282516125, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W3 (90k-100k]', 3, 12, 1571, 0.2039465143, 0.8753410807478021, 0.8748756785, 1203.7347740099, 392.75, 810.9847740099, 0.5674018388879494, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Full (70k-100k]', 4, 63, 7703, 1.0, 0.5247954789453232, 0.5248123566562356, 2121.4855002393, 1925.75, 195.7355002393001, 1.0, 0.5247954789453232, 0.5, 'Huber x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W1 (70k-80k]', 1, 19, 2452, 0.3007113073, 0.6350000482991449, 0.6355039321, 988.7078504055, 613.0, 375.7078504055, 0.38157656190278516, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W2 (80k-90k]', 2, 26, 3509, 0.430340937, 0.5262197892944133, 0.527617819, 971.6675986575, 877.25, 94.4175986575, 0.3750001392787582, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W3 (90k-100k]', 3, 13, 2193, 0.2689477557, 0.536296424979157, 0.537270896, 630.7371849918, 548.25, 82.4871849918, 0.24342329881845667, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Full (70k-100k]', 4, 58, 8154, 1.0, 0.5637126651551874, 0.5646944857965209, 2591.1126340548, 2038.5, 552.6126340547999, 1.0, 0.5637126651551874, 0.5, 'Half-MSE x centered-only'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W1 (70k-80k]', 1, 32, 4621, 0.6132714001, 0.42412219735332535, 0.4225059308, 831.223808528, 1155.25, -324.026191472, 0.26648521176430207, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W2 (80k-90k]', 2, 10, 1452, 0.1927007299, 0.9513859413944138, 0.9580587217, 1314.2563241692, 363.0, 951.2563241692, 0.4213424486469157, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W3 (90k-100k]', 3, 10, 1462, 0.1940278699, 0.8161048402729425, 0.8102244292, 973.7316352833, 365.5, 608.2316352833, 0.31217233958876617, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Full (70k-100k]', 4, 52, 7535, 1.0, 0.643399622874774, 0.6432134673573406, 3119.21176798055, 1883.75, 1235.4617679805501, 1.0, 0.643399622874774, 0.5, 'Half-MSE x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'W1 (70k-80k]', 1, 10, 1461, 0.25417536534446766, 0.5044903887648509, 0.4994767302, 371.8399169923, 365.25, 6.5899169923000045, 0.28797313686709375, 0.4739621233029751, 0.5, 'Huber x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'W2 (80k-90k]', 2, 12, 1909, 0.3321155184411969, 0.3328853383580048, 0.3386498776, 211.5413459745, 477.25, -265.7086540255, 0.16382917000980668, 0.4739621233029751, 0.5, 'Huber x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'W3 (90k-100k]', 3, 14, 2378, 0.4137091162143354, 0.5455878532763281, 0.5363071119, 707.8499992183, 594.5, 113.34999921830001, 0.5481976931230996, 0.4739621233029751, 0.5, 'Huber x common mode'), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Full (70k-100k]', 4, 36, 5748, 1.0, 0.4739621233029751, 0.4695661556492494, 1291.2312621851, 1437.0, -145.76873781490008, 1.0, 0.4739621233029751, 0.5, 'Huber x common mode')) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "W1=(70000,80000], W2=(80000,90000], W3=(90000,100000], Full=(70000,100000]",
+     "Support-weighted within version and window",
+     "Separately generated trajectories are not paired"
+    ],
+    "metric_definitions": [
+     "EMA RMSE = sqrt(sum(n_i * rmse_i^2) / sum(n_i)).",
+     "Threshold SSE = 0.25 * heldout support for a 0.5 RMSE ceiling.",
+     "SSE share is window EMA SSE divided by version Full EMA SSE."
+    ]
+   }
+  },
+  {
+   "id": "sign_sql",
+   "label": "Reviewed V17 online/EMA sign-support trajectory",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes every V17 canonical positive-support row, the seven invalid trailing-five endpoint markers, and exact reappearance landmarks after the full-run extinction intervals.",
+    "sql": "WITH materialized(version, real_step, window, online_negative, ema_negative, invalid_trailing5_endpoint, online_positive_reappearance_step_after_full_run_extinction, ema_positive_reappearance_step_after_full_run_extinction, positive_reappearance_lag_real_steps, support_series, support_count) AS (VALUES ('v17', 70416, 'W1', 1152, 1152, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 70416, 'W1', 1152, 1152, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 71456, 'W1', 1184, 1184, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 71456, 'W1', 1184, 1184, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 72480, 'W1', 1175, 1175, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 72480, 'W1', 1175, 1175, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 73504, 'W1', 1170, 1170, 'no', 76576, 81520, 4944, 'Online positive', 0), ('v17', 73504, 'W1', 1170, 1170, 'no', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 74544, 'W1', 1188, 1188, 'yes', 76576, 81520, 4944, 'Online positive', 0), ('v17', 74544, 'W1', 1188, 1188, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 74544, 'W1', 1188, 1188, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 75568, 'W1', 1180, 1180, 'yes', 76576, 81520, 4944, 'Online positive', 0), ('v17', 75568, 'W1', 1180, 1180, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 75568, 'W1', 1180, 1180, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 76576, 'W1', 1078, 1154, 'yes', 76576, 81520, 4944, 'Online positive', 76), ('v17', 76576, 'W1', 1078, 1154, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 76576, 'W1', 1078, 1154, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 77616, 'W1', 875, 1175, 'yes', 76576, 81520, 4944, 'Online positive', 300), ('v17', 77616, 'W1', 875, 1175, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 77616, 'W1', 875, 1175, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 78656, 'W1', 722, 1164, 'yes', 76576, 81520, 4944, 'Online positive', 442), ('v17', 78656, 'W1', 722, 1164, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 78656, 'W1', 722, 1164, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 79680, 'W1', 540, 1176, 'yes', 76576, 81520, 4944, 'Online positive', 636), ('v17', 79680, 'W1', 540, 1176, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 79680, 'W1', 540, 1176, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 80656, 'W2', 193, 1104, 'yes', 76576, 81520, 4944, 'Online positive', 910), ('v17', 80656, 'W2', 193, 1104, 'yes', 76576, 81520, 4944, 'EMA positive', 0), ('v17', 80656, 'W2', 193, 1104, 'yes', 76576, 81520, 4944, 'Invalid trailing-5 endpoint', 0), ('v17', 81520, 'W2', 353, 967, 'no', 76576, 81520, 4944, 'Online positive', 920), ('v17', 81520, 'W2', 353, 967, 'no', 76576, 81520, 4944, 'EMA positive', 306), ('v17', 82400, 'W2', 218, 961, 'no', 76576, 81520, 4944, 'Online positive', 1015), ('v17', 82400, 'W2', 218, 961, 'no', 76576, 81520, 4944, 'EMA positive', 272), ('v17', 83248, 'W2', 8, 888, 'no', 76576, 81520, 4944, 'Online positive', 1258), ('v17', 83248, 'W2', 8, 888, 'no', 76576, 81520, 4944, 'EMA positive', 378), ('v17', 84048, 'W2', 1, 849, 'no', 76576, 81520, 4944, 'Online positive', 1343), ('v17', 84048, 'W2', 1, 849, 'no', 76576, 81520, 4944, 'EMA positive', 495), ('v17', 84864, 'W2', 1, 867, 'no', 76576, 81520, 4944, 'Online positive', 1362), ('v17', 84864, 'W2', 1, 867, 'no', 76576, 81520, 4944, 'EMA positive', 496), ('v17', 85632, 'W2', 17, 808, 'no', 76576, 81520, 4944, 'Online positive', 1329), ('v17', 85632, 'W2', 17, 808, 'no', 76576, 81520, 4944, 'EMA positive', 538), ('v17', 86400, 'W2', 377, 772, 'no', 76576, 81520, 4944, 'Online positive', 974), ('v17', 86400, 'W2', 377, 772, 'no', 76576, 81520, 4944, 'EMA positive', 579), ('v17', 87216, 'W2', 345, 866, 'no', 76576, 81520, 4944, 'Online positive', 909), ('v17', 87216, 'W2', 345, 866, 'no', 76576, 81520, 4944, 'EMA positive', 387), ('v17', 88032, 'W2', 291, 905, 'no', 76576, 81520, 4944, 'Online positive', 908), ('v17', 88032, 'W2', 291, 905, 'no', 76576, 81520, 4944, 'EMA positive', 294), ('v17', 88816, 'W2', 320, 849, 'no', 76576, 81520, 4944, 'Online positive', 899), ('v17', 88816, 'W2', 320, 849, 'no', 76576, 81520, 4944, 'EMA positive', 370), ('v17', 89664, 'W2', 493, 891, 'no', 76576, 81520, 4944, 'Online positive', 826), ('v17', 89664, 'W2', 493, 891, 'no', 76576, 81520, 4944, 'EMA positive', 428), ('v17', 90464, 'W3', 736, 848, 'no', 76576, 81520, 4944, 'Online positive', 590), ('v17', 90464, 'W3', 736, 848, 'no', 76576, 81520, 4944, 'EMA positive', 478), ('v17', 91200, 'W3', 747, 766, 'no', 76576, 81520, 4944, 'Online positive', 583), ('v17', 91200, 'W3', 747, 766, 'no', 76576, 81520, 4944, 'EMA positive', 564), ('v17', 91968, 'W3', 779, 779, 'no', 76576, 81520, 4944, 'Online positive', 570), ('v17', 91968, 'W3', 779, 779, 'no', 76576, 81520, 4944, 'EMA positive', 570), ('v17', 92768, 'W3', 829, 818, 'no', 76576, 81520, 4944, 'Online positive', 590), ('v17', 92768, 'W3', 829, 818, 'no', 76576, 81520, 4944, 'EMA positive', 601), ('v17', 93568, 'W3', 996, 807, 'no', 76576, 81520, 4944, 'Online positive', 426), ('v17', 93568, 'W3', 996, 807, 'no', 76576, 81520, 4944, 'EMA positive', 615), ('v17', 94352, 'W3', 1005, 797, 'no', 76576, 81520, 4944, 'Online positive', 387), ('v17', 94352, 'W3', 1005, 797, 'no', 76576, 81520, 4944, 'EMA positive', 595), ('v17', 95152, 'W3', 1073, 832, 'no', 76576, 81520, 4944, 'Online positive', 325), ('v17', 95152, 'W3', 1073, 832, 'no', 76576, 81520, 4944, 'EMA positive', 566), ('v17', 95888, 'W3', 974, 759, 'no', 76576, 81520, 4944, 'Online positive', 342), ('v17', 95888, 'W3', 974, 759, 'no', 76576, 81520, 4944, 'EMA positive', 557), ('v17', 96608, 'W3', 933, 737, 'no', 76576, 81520, 4944, 'Online positive', 375), ('v17', 96608, 'W3', 933, 737, 'no', 76576, 81520, 4944, 'EMA positive', 571), ('v17', 97264, 'W3', 898, 663, 'no', 76576, 81520, 4944, 'Online positive', 468), ('v17', 97264, 'W3', 898, 663, 'no', 76576, 81520, 4944, 'EMA positive', 703), ('v17', 97936, 'W3', 900, 650, 'no', 76576, 81520, 4944, 'Online positive', 440), ('v17', 97936, 'W3', 900, 650, 'no', 76576, 81520, 4944, 'EMA positive', 690), ('v17', 98624, 'W3', 981, 666, 'no', 76576, 81520, 4944, 'Online positive', 360), ('v17', 98624, 'W3', 981, 666, 'no', 76576, 81520, 4944, 'EMA positive', 675), ('v17', 99328, 'W3', 955, 772, 'no', 76576, 81520, 4944, 'Online positive', 335), ('v17', 99328, 'W3', 955, 772, 'no', 76576, 81520, 4944, 'EMA positive', 518), ('v17', 100000, 'W3', 963, 738, 'no', 76576, 81520, 4944, 'Online positive', 317), ('v17', 100000, 'W3', 963, 738, 'no', 76576, 81520, 4944, 'EMA positive', 542)) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "V17 only",
+     "70000 < real_step <= 100000",
+     "Online and EMA positive counts are logged row values",
+     "Invalid endpoint markers follow strict pooled trailing-five denominator logic"
+    ],
+    "metric_definitions": [
+     "Online support is positive through real_step 62128, zero on every logged VoC-Q update row from 62992 through 75568, and first canonically reappears after this full-run extinction interval at 76576.",
+     "EMA support is positive through real_step 69424, zero on every logged VoC-Q update row from 70416 through 80656, and first canonically reappears after this full-run extinction interval at 81520.",
+     "An invalid endpoint is a failure, not a zero gap or a negative gap."
+    ]
+   }
+  },
+  {
+   "id": "gradient_sql",
+   "label": "Reviewed raw VoC-Q gradient and cadence diagnostics",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes canonical raw-norm summaries, boundary counts, update counts, and real-step gap medians.",
+    "sql": "WITH materialized(version, schema_version, loss, reconstruction, statistic, statistic_order, raw_q_total_norm, nominal_clip_boundary, canonical_boundary_exceedances, canonical_rows, canonical_boundary_exceedance_rate, all_boundary_exceedances, all_rows, all_boundary_exceedance_rate, canonical_max_norm, all_max_norm, all_q_updates, all_median_real_step_gap, canonical_q_updates, canonical_median_real_step_gap) AS (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Mean', 1, 128.95252648610918, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Median', 2, 62.38666915893555, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'P95', 3, 443.18048400878894, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Maximum', 4, 886.306884765625, 1608.0, 0, 63, 0.0, 0, 204, 0.0, 886.306884765625, 1551.61767578125, 204, 448.0, 63, 480.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Mean', 1, 181.82969428753032, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Median', 2, 131.73944091796875, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'P95', 3, 537.2278793334957, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Maximum', 4, 802.5406494140625, 1608.0, 0, 58, 0.0, 1, 149, 0.006711409395973154, 802.5406494140625, 1767.575439453125, 149, 784.0, 58, 544.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Mean', 1, 696.7852480961726, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Median', 2, 428.2610778808594, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'P95', 3, 1842.8370300292963, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Maximum', 4, 2687.010986328125, 1608.0, 7, 52, 0.1346153846153846, 35, 250, 0.14, 2687.010986328125, 9307.25390625, 250, 192.0, 52, 496.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Mean', 1, 861.2543914582994, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Median', 2, 509.1683654785156, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'P95', 3, 2808.359375, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0), ('v17', 10, 'Huber beta=1', 'Raw-head mean + centered residual', 'Maximum', 4, 4498.3056640625, 1608.0, 5, 36, 0.1388888888888889, 14, 143, 0.0979020979020979, 4498.3056640625, 4555.32568359375, 143, 784.0, 36, 800.0)) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "Canonical norm statistics use 70000 < real_step <= 100000",
+     "All-run cadence retains all complete actor CSV rows",
+     "Boundary is 1608"
+    ],
+    "metric_definitions": [
+     "Logged actor/voc_total_norm is a pre-clipping raw total norm.",
+     "Cadence is observed row/update timing, not a controlled treatment.",
+     "P95 is the pandas linear quantile used by the frozen notebook."
+    ]
+   }
+  },
+  {
+   "id": "integrity_sql",
+   "label": "Frozen artifact and provenance hash inventory",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes exact source, data, protocol, launch, CSV, checkpoint, config, and finish hashes for all four frozen runs.",
+    "sql": "WITH materialized(version, snapshot_id, xpid, schema_version, source_manifest_sha256, data_manifest_sha256, protocol_sha256, launch_provenance_sha256, actor_csv_sha256, model_csv_sha256, actor_checkpoint_sha256, model_checkpoint_sha256, config_sha256, finish_sha256, artifact_rehash_status, qualification_attempt) AS (VALUES ('v14', 'di-voc-v14-sealed-eps25-final-eKgdrk', 'enduro-voc-v14-sealed-eps25-seed1-qual-fresh-100k', 7, '4fa507706250f349acfb6034453f1e8c70681c54e9e52718d848cd81755dbfea', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', 'f422089ec4df7479f89477a3e6e63744dc74d06d1ceab9d5ea10397b34500972', '0e9f4ad97ea5774ccc579da43118546b1c837d6e21ceaa3b9be8d7d330af5b54', '6d72052279a59983d102bed3db767b3792b115d221f155cdd10d4dc29bbe85a8', 'b38dfd254fab250394ca463c4371c573b8c37f332e5f5f0b43c6d9b5fbfc3f64', 'a86094cc3131bbe55bd5ac5995203cf8f3830ab36fbaf60e630306b0fe1d107c', '6d6c2ff3ba5335337476998eb13be6ea80e9962d5ffabc67ade3020cb362af7a', '97d6a78d78d0d49dbd3e038fa77f268c29d4b21244c98d345060505f70c40350', '5ea6592e5f57cafb908902eed9decd7535e78d4e9b9fa33c23f7bf00b16f3b4e', 'PASS', '1_of_1_no_retry'), ('v15', 'di-voc-v15-halfsq-eps25-final-CKcYfI', 'enduro-voc-v15-halfsq-eps25-seed1-qual-fresh-100k', 8, '1c2d619479a63d75f0b23c41ef293f611b3631432356067a2db425a30ec62cdf', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', 'cf5838f577ac55db2990669ebfd712c6cbbeee28e8b5388075833b69f4206b90', 'ad1e625579aad7e9c400a4a85130939400ed1e0696b8c71987ce8e3bbfda9ccd', '359eb6540a6265a2a5b8e77fa8ac01420b5f0077a3b84d67800f0308f448e341', '360e6d475d635f734e4b14ddfff7a0022ba7997131785ce2ee7a39ea28b6839b', 'ee41fa3f0916f5b726b6cd448e12989abbe01554a69c6f4eb5ab8ed434cd2c7c', '8d215ce13489735e685ed1d271ad857b69f23f0b35213447d0d90f67f96b82b8', 'edd3ce926dbb048543a1ea11ee0bca29bef2f83c88877f3ae1e4d85308e234b2', 'e2d00bf7baa7276cca91bf1c73e025991e5d1c1ddfc6236ab8cec71c845d8184', 'PASS', '1_of_1_no_retry'), ('v16', 'di-voc-v16-commonmode-eps25-final-mZ6A2C', 'enduro-voc-v16-commonmode-eps25-seed1-qual-fresh-100k', 9, 'f90b970c647b06884f1101a3b39d862eed97aec51d69013614b6b671f54112ea', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', '1814d68f667748358746c42f4578e17acbb950e9e0adac04a8d78c9352fdb84c', '1b712c604387725ccdc4aa1dbdcb016f4b4cb5c9b0effa22f150e27daf035325', '45da4532357f5f150fad15c47bf1cdbb5ec52738ff3a68678afb5dca73ed20d5', 'ef5e39aba9ad5b7c0c2b4bef34ba91bb6f3adf1bcdc940abe9915504b8b18225', 'c05a2237b495ff36fe633446e8236a93d2e07da9038f01781ac3b5026e947b7d', 'd1ce735542c5dd4a89b4e8cdc550946b5417700a956468820a69e4d80ed9ea58', '2c91aa82c4744a8f44320ec5cc95f797384c4467c17607420b1dc3a94d9fea6b', '1b5f3449f685f876a10bbad21bacad4c0cd28479d53bcb0197f18308e2cb286f', 'PASS', '1_of_1_no_retry'), ('v17', 'di-voc-v17-huber-common-eps25-final-Tmc42l', 'enduro-voc-v17-huber-common-eps25-seed1-qual-fresh-100k', 10, '87d17a63953caf41f62b92454e13ff92498c590eef9f6e156282e9e7e1d767ac', '23c32c10236c15a53f27ecbe9e49dc2edbddfc5b132dcece22700ad07ef68343', '9d032579808f5cc07253e654feea9f4f80fe45151701fd4864896bf486c267a1', '17aebc1ec40196fa51205eb8ea208fb96b04750941abd44c9fc2bba589232905', 'e50308619550a45e8bc722bd152722f96723f2b448885ae2e5ec65227f21d030', '2801e56a80dc8e3db20dcf0f22109a259e0a7fd6b31e4d1d2054fdd2ef75b564', '1054956ebbb8a1b75cb1d2eed54611c90d785c83ee3fc9a7d6d40e2c85430eb0', 'aca6d46ba749fd5394525918f6a6a822f0ac7f3377b7c953b511662012bf1a15', 'f5d900bd2b6d0b25a628869b3dc90424e4a8018e888e88ace81a4f88d217b971', '65f4c77efedbaaeaffe4a90cde00c8c4292942a3b5e3a5c7a39eba4b3acebff7', 'PASS', '1_of_1_no_retry')) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "One immutable snapshot and one 1_of_1_no_retry qualification per version",
+     "Hashes were re-read from exact frozen paths",
+     "No source, run, notebook, or report mutation during evidence collection"
+    ],
+    "metric_definitions": [
+     "artifact_rehash_status PASS means every listed byte hash matched the frozen notebook contract.",
+     "The V17 source manifest covers 1066 paths; the shared data manifest covers 11 paths."
+    ]
+   }
+  },
+  {
+   "id": "version_sql",
+   "label": "Exact V14-V17 2x2 qualification comparison",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes loss, reconstruction, population, train/heldout RMSE, denominator, raw-norm, cadence, and final decision fields.",
+    "sql": "WITH materialized(version, schema, design_cell, q_regression_loss, q_reconstruction, learnable_common_mode, canonical_rows, heldout_support, heldout_ema_rmse, train_ema_rmse, heldout_ema_sse, threshold_excess_sse, rmse_gate, undefined_trailing_endpoints, canonical_raw_norm_boundary_exceedances, all_q_updates, all_median_real_step_gap, hard_failures, qualification_decision) AS (VALUES ('v14', 'schema 7', 'Huber x centered-only', 'Huber beta=1', 'Centered / no common mode', 'No', 63, 7703, 0.5247954789453232, 0.5865118456123475, 2121.4855002393, 195.7355002393001, 'FAIL', 0, '0/63', 204, 448.0, 'Heldout EMA RMSE', 'FAIL'), ('v15', 'schema 8', 'Half-MSE x centered-only', 'Half-MSE', 'Centered / no common mode', 'No', 58, 8154, 0.5637126651551874, 0.48913625344503686, 2591.1126340548, 552.6126340547999, 'FAIL', 0, '0/58', 149, 784.0, 'Heldout EMA RMSE', 'FAIL'), ('v16', 'schema 9', 'Half-MSE x common mode', 'Half-MSE', 'Raw-head mean + centered residual', 'Yes', 52, 7535, 0.643399622874774, 0.5999551130525911, 3119.21176798055, 1235.4617679805501, 'FAIL', 5, '7/52', 250, 192.0, 'Heldout EMA RMSE; trailing-five denominator validity', 'FAIL'), ('v17', 'schema 10', 'Huber x common mode', 'Huber beta=1', 'Raw-head mean + centered residual', 'Yes', 36, 5748, 0.4739621233029751, 0.6696040559045617, 1291.2312621851, -145.76873781490008, 'PASS', 7, '5/36', 143, 784.0, 'Trailing-five denominator validity', 'FAIL')) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "Strict canonical population 70000 < real_step <= 100000",
+     "Unchanged heldout EMA RMSE ceiling <= 0.5",
+     "All denominator failures remain failures"
+    ],
+    "metric_definitions": [
+     "The four observed cells are separate single-seed closed-loop runs, not a randomized factorial.",
+     "Threshold-excess SSE = heldout EMA SSE - 0.25 * heldout support.",
+     "Overall qualification requires every hard gate; V17 clears RMSE but fails denominator validity."
+    ]
+   }
+  },
+  {
+   "id": "mechanism_sql",
+   "label": "Frozen V17 code and mechanism evidence",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes exact code-line, hash, algebra, state-path, and causal-limit evidence used in the mechanism audit.",
+    "sql": "WITH materialized(mechanism, frozen_observation, geometry_or_state, code_reference, code_sha256, what_it_cannot_prove) AS (VALUES ('Raw action-row head', 'Parameters, storage, and forward outputs use exact [CONTINUE, STOP] rows.', 'Raw rows are not reinterpreted as stored common/difference coordinates.', 'thinker/thinker/actor_net.py:1348-1350', 'bdfb3b46be65919e86708b08e456f5abb7cd7abfa5a1c82a117aeabc2c5ca0f0', 'The raw basis alone does not identify the source of a closed-loop sign-support collapse.'), ('Schema-10 common-mode reconstruction', 'c=(q_C+q_S)/2 is added to a policy-centered residual; common shifts survive reconstruction.', 'Selected-Q gradients generally contain both common and action-difference components.', 'thinker/thinker/learn_actor.py:819-831', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'The reconstruction does not isolate optimizer-coordinate effects from visitation or targets.'), ('Selected-action beta-1 Huber objective', 'V17 applies SmoothL1 beta=1 to selected reconstructed Q versus the detached target.', 'Per-example residual slope is bounded outside the quadratic region before batch aggregation.', 'thinker/thinker/learn_actor.py:838-869', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'Lower pooled heldout RMSE does not identify Huber as the cause in an unpaired on-policy run.'), ('Raw-gradient clipping then Adam', 'The unchanged nominal boundary is 0.5 x 201 x 16 = 1608; Adam stores rowwise raw-head moments.', 'A nonlinear rowwise denominator can mix common/difference update coordinates even when raw gradients are clipped first.', 'thinker/thinker/learn_actor.py:2964-2970,4054-4089', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'Logged raw total norm is not a post-clip parameter delta and does not identify causal clipping pressure.'), ('EMA and exact projection', 'EMA updates raw Q rows; the gate is projected exactly from the EMA raw-row difference.', 'Online support is positive through 62128, zero on logged rows 62992-75568, and first canonically reappears after that full-run extinction interval at 76576; EMA is positive through 69424, zero on logged rows 70416-80656, and first canonically reappears at 81520.', 'thinker/thinker/learn_actor.py:119-310,2702-2808', '7e26e652e88006c270f52022c289e32e6e9daf83d07f588db1b62d8e286d501b', 'Observed lag cannot predict the counterfactual trajectory under tau=1.'), ('Target and detached feature path', 'Q targets and detached features preserve the audited actor/value interfaces and state transaction.', 'V17 train EMA RMSE is 0.6696040559 while heldout EMA RMSE is 0.4739621233.', 'thinker/thinker/actor_net.py:2176-2184; thinker/thinker/learn_actor.py:4327-4335,5028-5094', 'actor_net bdfb3b46...; learn_actor 7e26e652...', 'Aggregate CSV moments do not expose event-level target/value distributions or paired counterfactual residuals.'), ('Behavior-policy feedback', 'Projected EMA Q differences feed the epsilon-greedy VoC behavior decision.', 'Changed Q signs can change later state/action composition, which changes subsequent training examples.', 'thinker/thinker/actor_net.py:221-364', 'bdfb3b46be65919e86708b08e456f5abb7cd7abfa5a1c82a117aeabc2c5ca0f0', 'CSV/checkpoint snapshots cannot separate policy feedback from objective, optimizer, or cadence.'), ('Persisted-surface invariants', 'V17 binds exact229 complete surface, exact209 projection, schema10, seal1, and no persisted derived identities.', 'Complete SHA ec3c4455... and projection SHA bd386ad1... were independently audited.', 'frozen V17 create_setting and checkpoint-contract audit', 'complete ec3c445584c77a3ed82e2855bba7addbb000124da9231e90f311e9a014e85beb; projection bd386ad1c78f030409562dea5c34d8866cc128cf99b7f39938f6a090f5987407', 'Surface integrity establishes identity and mechanics, not numerical qualification or causality.')) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "Frozen V17 source manifest only",
+     "Read-only code inspection",
+     "No implementation, launch, evaluation, retry, or counterfactual execution"
+    ],
+    "metric_definitions": [
+     "Common coordinate is the equal-row direction; difference coordinate is the antisymmetric row direction.",
+     "Mechanism observations are implementation facts or frozen associations, never treatment-effect estimates."
+    ]
+   }
+  },
+  {
+   "id": "checkpoint_sql",
+   "label": "Frozen V16/V17 checkpoint coordinate diagnostics",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes bitwise step-480 parity, terminal coordinate norms, frozen-denominator leakage ratios, and exact projection evidence.",
+    "sql": "WITH materialized(diagnostic, key_path_or_formula, common_value, difference_value, scalar_or_status, checkpoint_sha256, interpretation) AS (VALUES ('Step-480 V16/V17 parity', 'actor_net_state_dict.voc_head.{weight,bias}; voc_ema_gate_head_state_dict.{weight,bias}; actor_net_state_dict.voc_gate_head.{weight,bias}; voc_optimizer_state_dict.state.{0,1}.{step,exp_avg,exp_avg_sq}', 'bitwise equal', 'bitwise equal', 'true', 'v16 3a9f8f9199726902bf789afe7910f61c89f437cb4099476bcb709ecf6a06873c; v17 d93d16150136f67e8a9d200aefb31b7c2ecbb8a58ed01af4e092c02ce4669b66', 'V16 and V17 begin from the same audited Q, EMA, gate, and Q-Adam tensors at step 480.'), ('V17 terminal online weight norm', 'actor_net_state_dict.voc_head.weight; c=(row0+row1)/sqrt(2), d=(row0-row1)/sqrt(2)', '0.09197670854694069', '0.04772993647417535', 'nonzero in both coordinates', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'The raw head did not collapse to an all-zero tensor or lose the difference coordinate.'), ('V17 terminal EMA weight norm', 'voc_ema_gate_head_state_dict.weight; same orthonormal transform', '0.08804985021047274', '0.04523736449366637', 'nonzero in both coordinates', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'EMA retains both coordinates despite the earlier zero-positive support window.'), ('V17 online minus EMA norm', 'actor_net_state_dict.voc_head.weight - voc_ema_gate_head_state_dict.weight', '0.016672458740732386', '0.005328437961923289', 'online differs from EMA', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Frozen terminal tensors retain a measurable online/EMA separation.'), ('V17 Adam first-moment norm', 'voc_optimizer_state_dict.state.0.exp_avg; same orthonormal transform', '118.41179575543109', '61.27793259647075', 'Adam step 143', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Both common and difference components are present in the frozen raw-row first moment.'), ('Frozen denominator common-to-difference leakage', 'Apply frozen rowwise sqrt(vhat)+epsilon denominator to a common-only first moment', 'intended coordinate', 'leakage coordinate', '0.312531749799473', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Diagnostic ratio under the frozen denominator; not an actual next step or treatment effect.'), ('Frozen denominator difference-to-common leakage', 'Apply frozen rowwise sqrt(vhat)+epsilon denominator to a difference-only first moment', 'leakage coordinate', 'intended coordinate', '0.3289216882682968', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'Diagnostic ratio under the frozen denominator; not a counterfactual optimizer run.'), ('Terminal projection identity', 'voc_gate_head = 20 x (EMA CONTINUE row - EMA STOP row), weight and bias', 'not applicable', 'exact raw-row difference', 'bitwise true', '7d7eadebd7b333181efda0f40be310d85a4286fce4376b43304873b15456269c', 'The gate projection is mechanically exact at the frozen terminal checkpoint.')) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "Four named checkpoints SHA-verified; V16 step480, V17 step480, and V17 terminal deserialized on CPU",
+     "No tensor mutation, optimizer step, environment action, or counterfactual training",
+     "V17 terminal step 100000"
+    ],
+    "metric_definitions": [
+     "c=(row0+row1)/sqrt(2), d=(row0-row1)/sqrt(2).",
+     "Leakage ratios apply a frozen rowwise Adam denominator to isolated first moments and are not actual next updates.",
+     "Projection identity is checked bitwise on terminal weight and bias."
+    ]
+   }
+  },
+  {
+   "id": "candidate_sql",
+   "label": "Ranked V18 semantic-delta candidates",
+   "path": "notebook/v14_v15_v16_v17_qualification_comparison_rca.ipynb",
+   "query": {
+    "engine": "DuckDB",
+    "language": "sql",
+    "executed_at": "2026-08-28T16:03:34Z",
+    "description": "Materializes the consensus ranking, exact preservation contract, falsifiers, and deliberate limits for three future hypotheses.",
+    "sql": "WITH materialized(candidate_rank, candidate, semantic_delta, preserved_contract, identity, why_ranked_here, falsifier_or_limit) AS (VALUES (1, 'Schema-11 orthonormal common/difference Adam adapter', 'After unchanged raw-gradient clipping, map g_C/g_S to g_m=(g_C+g_S)/sqrt(2) and g_d=(g_C-g_S)/sqrt(2), maintain Adam moments in [common,difference] rows, then inverse-map update deltas to raw C/S parameters.', 'Raw parameters, storage, forward outputs [CONTINUE, STOP], Huber/common reconstruction, EMA, projection, tensor shapes, exact229/exact209, and persisted keys remain unchanged.', 'Derived-only voc_q_optimizer_coordinates=\"orthonormal_common_difference_adam\"; no new persisted key.', 'Directly isolates the audited nonlinear Adam coordinate coupling while preserving the represented Q function and raw-row wire surface.', 'The unchanged hard gates still fail; frozen leakage ratios are diagnostic rather than causal or predictive.'), (2, 'Tau=1 EMA sensitivity', 'Change only the EMA lag semantic so the projected behavior gate tracks the current raw Q head.', 'Keep schema-10 raw head, Huber/common objective, optimizer, projection formula, shapes, persisted keys, and acceptance gates.', 'Use the existing derived setting surface; add no persisted identity.', 'Online positive support first canonically reappeared after its full-run extinction interval 4944 real steps before EMA positive support first canonically reappeared after its own interval; a no-lag target cannot repair the two earliest frozen invalid endpoints.', 'A future fresh trajectory still loses denominator validity or other unchanged gates; the observed lag is not a counterfactual.'), (3, 'Deterministic VoC update cadence per real-step budget', 'Operationally broader cadence intervention; exact mechanism and value are intentionally unspecified pending a separate contract.', 'Do not map this proposal to actor_unroll_len or bundle it with objective, optimizer-coordinate, EMA, or gate changes.', 'Would require an explicit prospective identity contract; none is proposed here.', 'V17 logged 143 updates with median all-run gap 784 versus V16 250/192, a material but policy-coupled confound.', 'No existing knob or value is inferred from the frozen evidence; cadence association has unknown causal direction.')) SELECT * FROM materialized",
+    "tables_used": [],
+    "filters": [
+     "Recommendation only",
+     "No causal/pass prediction",
+     "No implementation, launch, retry, primary, or fixed evaluation authorization"
+    ],
+    "metric_definitions": [
+     "Rank 1 keeps raw [CONTINUE, STOP] parameter/storage/forward semantics and changes only optimizer coordinates after clipping.",
+     "Rank 2 changes EMA lag only.",
+     "Rank 3 is deterministic VoC update cadence per real-step budget; its exact mechanism and value are intentionally unspecified."
+    ]
+   }
+  }
+ ]
+}

@@ -15,6 +15,7 @@ actor_unroll_len: 201 # unroll length used to update actor
 actor_use_rms: false # whether to use rms (default: adam) as optimizer
 actor_grad_norm_clipping: 0.5 # gradient clipping norm; non-positive for no clipping
 actor_amp_max_consecutive_skips: 8 # fail after this many consecutive AMP overflows
+actor_amp_init_scale: 256.0 # main actor GradScaler initial scale; atomic schemas 6-11 require exactly 32
 actor_adam_eps: 0.00000001 # eps for Adam optimizer
 return_norm_type: -1 # return norm type; -1 for no normalization, 0 for value normalization, 1 for advantage normalization, 2 for standard adv normalization
 v_trace_lamb: 1. # lambda used in v-trace
@@ -25,6 +26,34 @@ cur_cost: 0. # cost for curiosity rewards - unused
 cur_cost_anneal: true # whether to anneal the curiosity cost to 0
 think_cost: 0.002 # cost applied to the Dynamic Thinker planning-reward channel
 think_cost_anneal: false # computation cost is part of the final objective
+dynamic_voc_mode: 'off' # off, shadow (critic only), or control (VoC-directed soft gate)
+voc_loss_cost: 1.0 # VoC-Q loss multiplier; schemas 8-9 use half-squared TD and schemas 10-11 use beta-1 SmoothL1
+voc_gate_temperature: 1.0 # temperature of the stochastic STOP/CONTINUE gate
+voc_train_epsilon: 0.02 # uniform gate exploration mixed in during training
+voc_eval_stochastic: true # sample the learned gate at evaluation instead of argmax
+voc_dueling_q: true # policy-centered V/d critics; schemas 9-11 also restore the raw-head mean
+voc_expected_gate_loss: true # exact discrete expected-Q gate objective
+voc_ema_gate_target: true # frozen EMA Q head drives the stochastic gate
+voc_gate_target_tau: 0.1 # successful-online-Q-step Polyak update rate
+voc_dedicated_gate: true # detached scalar CONTINUE/STOP policy head
+voc_soft_q_bce_gate: true # confidence-weighted soft-Q BCE policy improvement
+voc_gate_q_temperature: 0.05 # return-Q temperature for the soft gate teacher
+voc_gate_confidence_weighted: true # make equal-Q directed gate gradient exactly zero
+voc_gate_adam_beta1: 0.9 # first-moment decay for the isolated Adam gate optimizer
+voc_gate_param_align: false # directly align gate log-odds with the frozen soft-Q teacher
+voc_gate_param_align_coef: 1.0 # fixed unit weight for gate-parameter alignment
+voc_gate_exact_projection: false # deterministically project the gate onto the post-EMA soft-Q head
+voc_gate_epsilon_greedy_execution: false # execute the projected scalar gate by sign with uniform epsilon exploration
+voc_gate_execution_epsilon: 0.02 # atomic-schema actual sign-policy epsilon; legacy schemas retain voc_train_epsilon behavior
+voc_actor_policy_version_barrier: false # schemas 6-11 strict homogeneous actor-policy epoch barrier
+voc_model_input_seal_schema_version: 0 # schemas 7-11 model-input seal; legacy/schema-6 resolve exact 0
+voc_actor_policy_bundle_schema_version: 1 # atomic actor-policy publication bundle schema
+voc_actor_policy_barrier_timeout_s: 120.0 # monotonic fail-fast barrier deadline
+voc_actor_policy_ray_max_restarts: 0 # atomic-schema critical Ray actors never restart
+voc_actor_policy_ray_max_task_retries: 0 # atomic-schema actor tasks never retry
+voc_gate_learning_rate: 0.0003 # isolated gate-policy optimizer learning rate
+voc_gate_grad_norm_clipping: 1.0 # isolated gate-policy gradient clipping norm
+voc_parent_checkpoint: '' # exact shadow ckp_actor.tar promoted into a fresh control run
 baseline_cost: 0.5 # cost for computing baseline
 entropy_r_cost: 0. # entropy cost added to reward
 entropy_cost: 0.001 # entropy cost for real actions

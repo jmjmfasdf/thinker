@@ -1,0 +1,355 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Enduro v14→v15 Qualification RCA",
+    "description": "Technical root-cause analysis of the failed schema-8 half-squared-Q qualification and the bounded schema-9 common-mode hypothesis.",
+    "generatedAt": "2026-08-28T08:41:50Z",
+    "sources": [
+      {
+        "id": "rca_notebook",
+        "label": "Executed v14-v15 qualification RCA notebook (SHA-256 45af4c50…c4968)",
+        "path": "notebook/v14_v15_qualification_rca.ipynb"
+      },
+      {
+        "id": "headline_sql",
+        "label": "Reviewed RCA headline metrics",
+        "path": "notebook/v14_v15_qualification_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T08:41:50Z",
+          "description": "Materializes the reviewed headline outputs from the executed RCA notebook for the report card dataset.",
+          "sql": "SELECT 0.5637126651551874::DOUBLE AS v15_holdout_ema_rmse, 0.5::DOUBLE AS rmse_ceiling, 0.5247954789453232::DOUBLE AS v14_holdout_ema_rmse, 0.48946925650925704::DOUBLE AS v15_train_online_rmse, 0.5867927997052582::DOUBLE AS v14_train_online_rmse, -0.3042050285670731::DOUBLE AS train_mse_relative_change, 552.6126340547949::DOUBLE AS v15_excess_sse, 195.7355002393383::DOUBLE AS v14_excess_sse, 0.2132723320444852::DOUBLE AS v15_required_sse_reduction",
+          "metric_definitions": [
+            "Values are exact reviewed outputs from notebook SHA-256 45af4c50…c4968; the SQL materializes the report snapshot and does not replace the notebook's raw-CSV derivation."
+          ]
+        }
+      },
+      {
+        "id": "window_sql",
+        "label": "Reviewed qualification-window RMSE rows",
+        "path": "notebook/v14_v15_qualification_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T08:41:50Z",
+          "description": "Materializes the six reviewed version-window rows from the executed RCA notebook.",
+          "sql": "SELECT * FROM (VALUES ('v14','W1 (70k–80k]',0.3070468494240733,3647,343.8310189523,0.1620736710,70032,79456),('v15','W1 (70k–80k]',0.6350000482991449,2452,988.7078504055,0.3815765634,70240,79984),('v14','W2 (80k–90k]',0.4805763254032396,2485,573.9197072771,0.2705272237,80032,89296),('v15','W2 (80k–90k]',0.5262197892944133,3509,971.6675986575,0.3750032224,80832,89696),('v14','W3 (90k–100k]',0.8753410807478021,1571,1203.7347740099,0.5673991053,90144,99376),('v15','W3 (90k–100k]',0.536296424979157,2193,630.7371849918,0.2434202142,90128,99920)) AS t(version,window,rmse,support,sse,sse_share,start_step,end_step)",
+          "filters": [
+            "W1=(70k,80k], W2=(80k,90k], W3=(90k,100k]",
+            "Terminal overshoot rows are excluded"
+          ],
+          "metric_definitions": [
+            "RMSE and SSE are support-weighted within each version/window and were derived in notebook SHA-256 45af4c50…c4968."
+          ]
+        }
+      },
+      {
+        "id": "fit_sql",
+        "label": "Reviewed train-heldout comparison rows",
+        "path": "notebook/v14_v15_qualification_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T08:41:50Z",
+          "description": "Materializes the reviewed train-online and heldout-EMA RMSE comparison from the executed RCA notebook.",
+          "sql": "SELECT * FROM (VALUES ('v14','Train online',0.5867927997052582,0.3443257897859353,54013,63),('v15','Train online',0.48946925650925704,0.23958015306772486,57906,58),('v14','Heldout EMA',0.5247954789453232,0.2754102947214512,7703,63),('v15','Heldout EMA',0.5637126651551874,0.31777196885636433,8154,58)) AS t(version,population,rmse,mse,support,canonical_rows)",
+          "metric_definitions": [
+            "Train-online error is reconstructed by subtracting heldout-online moments from all-online moments; heldout EMA uses direct sufficient statistics from notebook SHA-256 45af4c50…c4968."
+          ]
+        }
+      },
+      {
+        "id": "comparison_sql",
+        "label": "Reviewed exact version comparison rows",
+        "path": "notebook/v14_v15_qualification_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T08:41:50Z",
+          "description": "Materializes the two exact version-summary rows from the executed RCA notebook.",
+          "sql": "SELECT * FROM (VALUES ('v14 / schema 7',63,7703,0.5247954789453232,0.5248123566562356,0.5867927997052582,195.7355002393383,63),('v15 / schema 8',58,8154,0.5637126651551874,0.5646944857965209,0.48946925650925704,552.6126340547949,58)) AS t(version,canonical_rows,heldout_support,heldout_ema_rmse,heldout_online_rmse,train_online_rmse,threshold_excess_sse,q_updates)",
+          "metric_definitions": [
+            "Threshold-excess SSE = heldout EMA SSE - 0.25 * heldout support; canonical Q updates equal canonical CSV rows."
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "gate_card",
+        "description": "The inherited qualification gate is support-weighted heldout EMA selected-action TD RMSE; lower is better.",
+        "dataset": "headline",
+        "sourceId": "headline_sql",
+        "metrics": [
+          { "label": "v15 heldout EMA RMSE", "field": "v15_holdout_ema_rmse", "format": "number" },
+          { "label": "Hard ceiling", "field": "rmse_ceiling", "format": "number" },
+          { "label": "v14 comparator", "field": "v14_holdout_ema_rmse", "format": "number" }
+        ]
+      },
+      {
+        "id": "train_card",
+        "description": "Train-online fit improved under half-squared regression even though the controlling heldout metric worsened.",
+        "dataset": "headline",
+        "sourceId": "headline_sql",
+        "metrics": [
+          { "label": "v15 train-online RMSE", "field": "v15_train_online_rmse", "format": "number" },
+          { "label": "v14 comparator", "field": "v14_train_online_rmse", "format": "number" },
+          { "label": "Relative MSE change", "field": "train_mse_relative_change", "format": "percent", "signed": true }
+        ]
+      },
+      {
+        "id": "excess_card",
+        "description": "Squared-error mass above the unchanged 0.5 RMSE ceiling.",
+        "dataset": "headline",
+        "sourceId": "headline_sql",
+        "metrics": [
+          { "label": "v15 threshold-excess SSE", "field": "v15_excess_sse", "format": "number" },
+          { "label": "v14 comparator", "field": "v14_excess_sse", "format": "number" },
+          { "label": "Required v15 SSE reduction", "field": "v15_required_sse_reduction", "format": "percent" }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "window_rmse_chart",
+        "title": "Heldout EMA TD RMSE by qualification window",
+        "subtitle": "v15 removes the v14 W3 spike but shifts elevated error into W1 and W2; the hard ceiling remains 0.5.",
+        "intent": "comparison",
+        "question": "Where across the canonical 70k-100k population did heldout error move between v14 and v15?",
+        "rationale": "Grouped bars are appropriate because the three windows are discrete ordered periods rather than a sufficiently dense time series.",
+        "type": "bar",
+        "dataset": "window_rmse",
+        "sourceId": "window_sql",
+        "encodings": {
+          "x": { "field": "window", "type": "ordinal", "label": "Qualification window" },
+          "y": { "field": "rmse", "type": "quantitative", "label": "Heldout EMA TD RMSE" },
+          "color": { "field": "version", "type": "nominal", "label": "Version" },
+          "tooltip": [
+            { "field": "support", "type": "quantitative", "label": "Heldout support" },
+            { "field": "sse", "type": "quantitative", "label": "Heldout SSE" },
+            { "field": "sse_share", "type": "quantitative", "format": "percent", "label": "Share of version SSE" },
+            { "field": "start_step", "type": "quantitative", "label": "First step" },
+            { "field": "end_step", "type": "quantitative", "label": "Last step" }
+          ]
+        },
+        "yAxisTitle": "RMSE (raw TD units)",
+        "valueFormat": "number",
+        "referenceLines": [
+          { "axis": "y", "value": 0.5, "label": "Qualification ceiling", "color": "neutral", "lineStyle": "dashed" }
+        ],
+        "palette": { "kind": "categorical", "name": "version-comparison" },
+        "legend": { "position": "bottom", "interactive": true, "title": "Version" },
+        "labels": { "values": "all" },
+        "layout": "full"
+      },
+      {
+        "id": "fit_generalization_chart",
+        "title": "Train-online and heldout-EMA RMSE",
+        "subtitle": "Half-squared regression improves observed train fit but does not generalize to the frozen heldout gate.",
+        "intent": "comparison",
+        "question": "Did the change improve the fitted training population and the heldout population in the same direction?",
+        "rationale": "A grouped bar makes the train-versus-heldout reversal explicit without implying causal pairing across runs.",
+        "type": "bar",
+        "dataset": "fit_generalization",
+        "sourceId": "fit_sql",
+        "encodings": {
+          "x": { "field": "population", "type": "nominal", "label": "Population / estimator" },
+          "y": { "field": "rmse", "type": "quantitative", "label": "RMSE" },
+          "color": { "field": "version", "type": "nominal", "label": "Version" },
+          "tooltip": [
+            { "field": "support", "type": "quantitative", "label": "Support" },
+            { "field": "mse", "type": "quantitative", "label": "MSE" },
+            { "field": "canonical_rows", "type": "quantitative", "label": "Canonical rows" }
+          ]
+        },
+        "yAxisTitle": "RMSE (raw TD units)",
+        "valueFormat": "number",
+        "palette": { "kind": "categorical", "name": "version-comparison" },
+        "legend": { "position": "bottom", "interactive": true, "title": "Version" },
+        "labels": { "values": "all" },
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "comparison_table",
+        "title": "Exact v14-v15 qualification comparison",
+        "subtitle": "Support-weighted metrics from strict canonical populations; terminal overshoots excluded.",
+        "dataset": "version_comparison",
+        "sourceId": "comparison_sql",
+        "defaultSort": { "field": "version", "direction": "asc" },
+        "density": "compact",
+        "columns": [
+          { "field": "version", "label": "Version", "type": "text" },
+          { "field": "canonical_rows", "label": "Rows", "type": "number" },
+          { "field": "heldout_support", "label": "Heldout N", "type": "number" },
+          { "field": "heldout_ema_rmse", "label": "Heldout EMA RMSE", "type": "number" },
+          { "field": "heldout_online_rmse", "label": "Heldout online RMSE", "type": "number" },
+          { "field": "train_online_rmse", "label": "Train online RMSE", "type": "number" },
+          { "field": "threshold_excess_sse", "label": "Excess SSE", "type": "number" },
+          { "field": "q_updates", "label": "Canonical Q updates", "type": "number" }
+        ]
+      }
+    ],
+    "blocks": [
+      { "id": "title", "type": "markdown", "body": "# Enduro v14→v15 Qualification RCA" },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "rca_notebook",
+        "body": "## Technical summary\n\nv15 is an irreversible qualification **FAIL**: heldout EMA selected-action TD RMSE is **0.5637126652** against the unchanged **≤0.5** ceiling (N=8,154). Mechanics, schema-8 identity, W&B close, artifacts, and source integrity all passed. The schema-8 half-squared loss improved observed train-online RMSE but worsened the controlling heldout metric, so no primary, fixed evaluation, retry, resume, or rescue is allowed."
+      },
+      { "id": "headline_metrics", "type": "metric-strip", "cardIds": ["gate_card", "train_card", "excess_card"] },
+      {
+        "id": "key_findings",
+        "type": "markdown",
+        "sourceId": "rca_notebook",
+        "body": "## Key findings\n\n- v14→v15 train-online RMSE improved **0.586792800→0.489469257**, while heldout EMA RMSE worsened **0.524795479→0.563712665**.\n- Error moved in time: v15 repaired the v14 W3 blow-up (**0.875341→0.536296**) but raised W1 sharply (**0.307047→0.635000**) and slightly raised W2 (**0.480576→0.526220**).\n- The current probability-centered reconstruction exactly cancels any equal shift of the two raw head rows, leaving no learnable feature-conditioned common correction. Final v14/v15 checkpoints retain numerical-zero common row sums.\n- EMA lag, exact gate projection, global bias, support scarcity, AMP/nonfinite faults, and simple action imbalance do not explain the gap."
+      },
+      { "id": "window_chart_block", "type": "chart", "chartId": "window_rmse_chart" },
+      { "id": "fit_chart_block", "type": "chart", "chartId": "fit_generalization_chart" },
+      { "id": "comparison_table_block", "type": "table", "tableId": "comparison_table" },
+      {
+        "id": "scope",
+        "type": "markdown",
+        "sourceId": "rca_notebook",
+        "body": "## Scope, data, and definitions\n\nThe analysis uses only the frozen Enduro seed-1 fresh 100k qualification CSVs. Canonical rows satisfy `70000 < actor/real_step <= 100000`; v14 includes 63 rows (70,032–99,376) and v15 includes 58 (70,240–99,920). Terminal overshoots 100,112 and 100,736 are excluded. The controlling metric pools row-level squared errors by heldout support before taking the square root."
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "sourceId": "rca_notebook",
+        "body": "## Methodology\n\nThe executed notebook verifies file SHA-256, 922-column uniqueness, complete row width, finite required cells, unique strictly increasing steps, exact window membership, and denominator reconciliation. It independently reproduces the frozen v14 gate before evaluating v15. It then reconstructs pooled SSE/RMSE, train-online error, window contributions, bias/within-row decomposition, tail concentration, update density, and checkpoint head geometry."
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "sourceId": "rca_notebook",
+        "body": "## Limitations and robustness\n\nThe two runs are not paired counterfactual trajectories: policy feedback changes state visitation and supervised-row allocation, and only three canonical real steps intersect exactly. Therefore the report describes observed redistribution and exact function-class constraints, not a causal estimate of half-squared loss. Aggregate CSV statistics cannot identify per-state feature-conditioned common error or guarantee that opening that direction will remove the required **21.327%** of v15 heldout SSE."
+      },
+      {
+        "id": "next_step",
+        "type": "markdown",
+        "sourceId": "rca_notebook",
+        "body": "## Bounded next step\n\nThe strongest single-change immediate successor is schema 9: retain v15 half-squared regression and add the existing raw-head mean to both online and EMA Q reconstruction. This opens only the canceled common direction while preserving `Q_continue−Q_stop`, exact gate projection, tensor/optimizer/checkpoint shapes, and the 229-key persisted surface. It is a preregistered hypothesis, not an expected-pass claim; implementation and launch remain unauthorized until the schema-9 document passes two independent audits."
+      },
+      {
+        "id": "questions",
+        "type": "markdown",
+        "body": "## Open questions\n\nCan the fixed detached 881-D representation express enough state-conditioned common residual to remove at least 21.327% of heldout SSE? Will opening that direction preserve the already-passing directional/gate behavior under policy-coupled state redistribution? These questions require the preregistered one-of-one wire and seed-1 qualification; they cannot be answered from the failed runs alone."
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-28T08:41:50Z",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "v15_holdout_ema_rmse": 0.5637126651551874,
+          "rmse_ceiling": 0.5,
+          "v14_holdout_ema_rmse": 0.5247954789453232,
+          "v15_train_online_rmse": 0.48946925650925704,
+          "v14_train_online_rmse": 0.5867927997052582,
+          "train_mse_relative_change": -0.3042050285670731,
+          "v15_excess_sse": 552.6126340547949,
+          "v14_excess_sse": 195.7355002393383,
+          "v15_required_sse_reduction": 0.2132723320444852
+        }
+      ],
+      "window_rmse": [
+        { "version": "v14", "window": "W1 (70k–80k]", "rmse": 0.3070468494240733, "support": 3647, "sse": 343.8310189523, "sse_share": 0.1620736710, "start_step": 70032, "end_step": 79456 },
+        { "version": "v15", "window": "W1 (70k–80k]", "rmse": 0.6350000482991449, "support": 2452, "sse": 988.7078504055, "sse_share": 0.3815765634, "start_step": 70240, "end_step": 79984 },
+        { "version": "v14", "window": "W2 (80k–90k]", "rmse": 0.4805763254032396, "support": 2485, "sse": 573.9197072771, "sse_share": 0.2705272237, "start_step": 80032, "end_step": 89296 },
+        { "version": "v15", "window": "W2 (80k–90k]", "rmse": 0.5262197892944133, "support": 3509, "sse": 971.6675986575, "sse_share": 0.3750032224, "start_step": 80832, "end_step": 89696 },
+        { "version": "v14", "window": "W3 (90k–100k]", "rmse": 0.8753410807478021, "support": 1571, "sse": 1203.7347740099, "sse_share": 0.5673991053, "start_step": 90144, "end_step": 99376 },
+        { "version": "v15", "window": "W3 (90k–100k]", "rmse": 0.536296424979157, "support": 2193, "sse": 630.7371849918, "sse_share": 0.2434202142, "start_step": 90128, "end_step": 99920 }
+      ],
+      "fit_generalization": [
+        { "version": "v14", "population": "Train online", "rmse": 0.5867927997052582, "mse": 0.3443257897859353, "support": 54013, "canonical_rows": 63 },
+        { "version": "v15", "population": "Train online", "rmse": 0.48946925650925704, "mse": 0.23958015306772486, "support": 57906, "canonical_rows": 58 },
+        { "version": "v14", "population": "Heldout EMA", "rmse": 0.5247954789453232, "mse": 0.2754102947214512, "support": 7703, "canonical_rows": 63 },
+        { "version": "v15", "population": "Heldout EMA", "rmse": 0.5637126651551874, "mse": 0.31777196885636433, "support": 8154, "canonical_rows": 58 }
+      ],
+      "version_comparison": [
+        { "version": "v14 / schema 7", "canonical_rows": 63, "heldout_support": 7703, "heldout_ema_rmse": 0.5247954789453232, "heldout_online_rmse": 0.5248123566562356, "train_online_rmse": 0.5867927997052582, "threshold_excess_sse": 195.7355002393383, "q_updates": 63 },
+        { "version": "v15 / schema 8", "canonical_rows": 58, "heldout_support": 8154, "heldout_ema_rmse": 0.5637126651551874, "heldout_online_rmse": 0.5646944857965209, "train_online_rmse": 0.48946925650925704, "threshold_excess_sse": 552.6126340547949, "q_updates": 58 }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "rca_notebook",
+      "label": "Executed v14-v15 qualification RCA notebook (SHA-256 45af4c50…c4968)",
+      "path": "notebook/v14_v15_qualification_rca.ipynb"
+    },
+    {
+      "id": "headline_sql",
+      "label": "Reviewed RCA headline metrics",
+      "path": "notebook/v14_v15_qualification_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T08:41:50Z",
+        "description": "Materializes the reviewed headline outputs from the executed RCA notebook for the report card dataset.",
+        "sql": "SELECT 0.5637126651551874::DOUBLE AS v15_holdout_ema_rmse, 0.5::DOUBLE AS rmse_ceiling, 0.5247954789453232::DOUBLE AS v14_holdout_ema_rmse, 0.48946925650925704::DOUBLE AS v15_train_online_rmse, 0.5867927997052582::DOUBLE AS v14_train_online_rmse, -0.3042050285670731::DOUBLE AS train_mse_relative_change, 552.6126340547949::DOUBLE AS v15_excess_sse, 195.7355002393383::DOUBLE AS v14_excess_sse, 0.2132723320444852::DOUBLE AS v15_required_sse_reduction",
+        "metric_definitions": [
+          "Values are exact reviewed outputs from notebook SHA-256 45af4c50…c4968; the SQL materializes the report snapshot and does not replace the notebook's raw-CSV derivation."
+        ]
+      }
+    },
+    {
+      "id": "window_sql",
+      "label": "Reviewed qualification-window RMSE rows",
+      "path": "notebook/v14_v15_qualification_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T08:41:50Z",
+        "description": "Materializes the six reviewed version-window rows from the executed RCA notebook.",
+        "sql": "SELECT * FROM (VALUES ('v14','W1 (70k–80k]',0.3070468494240733,3647,343.8310189523,0.1620736710,70032,79456),('v15','W1 (70k–80k]',0.6350000482991449,2452,988.7078504055,0.3815765634,70240,79984),('v14','W2 (80k–90k]',0.4805763254032396,2485,573.9197072771,0.2705272237,80032,89296),('v15','W2 (80k–90k]',0.5262197892944133,3509,971.6675986575,0.3750032224,80832,89696),('v14','W3 (90k–100k]',0.8753410807478021,1571,1203.7347740099,0.5673991053,90144,99376),('v15','W3 (90k–100k]',0.536296424979157,2193,630.7371849918,0.2434202142,90128,99920)) AS t(version,window,rmse,support,sse,sse_share,start_step,end_step)",
+        "filters": [
+          "W1=(70k,80k], W2=(80k,90k], W3=(90k,100k]",
+          "Terminal overshoot rows are excluded"
+        ],
+        "metric_definitions": [
+          "RMSE and SSE are support-weighted within each version/window and were derived in notebook SHA-256 45af4c50…c4968."
+        ]
+      }
+    },
+    {
+      "id": "fit_sql",
+      "label": "Reviewed train-heldout comparison rows",
+      "path": "notebook/v14_v15_qualification_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T08:41:50Z",
+        "description": "Materializes the reviewed train-online and heldout-EMA RMSE comparison from the executed RCA notebook.",
+        "sql": "SELECT * FROM (VALUES ('v14','Train online',0.5867927997052582,0.3443257897859353,54013,63),('v15','Train online',0.48946925650925704,0.23958015306772486,57906,58),('v14','Heldout EMA',0.5247954789453232,0.2754102947214512,7703,63),('v15','Heldout EMA',0.5637126651551874,0.31777196885636433,8154,58)) AS t(version,population,rmse,mse,support,canonical_rows)",
+        "metric_definitions": [
+          "Train-online error is reconstructed by subtracting heldout-online moments from all-online moments; heldout EMA uses direct sufficient statistics from notebook SHA-256 45af4c50…c4968."
+        ]
+      }
+    },
+    {
+      "id": "comparison_sql",
+      "label": "Reviewed exact version comparison rows",
+      "path": "notebook/v14_v15_qualification_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T08:41:50Z",
+        "description": "Materializes the two exact version-summary rows from the executed RCA notebook.",
+        "sql": "SELECT * FROM (VALUES ('v14 / schema 7',63,7703,0.5247954789453232,0.5248123566562356,0.5867927997052582,195.7355002393383,63),('v15 / schema 8',58,8154,0.5637126651551874,0.5646944857965209,0.48946925650925704,552.6126340547949,58)) AS t(version,canonical_rows,heldout_support,heldout_ema_rmse,heldout_online_rmse,train_online_rmse,threshold_excess_sse,q_updates)",
+        "metric_definitions": [
+          "Threshold-excess SSE = heldout EMA SSE - 0.25 * heldout support; canonical Q updates equal canonical CSV rows."
+        ]
+      }
+    }
+  ]
+}

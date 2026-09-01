@@ -2,19 +2,58 @@ import os
 import shutil
 import time
 from collections import namedtuple
+from collections.abc import Mapping
 import ray
 import numpy as np
 import torch
 import gymnasium as gym
 
 import thinker.util as util
-from thinker.buffer import ModelBuffer, SModelBuffer, GeneralBuffer
+from thinker.buffer import (
+    GeneralBuffer,
+    ModelBuffer,
+    SModelBuffer,
+    validate_schema7_model_buffer_status,
+)
 from thinker.learn_model import ModelLearner, SModelLearner
 from thinker.model_net import ModelNet
 
 from thinker.gym_add.asyn_vector_env import AsyncVectorEnv
 import thinker.gym_add.wrapper as wrapper
 from thinker.cenv import cModelWrapper, cPerfectWrapper
+
+
+def _resolve_model_input_seal_schema_version(flags):
+    gate_schema = getattr(flags, "voc_gate_policy_schema_version", None)
+    seal_schema = getattr(flags, "voc_model_input_seal_schema_version", 0)
+    expected = (
+        1
+        if type(gate_schema) is int and gate_schema in (7, 8, 9, 10, 11, 12, 13)
+        else 0
+    )
+    if type(seal_schema) is not int or seal_schema != expected:
+        raise ValueError(
+            "voc_model_input_seal_schema_version must be exact integer "
+            f"{expected} for gate schema {gate_schema!r}"
+        )
+    return seal_schema
+
+
+def _resolve_model_input_seal_runtime(flags):
+    """Enable versioned sealed-input coordination for parallel training."""
+
+    seal_schema = _resolve_model_input_seal_schema_version(flags)
+    if seal_schema != 1:
+        return False
+    train_model = getattr(flags, "train_model", None)
+    parallel = getattr(flags, "parallel", None)
+    if type(train_model) is not bool or type(parallel) is not bool:
+        raise ValueError(
+            "versioned model input sealing requires exact boolean runtime flags"
+        )
+    if train_model and not parallel:
+        raise ValueError("versioned model input sealing requires parallel=true")
+    return train_model and parallel
 
 
 def _validate_online_env_contract(
@@ -74,6 +113,69 @@ def _validate_online_env_contract(
     return frame_ch
 
 
+def _runtime_primary_action_meanings(
+    env, primary_action_space, *, name=None, envpool=False
+):
+    """Read and validate primary-action semantics from the live runtime.
+
+    Gymnasium vector workers expose their underlying action table directly.
+    EnvPool does not expose names, so its Atari task is paired with the same
+    installed ALE runtime and the action-space width is checked before the
+    table is accepted.  No action index is inferred from convention.
+    """
+
+    if not isinstance(primary_action_space, gym.spaces.Discrete):
+        return None
+    action_n = int(primary_action_space.n)
+    if envpool:
+        if not name:
+            raise RuntimeError(
+                "cannot resolve EnvPool action meanings without an environment id"
+            )
+        probe_id = str(name)
+        if "/" not in probe_id:
+            probe_id = f"ALE/{probe_id}"
+        runtime_env = getattr(env, "env", env)
+        spec = getattr(runtime_env, "spec", None)
+        config = getattr(spec, "config", None)
+        full_action_space = bool(
+            getattr(config, "full_action_space", False)
+        )
+        probe = gym.make(probe_id, full_action_space=full_action_space)
+        try:
+            meanings = probe.unwrapped.get_action_meanings()
+        finally:
+            probe.close()
+    else:
+        call = getattr(env, "call", None)
+        if call is None:
+            raise RuntimeError(
+                "vector environment does not expose runtime action meanings"
+            )
+        values = call("get_action_meanings")
+        if not values:
+            raise RuntimeError(
+                "runtime action-meaning query returned no action table"
+            )
+        meanings = tuple(values[0])
+        if any(tuple(value) != meanings for value in values[1:]):
+            raise ValueError(
+                "vector environments disagree on runtime action meanings"
+            )
+
+    if isinstance(meanings, (str, bytes)):
+        raise TypeError("runtime action meanings must be a sequence")
+    meanings = tuple(meanings)
+    if len(meanings) != action_n:
+        raise ValueError(
+            "runtime action meanings disagree with the live action space: "
+            f"{len(meanings)} != {action_n}"
+        )
+    if any(not isinstance(value, str) or not value.strip() for value in meanings):
+        raise ValueError("runtime action meanings must be non-empty strings")
+    return meanings
+
+
 def ray_init(flags=None, **kwargs):
     # initialize resources for Thinker wrapper
     if flags is None:
@@ -86,16 +188,37 @@ def ray_init(flags=None, **kwargs):
         ray.init(num_cpus=flags.ray_cpu if flags.ray_cpu > 0 else None,
                  num_gpus=flags.ray_gpu if flags.ray_gpu > 0 else None,
                  object_store_memory=object_store_memory)
-    model_buffer = ModelBuffer.options(num_cpus=1).remote(
+    model_input_seal_schema_version = (
+        _resolve_model_input_seal_schema_version(flags)
+    )
+    strict_ray_options = (
+        {"max_restarts": 0, "max_task_retries": 0}
+        if bool(getattr(flags, "voc_actor_policy_barrier_runtime", False))
+        else {}
+    )
+    model_buffer = ModelBuffer.options(
+        num_cpus=1, **strict_ray_options
+    ).remote(
             buffer_n = flags.model_buffer_n,
             max_rank = flags.self_play_n,
             batch_size = flags.env_n,
             alpha = flags.priority_alpha,
             warm_up_n = flags.model_warm_up_n,
+            model_input_seal_schema_version = (
+                model_input_seal_schema_version
+            ),
+            total_steps = (
+                flags.total_steps
+                if model_input_seal_schema_version == 1 else None
+            ),
     )
-    param_buffer = GeneralBuffer.options(num_cpus=1).remote()    
+    param_buffer = GeneralBuffer.options(
+        num_cpus=1, **strict_ray_options
+    ).remote()
     param_buffer.set_data.remote("flags", flags)
-    signal_buffer = GeneralBuffer.options(num_cpus=1).remote()   
+    signal_buffer = GeneralBuffer.options(
+        num_cpus=1, **strict_ray_options
+    ).remote()
     ray_obj = {"model_buffer": model_buffer,
                "param_buffer": param_buffer,
                "signal_buffer": signal_buffer}
@@ -126,6 +249,12 @@ class Env(gym.Wrapper):
         self._logger = util.logger() 
         self.parallel = self.flags.parallel
         self.dynamic_search = util.dynamic_search_enabled(self.flags)
+        self.voc_model_input_seal_schema_version = (
+            _resolve_model_input_seal_schema_version(self.flags)
+        )
+        self.voc_model_input_seal_runtime = _resolve_model_input_seal_runtime(
+            self.flags
+        )
                 
         self.env_n = env_n
         self.device = torch.device("cuda") if gpu else torch.device("cpu")
@@ -155,6 +284,20 @@ class Env(gym.Wrapper):
                 env_fn = wrapper.create_env_fn(name, self.flags)
             # initialize a single env to collect env information            
             env = AsyncVectorEnv([env_fn for _ in range(env_n)]) 
+        imitation_enabled = bool(
+            str(getattr(self.flags, "icopro_data_path", "")).strip()
+        )
+        self.primary_action_meanings = None
+        if imitation_enabled:
+            raw_primary_action_space = env.get_wrapper_attr(
+                "single_action_space"
+            )
+            self.primary_action_meanings = _runtime_primary_action_meanings(
+                env,
+                raw_primary_action_space,
+                name=name,
+                envpool=bool(self.flags.envpool),
+            )
         env = wrapper.VectorWrap(env, self.flags)
 
         
@@ -194,9 +337,6 @@ class Env(gym.Wrapper):
             self.frame_stack_n = env.get_wrapper_attr('frame_stack_n')
         except AttributeError:
             self.frame_stack_n = 1
-        imitation_enabled = bool(
-            str(getattr(self.flags, "icopro_data_path", "")).strip()
-        )
         expected_frame_stack_n = (
             self.flags.frame_stack_n
             if self.flags.envpool or imitation_enabled
@@ -239,8 +379,18 @@ class Env(gym.Wrapper):
             if self.train_model and self.rank == 0:
                 if self.parallel:
                     # init. the model learner thread
+                    learner_options = {
+                        "num_cpus": 1,
+                        "num_gpus": self.flags.gpu_learn,
+                    }
+                    if bool(getattr(
+                        self.flags, "voc_actor_policy_barrier_runtime", False
+                    )):
+                        learner_options.update(
+                            max_restarts=0, max_task_retries=0
+                        )
                     self.model_learner = ModelLearner.options(
-                        num_cpus=1, num_gpus=self.flags.gpu_learn,
+                        **learner_options
                     ).remote(name, ray_obj, model_param, self.flags)
                     # start learning
                     self.r_learner = self.model_learner.learn_data.remote()
@@ -253,7 +403,14 @@ class Env(gym.Wrapper):
                         max_rank = self.flags.self_play_n,
                         batch_size = self.flags.env_n,
                         alpha = self.flags.priority_alpha,
-                        warm_up_n = self.flags.model_warm_up_n,                        
+                        warm_up_n = self.flags.model_warm_up_n,
+                        model_input_seal_schema_version = (
+                            self.voc_model_input_seal_schema_version
+                        ),
+                        total_steps = (
+                            self.flags.total_steps
+                            if self.voc_model_input_seal_runtime else None
+                        ),
                     )
                     self.model_buffer.set_frame_stack_n(self.frame_stack_n)
             if self.train_model: self.require_prob = self.flags.require_prob
@@ -311,6 +468,10 @@ class Env(gym.Wrapper):
 
         if self.train_model:
             if self.flags.parallel:
+                self._pending_model_write_refs = []
+                self._last_model_write_ref = None
+                self._last_model_write_acknowledged = False
+                self._model_input_seal_acknowledged = False
                 self.status_ptr = self.model_buffer.get_status.remote()        
                 self._update_status()
                 self.signal_ptr = self.signal_buffer.get_data.remote("self_play_signals")
@@ -363,10 +524,25 @@ class Env(gym.Wrapper):
             time.sleep(0.1)  
     
     def _update_status(self):
-        self.status = ray.get(self.status_ptr)
-        self.status_ptr = self.model_buffer.get_status.remote()        
+        if self.voc_model_input_seal_runtime:
+            timeout = float(self.flags.voc_actor_policy_barrier_timeout_s)
+            self.status = ray.get(self.status_ptr, timeout=timeout)
+            self._validate_schema7_model_status(self.status)
+        else:
+            self.status = ray.get(self.status_ptr)
+        self.status_ptr = self.model_buffer.get_status.remote()
 
-    def _poll_model_learner(self, *, wait=False):
+    def _validate_schema7_model_status(self, status, *, require_sealed=False):
+        return validate_schema7_model_buffer_status(
+            status,
+            total_steps=self.flags.total_steps,
+            self_play_n=self.flags.self_play_n,
+            warm_up_n=self.flags.model_warm_up_n,
+            require_sealed=require_sealed,
+            label=f"schema-7 Env rank {self.rank} ModelBuffer status",
+        )
+
+    def _poll_model_learner(self, *, wait=False, timeout=None):
         """Surface a remote ModelLearner failure while self-play is running."""
 
         if self.rank != 0 or not hasattr(self, "r_learner"):
@@ -380,7 +556,10 @@ class Env(gym.Wrapper):
             if not ready:
                 return None
         try:
-            result = ray.get(ready[0])
+            result = (
+                ray.get(ready[0], timeout=timeout)
+                if timeout is not None else ray.get(ready[0])
+            )
         except Exception as error:
             raise RuntimeError("model learner failed") from error
         if result is not True:
@@ -389,6 +568,160 @@ class Env(gym.Wrapper):
             )
         self._model_learner_result = result
         return result
+
+    def poll_model_status_no_step(self, *, timeout):
+        """Bounded terminal health polling without taking an environment step."""
+
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not np.isfinite(timeout)
+            or float(timeout) <= 0.0
+        ):
+            raise ValueError("model health timeout must be finite and positive")
+        if not self.train_model:
+            return dict(self.status)
+        if not self.parallel:
+            return dict(self.status)
+        deadline = time.monotonic() + float(timeout)
+
+        def remaining_timeout():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError("model health poll exceeded its time bound")
+            return remaining
+
+        learner_result = self._poll_model_learner(wait=False)
+        self.status = ray.get(self.status_ptr, timeout=remaining_timeout())
+        if self.voc_model_input_seal_runtime:
+            self._validate_schema7_model_status(self.status)
+        self.status_ptr = self.model_buffer.get_status.remote()
+        latest_learner_result = self._poll_model_learner(wait=False)
+        if latest_learner_result is not None:
+            learner_result = latest_learner_result
+        if learner_result is True and not self.status["finish"]:
+            self.status = ray.get(
+                self.status_ptr, timeout=remaining_timeout()
+            )
+            self._validate_schema7_model_status(self.status)
+            self.status_ptr = self.model_buffer.get_status.remote()
+            if not self.status["finish"]:
+                raise RuntimeError(
+                    "model learner returned success before ModelBuffer finish"
+                )
+        if (
+            self.voc_model_input_seal_runtime
+            and self.status.get("voc_model_input_aborted") is True
+        ):
+            if self.rank == 0:
+                self._poll_model_learner(
+                    wait=True, timeout=remaining_timeout()
+                )
+            raise RuntimeError("schema-7 model input was aborted")
+        if self.status["finish"]:
+            self._poll_model_learner(
+                wait=self.rank == 0,
+                timeout=remaining_timeout(),
+            )
+            self.train_model = False
+        return dict(self.status)
+
+    def _ack_pending_model_writes_no_step(self, *, timeout=None):
+        if not self.voc_model_input_seal_runtime:
+            return
+        refs = list(self._pending_model_write_refs)
+        if not refs:
+            return
+        if timeout is None:
+            timeout = float(self.flags.voc_actor_policy_barrier_timeout_s)
+        results = (
+            ray.get(refs, timeout=float(timeout))
+            if timeout is not None else ray.get(refs)
+        )
+        if not isinstance(results, list) or len(results) != len(refs):
+            raise RuntimeError("schema-7 model write acknowledgements are incomplete")
+        for result in results:
+            if (
+                not isinstance(result, Mapping)
+                or set(result) != {"rank", "processed_n"}
+                or type(result["rank"]) is not int
+                or result["rank"] != self.rank
+                or type(result["processed_n"]) is not int
+                or result["processed_n"] < 0
+            ):
+                raise RuntimeError("schema-7 model write acknowledgement is malformed")
+        if self._last_model_write_ref in refs:
+            self._last_model_write_acknowledged = True
+        self._pending_model_write_refs.clear()
+
+    def seal_model_input_no_step(self, *, timeout):
+        """Acknowledge all writes, then seal this producer without an env step."""
+
+        if not self.voc_model_input_seal_runtime:
+            raise RuntimeError("model input sealing is inactive")
+        if self._model_input_seal_acknowledged:
+            raise RuntimeError("model input producer sealed twice")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not np.isfinite(timeout)
+            or float(timeout) <= 0.0
+        ):
+            raise ValueError("model input seal timeout must be finite and positive")
+        timeout = float(timeout)
+        write_ack_deadline = time.monotonic() + timeout
+        self._ack_pending_model_writes_no_step(
+            timeout=max(write_ack_deadline - time.monotonic(), 1e-9)
+        )
+        if (
+            self._last_model_write_ref is None
+            or not self._last_model_write_acknowledged
+        ):
+            raise RuntimeError(
+                "schema-7 terminal model write was not acknowledged"
+            )
+        seal_deadline = time.monotonic() + timeout
+        status = ray.get(
+            self.model_buffer.seal_input.remote(
+                self.rank, self.flags.total_steps
+            ),
+            timeout=max(seal_deadline - time.monotonic(), 1e-9),
+        )
+        status = self._validate_schema7_model_status(status)
+        if (
+            status["voc_model_input_seal_count"] <= 0
+            or status["voc_model_input_aborted"] is not False
+            or status["finish"] is not False
+        ):
+            raise RuntimeError("schema-7 ModelBuffer seal acknowledgement is malformed")
+        self._model_input_seal_acknowledged = True
+        self.status = dict(status)
+        self.status_ptr = self.model_buffer.get_status.remote()
+        return dict(status)
+
+    def abort_model_input_no_step(self, *, timeout):
+        if not self.voc_model_input_seal_runtime:
+            return None
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not np.isfinite(timeout)
+            or float(timeout) <= 0.0
+        ):
+            raise ValueError("model input abort timeout must be finite and positive")
+        status = ray.get(
+            self.model_buffer.abort_input.remote(), timeout=float(timeout)
+        )
+        status = self._validate_schema7_model_status(status)
+        if (
+            status["finish"] is not False
+            or status["voc_model_input_aborted"] is not True
+            or status["voc_model_input_abort_count"] != 1
+        ):
+            raise RuntimeError("schema-7 ModelBuffer abort acknowledgement is malformed")
+        self.status = dict(status)
+        self.status_ptr = self.model_buffer.get_status.remote()
+        return dict(status)
 
     def reset(self, seed=None):
         if seed is None: seed = self.env_seed
@@ -596,9 +929,19 @@ class Env(gym.Wrapper):
         if self.frame_stack_n > 1:
             data["real_state"] = data["real_state"][:, -self.frame_ch:]
         idx = np.arange(self.env_n)[real_step_mask.detach().cpu().numpy()]
-        self.model_buffer.write.remote(ray.put(data), rank=self.rank, idx=idx, priority=None) 
+        write_ref = self.model_buffer.write.remote(
+            ray.put(data), rank=self.rank, idx=idx, priority=None
+        )
+        if self.voc_model_input_seal_runtime:
+            if self._model_input_seal_acknowledged:
+                raise RuntimeError("model write attempted after input seal")
+            self._pending_model_write_refs.append(write_ref)
+            self._last_model_write_ref = write_ref
+            self._last_model_write_acknowledged = False
 
     def _refresh_wait(self):
+        if self.voc_model_input_seal_runtime:
+            self._ack_pending_model_writes_no_step()
         self._poll_model_learner(wait=False)
         self._update_status()
         self._poll_model_learner(wait=self.status["finish"] and self.rank == 0)
@@ -649,7 +992,7 @@ class Env(gym.Wrapper):
                 self._poll_model_learner(wait=True)
             except Exception as error:
                 learner_error = error
-        if self.parallel:
+        if self.parallel and not self.voc_model_input_seal_runtime:
             self.model_buffer.set_finish.remote()
         del self.model_net
         if torch.cuda.is_available():
@@ -687,6 +1030,13 @@ class Env(gym.Wrapper):
                     self.num_actions, self.dim_actions, self.flags
                 )
         return self.tree_rep_meaning
+
+    def get_primary_action_meanings(self):
+        """Return the validated immutable runtime primary-action table."""
+
+        if self.primary_action_meanings is None:
+            return None
+        return tuple(self.primary_action_meanings)
     
     def save_ckp(self):
         data = self.env.get_wrapper_attr('save_ckp')()

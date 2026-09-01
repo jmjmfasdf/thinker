@@ -9,11 +9,31 @@ import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from thinker.core.file_writer import FileWriter
 from thinker.core.module import guassian_kl_div
-from thinker.buffer import validate_priorities
+from thinker.buffer import (
+    MODEL_BUFFER_ABORT,
+    validate_priorities,
+    validate_schema7_model_buffer_status,
+)
 from thinker.model_net import ModelNet, VPNet
 import thinker.util as util
 import gc
 from collections import namedtuple
+
+
+def _resolve_model_input_seal_schema_version(flags):
+    gate_schema = getattr(flags, "voc_gate_policy_schema_version", None)
+    seal_schema = getattr(flags, "voc_model_input_seal_schema_version", 0)
+    expected = (
+        1
+        if type(gate_schema) is int and gate_schema in (7, 8, 9, 10, 11, 12, 13)
+        else 0
+    )
+    if type(seal_schema) is not int or seal_schema != expected:
+        raise ValueError(
+            "voc_model_input_seal_schema_version must be exact integer "
+            f"{expected} for gate schema {gate_schema!r}"
+        )
+    return seal_schema
 
 
 def _raise_nonfinite_tensor(value, context):
@@ -147,6 +167,40 @@ def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_p
 class SModelLearner:
     def __init__(self, name, ray_obj, model_param, flags, model_net=None, device=None):
         self.flags = flags
+        self.voc_model_input_seal_schema_version = (
+            _resolve_model_input_seal_schema_version(flags)
+        )
+        self.voc_model_input_seal_runtime = (
+            self.voc_model_input_seal_schema_version == 1
+        )
+        if self.voc_model_input_seal_runtime:
+            raw_timeout = getattr(
+                flags,
+                "voc_actor_policy_barrier_timeout_s",
+                util.VOC_ACTOR_POLICY_BARRIER_TIMEOUT_SECONDS,
+            )
+            if (
+                isinstance(raw_timeout, bool)
+                or type(raw_timeout) not in (int, float)
+                or not np.isfinite(raw_timeout)
+                or float(raw_timeout)
+                != util.VOC_ACTOR_POLICY_BARRIER_TIMEOUT_SECONDS
+            ):
+                raise ValueError(
+                    "schema-7 ModelLearner requires the exact finite "
+                    "actor-policy barrier timeout"
+                )
+            self.voc_actor_policy_barrier_timeout_s = float(raw_timeout)
+            self.voc_model_input_sealed = False
+            self.voc_model_input_seal_count = 0
+            self.voc_model_terminal_processed_n = -1
+            self.voc_model_terminal_drain_update_count = 0
+            self.voc_model_terminal_drain_pre_real_step = -1
+            self.voc_model_terminal_drain_pre_grad_step_count_m = -1
+            self.voc_model_terminal_drain_pre_grad_step_count_p = -1
+            self.voc_model_input_late_write_count = 0
+            self.voc_model_input_abort_count = 0
+            self._schema7_terminal_drain_active = False
         self.model_float16 = getattr(
             flags, "model_float16", getattr(flags, "float16", False)
         )
@@ -283,6 +337,467 @@ class SModelLearner:
             self.start_time = self.timer()
 
     def learn_data(self):
+        if getattr(self, "voc_model_input_seal_runtime", False):
+            return self._learn_data_schema7()
+        return self._learn_data_legacy()
+
+    def _schema7_ray_get(self, object_ref, *, label):
+        timeout = getattr(self, "voc_actor_policy_barrier_timeout_s", None)
+        if (
+            type(timeout) is not float
+            or not np.isfinite(timeout)
+            or timeout != util.VOC_ACTOR_POLICY_BARRIER_TIMEOUT_SECONDS
+        ):
+            raise RuntimeError(
+                "schema-7 ModelLearner RPC timeout is not the exact finite bound"
+            )
+        try:
+            return ray.get(object_ref, timeout=timeout)
+        except ray.exceptions.GetTimeoutError as error:
+            raise TimeoutError(
+                f"schema-7 ModelLearner RPC timed out during {label}"
+            ) from error
+
+    def _validate_schema7_model_status(self, status, *, require_sealed=False):
+        return validate_schema7_model_buffer_status(
+            status,
+            total_steps=self.flags.total_steps,
+            self_play_n=self.flags.self_play_n,
+            warm_up_n=self.flags.model_warm_up_n,
+            require_sealed=require_sealed,
+            label="schema-7 ModelLearner ModelBuffer status",
+        )
+
+    def _get_schema7_model_status(self):
+        status = self._schema7_ray_get(
+            self.model_buffer.get_status.remote(),
+            label="ModelBuffer status",
+        )
+        return self._validate_schema7_model_status(status)
+
+    def _raise_if_schema7_model_aborted(self, status):
+        if status["voc_model_input_aborted"]:
+            raise RuntimeError("schema-7 model input was aborted")
+
+    def _begin_schema7_model_update(self, expected_processed_n):
+        response = self._schema7_ray_get(
+            self.model_buffer.begin_model_update.remote(expected_processed_n),
+            label="ModelBuffer begin_model_update",
+        )
+        if not isinstance(response, dict) or set(response) != {
+            "allowed",
+            "token",
+            "status",
+        }:
+            raise RuntimeError("schema-7 model update claim response is malformed")
+        allowed = response["allowed"]
+        token = response["token"]
+        if type(allowed) is not bool:
+            raise RuntimeError("schema-7 model update claim allowed is not boolean")
+        status = self._validate_schema7_model_status(response["status"])
+        if allowed:
+            if (
+                type(token) is not int
+                or token <= 0
+                or status["voc_model_update_claim_active"] is not True
+                or status["voc_model_input_sealed"]
+                or status["voc_model_input_aborted"]
+                or status["finish"]
+            ):
+                raise RuntimeError("schema-7 model update claim grant is invalid")
+        elif (
+            token is not None
+            or status["voc_model_update_claim_active"]
+            or not (
+                status["voc_model_input_sealed"]
+                or status["voc_model_input_aborted"]
+                or status["finish"]
+            )
+        ):
+            raise RuntimeError("schema-7 model update claim denial is invalid")
+        return allowed, token, status
+
+    def _end_schema7_model_update(self, token):
+        response = self._schema7_ray_get(
+            self.model_buffer.end_model_update.remote(token),
+            label="ModelBuffer end_model_update",
+        )
+        if (
+            not isinstance(response, dict)
+            or set(response) != {"token", "status"}
+            or type(response["token"]) is not int
+            or response["token"] != token
+        ):
+            raise RuntimeError("schema-7 model update release response is malformed")
+        status = self._validate_schema7_model_status(response["status"])
+        if status["voc_model_update_claim_active"]:
+            raise RuntimeError("schema-7 model update claim remained active")
+        return status
+
+    def _validate_schema7_replay_data_header(self, data):
+        if not isinstance(data, dict):
+            raise RuntimeError("schema-7 ModelBuffer replay data must be a mapping")
+        processed_n = data.get("processed_n")
+        replay_ratio = data.get("replay_ratio")
+        sealed = data.get("voc_model_input_sealed")
+        terminal_processed_n = data.get("voc_model_terminal_processed_n")
+        if (
+            type(data.get("voc_model_input_seal_schema_version")) is not int
+            or data.get("voc_model_input_seal_schema_version") != 1
+            or type(processed_n) is not int
+            or processed_n < 0
+            or type(replay_ratio) is not float
+            or not np.isfinite(replay_ratio)
+            or replay_ratio < 0.0
+            or type(sealed) is not bool
+        ):
+            raise RuntimeError("schema-7 ModelBuffer replay header is malformed")
+        if sealed:
+            if (
+                type(terminal_processed_n) is not int
+                or terminal_processed_n != processed_n
+            ):
+                raise RuntimeError(
+                    "schema-7 sealed replay header has invalid terminal progress"
+                )
+        elif terminal_processed_n is not None:
+            raise RuntimeError(
+                "schema-7 unsealed replay header has terminal progress"
+            )
+        return data
+
+    def _publish_schema7_model_update(self):
+        assert_finite_tensors(
+            self.model_net.state_dict(),
+            context=f"published ModelNet state at real_step={self.real_step}",
+        )
+        self.param_buffer.set_data.remote(
+            "model_net", self.model_net.get_weights()
+        )
+
+    def _schema7_checkpoint_iteration(self):
+        if int(time.strftime("%M")) // 10 != self.ckp_start_time:
+            self.save_checkpoint()
+            self.ckp_start_time = int(time.strftime("%M")) // 10
+        if hasattr(self.flags, "checkpoint_interval"):
+            interval = self.flags.checkpoint_interval
+            if interval > 0:
+                current_milestone = (self.real_step // interval) * interval
+                if not hasattr(self, "last_checkpoint_milestone"):
+                    self.last_checkpoint_milestone = -1
+                if current_milestone > self.last_checkpoint_milestone:
+                    self._logger.info(
+                        "Triggering model step-based checkpoint at step %s "
+                        "(milestone %s)",
+                        self.real_step,
+                        current_milestone,
+                    )
+                    self.save_checkpoint(force=True)
+                    self.last_checkpoint_milestone = current_milestone
+
+    def _complete_schema7_terminal_drain(self, status, prefetched_data_ptr):
+        if getattr(self, "_schema7_terminal_drain_active", False):
+            raise RuntimeError("schema-7 terminal drain started more than once")
+        self._schema7_terminal_drain_active = True
+        status = self._validate_schema7_model_status(
+            status, require_sealed=True
+        )
+        self._raise_if_schema7_model_aborted(status)
+        if status["finish"]:
+            raise RuntimeError("ModelBuffer reported success before ModelLearner")
+        if status["voc_model_input_late_write_count"] != 0:
+            raise RuntimeError("schema-7 ModelBuffer observed a late write")
+        if status["voc_model_update_claim_active"]:
+            raise RuntimeError("schema-7 terminal drain observed an active update claim")
+        if prefetched_data_ptr is not None:
+            ray.internal.free(prefetched_data_ptr)
+
+        terminal_processed_n = status["voc_model_terminal_processed_n"]
+        if type(self.last_psteps) is not int or self.last_psteps < 0:
+            raise RuntimeError("schema-7 model update cursor is invalid")
+        if (
+            type(self.real_step) is not int
+            or self.real_step < 0
+            or self.real_step != self.last_psteps
+        ):
+            raise RuntimeError(
+                "schema-7 model real_step/update cursor lost lockstep before drain"
+            )
+        pre_real_step = self.real_step
+        if pre_real_step > terminal_processed_n:
+            raise RuntimeError("schema-7 model update cursor exceeds sealed input")
+
+        pre_counts = self._gradient_clip_checkpoint_state()
+        self.voc_model_input_sealed = True
+        self.voc_model_input_seal_count = status[
+            "voc_model_input_seal_count"
+        ]
+        self.voc_model_terminal_processed_n = terminal_processed_n
+        self.voc_model_terminal_drain_pre_real_step = pre_real_step
+        self.voc_model_terminal_drain_pre_grad_step_count_m = pre_counts[
+            "model_grad_step_count_m"
+        ]
+        self.voc_model_terminal_drain_pre_grad_step_count_p = pre_counts[
+            "model_grad_step_count_p"
+        ]
+        self.voc_model_input_late_write_count = status[
+            "voc_model_input_late_write_count"
+        ]
+        self.voc_model_input_abort_count = status[
+            "voc_model_input_abort_count"
+        ]
+
+        drain_update_count = 0
+        if terminal_processed_n > pre_real_step:
+            fresh_data = self._schema7_ray_get(
+                self.read_buffer_ptr(), label="fresh post-seal replay read"
+            )
+            if not isinstance(fresh_data, dict):
+                raise RuntimeError(
+                    "schema-7 terminal drain requires one fresh replay batch"
+                )
+            fresh_data = self._validate_schema7_replay_data_header(fresh_data)
+            if (
+                fresh_data["voc_model_input_sealed"] is not True
+                or fresh_data.get("voc_model_terminal_processed_n")
+                != terminal_processed_n
+                or fresh_data["processed_n"] != terminal_processed_n
+            ):
+                raise RuntimeError(
+                    "schema-7 terminal drain batch is not post-seal fresh"
+                )
+            self.replay_ratio = fresh_data["replay_ratio"]
+            if self.consume_data(fresh_data) is not True:
+                raise RuntimeError(
+                    "schema-7 terminal drain did not complete an optimizer step"
+                )
+            drain_update_count = 1
+            self._publish_schema7_model_update()
+        elif pre_real_step != terminal_processed_n:
+            raise RuntimeError(
+                "schema-7 ModelLearner progress disagrees with sealed cursor"
+            )
+        self.voc_model_terminal_drain_update_count = drain_update_count
+
+        final_counts = self._gradient_clip_checkpoint_state()
+        for component in ("m", "p"):
+            expected = pre_counts[f"model_grad_step_count_{component}"] + (
+                drain_update_count
+            )
+            if final_counts[f"model_grad_step_count_{component}"] != expected:
+                raise RuntimeError(
+                    "schema-7 terminal drain gradient-step count is invalid"
+                )
+        if (
+            self.real_step != terminal_processed_n
+            or self.last_psteps != terminal_processed_n
+        ):
+            raise RuntimeError(
+                "schema-7 terminal drain did not bind final model progress"
+            )
+        gate_schema = getattr(
+            self.flags, "voc_gate_policy_schema_version", None
+        )
+        if type(gate_schema) is not int:
+            raise RuntimeError(
+                "sealed ModelLearner terminal bundle has no exact gate schema"
+            )
+        if gate_schema == 7:
+            validate_final_bundle = util.validate_schema7_final_bundle
+        elif gate_schema == 8:
+            validate_final_bundle = util.validate_schema8_final_bundle
+        elif gate_schema == 9:
+            validate_final_bundle = util.validate_schema9_final_bundle
+        elif gate_schema == 10:
+            validate_final_bundle = util.validate_schema10_final_bundle
+        elif gate_schema == 11:
+            validate_final_bundle = util.validate_schema11_final_bundle
+        elif gate_schema == 12:
+            validate_final_bundle = util.validate_schema12_final_bundle
+        elif gate_schema == 13:
+            validate_final_bundle = util.validate_schema13_final_bundle
+        else:
+            raise RuntimeError(
+                "sealed ModelLearner terminal bundle requires gate schema 7--13"
+            )
+        self._logger.info(
+            f"Terminating schema-{gate_schema} model-learning thread after "
+            "sealed input"
+        )
+        self.save_checkpoint(force=True, terminal=True)
+        validated_bundle = validate_final_bundle(
+            self.flags.ckpdir,
+            label=f"schema-{gate_schema} ModelLearner terminal bundle",
+        )
+        if (
+            not isinstance(validated_bundle, dict)
+            or validated_bundle.get("model_real_step") != terminal_processed_n
+            or validated_bundle.get("model_input_seal")
+            != self._schema7_model_input_checkpoint_evidence(
+                require_terminal=True
+            )
+        ):
+            raise RuntimeError(
+                f"schema-{gate_schema} authoritative terminal bundle "
+                "validation disagrees"
+            )
+        completed = self._schema7_ray_get(
+            self.model_buffer.complete_success.remote(terminal_processed_n),
+            label="ModelBuffer complete_success",
+        )
+        completed = self._validate_schema7_model_status(
+            completed, require_sealed=True
+        )
+        if completed["finish"] is not True:
+            raise RuntimeError("schema-7 ModelBuffer did not acknowledge success")
+        self.signal_buffer.update_dict_item.remote(
+            "self_play_signals", "halt", False
+        )
+        self._schema7_terminal_drain_active = False
+
+    def _learn_data_schema7(self):
+        successful = False
+        data_ptr = None
+        try:
+            data_ptr = self.read_buffer_ptr()
+            compatibility_data_ptr = getattr(self, "data_ptr", None)
+            if compatibility_data_ptr is not None:
+                try:
+                    self._schema7_ray_get(
+                        compatibility_data_ptr,
+                        label="initial compatibility replay read",
+                    )
+                finally:
+                    ray.internal.free(compatibility_data_ptr)
+                    self.data_ptr = None
+            while True:
+                if (
+                    self.real_step < self.flags.total_steps
+                    and self.replay_ratio < self.flags.max_replay_ratio
+                ):
+                    current_data_ptr = data_ptr
+                    data_ptr = None
+                    data = self._schema7_ray_get(
+                        current_data_ptr, label="ModelBuffer replay read"
+                    )
+                    ray.internal.free(current_data_ptr)
+                    data_ptr = self.read_buffer_ptr()
+                    if data == MODEL_BUFFER_ABORT:
+                        raise RuntimeError("schema-7 model input was aborted")
+                    if data == "FINISH":
+                        raise RuntimeError(
+                            "schema-7 ModelBuffer finished before learner success"
+                        )
+                    if data is not None:
+                        data = self._validate_schema7_replay_data_header(data)
+                    status = self._get_schema7_model_status()
+                    self._raise_if_schema7_model_aborted(status)
+                    if data is None:
+                        if status["voc_model_input_sealed"]:
+                            terminal_data_ptr = data_ptr
+                            data_ptr = None
+                            self._complete_schema7_terminal_drain(
+                                status, terminal_data_ptr
+                            )
+                            break
+                        self.log_preload(status)
+                        time.sleep(0.01)
+                        continue
+                    if (
+                        data["voc_model_input_sealed"]
+                        or status["voc_model_input_sealed"]
+                    ):
+                        if not status["voc_model_input_sealed"]:
+                            raise RuntimeError(
+                                "schema-7 replay observed a seal absent from status"
+                            )
+                        terminal_data_ptr = data_ptr
+                        data_ptr = None
+                        self._complete_schema7_terminal_drain(
+                            status, terminal_data_ptr
+                        )
+                        break
+                    if data["processed_n"] > status["processed_n"]:
+                        raise RuntimeError(
+                            "schema-7 replay progress exceeds latest buffer status"
+                        )
+                    allowed, claim_token, claim_status = (
+                        self._begin_schema7_model_update(data["processed_n"])
+                    )
+                    if not allowed:
+                        self._raise_if_schema7_model_aborted(claim_status)
+                        if claim_status["finish"]:
+                            raise RuntimeError(
+                                "schema-7 ModelBuffer finished before learner success"
+                            )
+                        terminal_data_ptr = data_ptr
+                        data_ptr = None
+                        self._complete_schema7_terminal_drain(
+                            claim_status, terminal_data_ptr
+                        )
+                        break
+                    if data["processed_n"] > claim_status["processed_n"]:
+                        raise RuntimeError(
+                            "schema-7 replay progress exceeds claimed buffer status"
+                        )
+                    self.init_psteps(data)
+                    self.replay_ratio = data["replay_ratio"]
+                    if self.consume_data(data) is not True:
+                        raise RuntimeError(
+                            "Model consume_data returned without completing an "
+                            "optimizer step"
+                        )
+                    end_status = self._end_schema7_model_update(claim_token)
+                    self._raise_if_schema7_model_aborted(end_status)
+                    if end_status["finish"]:
+                        raise RuntimeError(
+                            "schema-7 ModelBuffer finished before learner success"
+                        )
+                    self._publish_schema7_model_update()
+                    if end_status["voc_model_input_sealed"]:
+                        terminal_data_ptr = data_ptr
+                        data_ptr = None
+                        self._complete_schema7_terminal_drain(
+                            end_status, terminal_data_ptr
+                        )
+                        break
+                    self._schema7_checkpoint_iteration()
+                    del data
+                    gc.collect()
+                else:
+                    time.sleep(0.01)
+                    status = self._get_schema7_model_status()
+                    self._raise_if_schema7_model_aborted(status)
+                    if status["voc_model_input_sealed"]:
+                        terminal_data_ptr = data_ptr
+                        data_ptr = None
+                        self._complete_schema7_terminal_drain(
+                            status, terminal_data_ptr
+                        )
+                        break
+                    self.replay_ratio = status["replay_ratio"]
+            successful = True
+            return True
+        except Exception as error:
+            self._logger.error(f"Exception detected in learn_model: {error}")
+            self._logger.error(traceback.format_exc())
+            try:
+                self._schema7_ray_get(
+                    self.model_buffer.abort_input.remote(),
+                    label="ModelBuffer abort_input",
+                )
+            except Exception as abort_error:
+                self._logger.error(
+                    "Failed to acknowledge schema-7 ModelBuffer abort: %s",
+                    abort_error,
+                )
+            raise
+        finally:
+            if data_ptr is not None:
+                ray.internal.free(data_ptr)
+            self.close(successful=successful)
+
+    def _learn_data_legacy(self):
         successful = False
         try:
             data_ptr = self.read_buffer_ptr()
@@ -390,6 +905,15 @@ class SModelLearner:
         
     def update_real_step(self, data):
         new_psteps = data["processed_n"]
+        if getattr(self, "voc_model_input_seal_runtime", False):
+            if type(new_psteps) is not int or new_psteps < self.last_psteps:
+                raise RuntimeError(
+                    "schema-7 ModelBuffer processed_n must be a monotonic integer"
+                )
+            if self.real_step != self.last_psteps:
+                raise RuntimeError(
+                    "schema-7 model real_step/update cursor lost lockstep"
+                )
         new_psteps = int(new_psteps)        
         self.real_step += new_psteps - self.last_psteps
         self.last_psteps = new_psteps
@@ -1310,7 +1834,177 @@ class SModelLearner:
                 break                
             time.sleep(0.1)  
 
-    def save_checkpoint(self, force=False):
+    def _validate_schema7_model_input_checkpoint_evidence(
+        self, checkpoint, *, require_terminal
+    ):
+        if type(require_terminal) is not bool:
+            raise RuntimeError("schema-7 checkpoint terminal mode must be boolean")
+        expected_fields = set(util._SCHEMA7_MODEL_INPUT_SEAL_EVIDENCE_FIELDS)
+        actual_fields = {
+            name
+            for name in checkpoint
+            if type(name) is str and name.startswith("voc_model_")
+        }
+        if actual_fields != expected_fields:
+            raise RuntimeError(
+                "schema-7 checkpoint has an inexact model-input evidence surface"
+            )
+        evidence = {name: checkpoint[name] for name in expected_fields}
+        if type(evidence["voc_model_input_sealed"]) is not bool:
+            raise RuntimeError(
+                "schema-7 checkpoint seal evidence must be Python bool"
+            )
+        for name in expected_fields - {"voc_model_input_sealed"}:
+            if type(evidence[name]) is not int:
+                raise RuntimeError(
+                    f"schema-7 checkpoint {name} must be a Python integer"
+                )
+        if evidence["voc_model_input_seal_schema_version"] != 1:
+            raise RuntimeError("schema-7 checkpoint has the wrong seal schema")
+
+        if not evidence["voc_model_input_sealed"]:
+            preterminal = {
+                "voc_model_input_seal_schema_version": 1,
+                "voc_model_input_sealed": False,
+                "voc_model_input_seal_count": 0,
+                "voc_model_terminal_processed_n": -1,
+                "voc_model_terminal_drain_update_count": 0,
+                "voc_model_terminal_drain_pre_real_step": -1,
+                "voc_model_terminal_drain_pre_grad_step_count_m": -1,
+                "voc_model_terminal_drain_pre_grad_step_count_p": -1,
+                "voc_model_input_late_write_count": 0,
+                "voc_model_input_abort_count": 0,
+            }
+            if require_terminal or evidence != preterminal:
+                raise RuntimeError(
+                    "schema-7 preterminal checkpoint evidence is malformed"
+                )
+            return evidence
+
+        if not require_terminal:
+            raise RuntimeError(
+                "schema-7 sealed evidence requires terminal durable save mode"
+            )
+
+        for name in (
+            "real_step",
+            "model_grad_step_count_m",
+            "model_grad_step_count_p",
+        ):
+            if type(checkpoint.get(name)) is not int:
+                raise RuntimeError(
+                    f"schema-7 terminal checkpoint {name} must be a Python integer"
+                )
+        total_steps = getattr(self.flags, "total_steps", None)
+        if type(total_steps) is not int or total_steps <= 0:
+            raise RuntimeError("schema-7 terminal checkpoint total_steps is invalid")
+        real_step = checkpoint["real_step"]
+        terminal_processed_n = evidence["voc_model_terminal_processed_n"]
+        drain_count = evidence["voc_model_terminal_drain_update_count"]
+        pre_real_step = evidence["voc_model_terminal_drain_pre_real_step"]
+        pre_m = evidence["voc_model_terminal_drain_pre_grad_step_count_m"]
+        pre_p = evidence["voc_model_terminal_drain_pre_grad_step_count_p"]
+        final_m = checkpoint["model_grad_step_count_m"]
+        final_p = checkpoint["model_grad_step_count_p"]
+        if (
+            evidence["voc_model_input_seal_count"] != 1
+            or terminal_processed_n != real_step
+            or real_step < total_steps
+            or drain_count not in (0, 1)
+            or not 0 <= pre_real_step <= real_step
+            or pre_m < 0
+            or pre_p < 0
+            or final_m <= 0
+            or final_p <= 0
+            or final_m != final_p
+            or final_m != pre_m + drain_count
+            or final_p != pre_p + drain_count
+            or evidence["voc_model_input_late_write_count"] != 0
+            or evidence["voc_model_input_abort_count"] != 0
+        ):
+            raise RuntimeError(
+                "schema-7 terminal checkpoint evidence relations are invalid"
+            )
+        if (
+            drain_count == 0 and pre_real_step != real_step
+        ) or (
+            drain_count == 1 and pre_real_step >= real_step
+        ):
+            raise RuntimeError(
+                "schema-7 terminal checkpoint drain branch is invalid"
+            )
+        return evidence
+
+    def _schema7_model_input_checkpoint_evidence(self, *, require_terminal):
+        evidence = {
+            "voc_model_input_seal_schema_version": (
+                self.voc_model_input_seal_schema_version
+            ),
+            "voc_model_input_sealed": self.voc_model_input_sealed,
+            "voc_model_input_seal_count": self.voc_model_input_seal_count,
+            "voc_model_terminal_processed_n": (
+                self.voc_model_terminal_processed_n
+            ),
+            "voc_model_terminal_drain_update_count": (
+                self.voc_model_terminal_drain_update_count
+            ),
+            "voc_model_terminal_drain_pre_real_step": (
+                self.voc_model_terminal_drain_pre_real_step
+            ),
+            "voc_model_terminal_drain_pre_grad_step_count_m": (
+                self.voc_model_terminal_drain_pre_grad_step_count_m
+            ),
+            "voc_model_terminal_drain_pre_grad_step_count_p": (
+                self.voc_model_terminal_drain_pre_grad_step_count_p
+            ),
+            "voc_model_input_late_write_count": (
+                self.voc_model_input_late_write_count
+            ),
+            "voc_model_input_abort_count": self.voc_model_input_abort_count,
+        }
+        checkpoint = {
+            **evidence,
+            "real_step": self.real_step,
+            **self._gradient_clip_checkpoint_state(),
+        }
+        self._validate_schema7_model_input_checkpoint_evidence(
+            checkpoint, require_terminal=require_terminal
+        )
+        return evidence
+
+    @staticmethod
+    def _durable_torch_save(payload, path):
+        temporary_path = path + ".tmp"
+        with open(temporary_path, "wb") as handle:
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        directory = os.path.dirname(os.path.abspath(path))
+        directory_fd = os.open(
+            directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def save_checkpoint(self, force=False, terminal=False):
+        if type(terminal) is not bool:
+            raise ValueError("model checkpoint terminal mode must be Python bool")
+        if terminal and not getattr(self, "voc_model_input_seal_runtime", False):
+            raise RuntimeError("terminal model-input evidence is inactive")
+        if terminal and force is not True:
+            raise RuntimeError("schema-7 terminal checkpoint must be force-saved")
+        if (
+            getattr(self, "voc_model_input_seal_runtime", False)
+            and getattr(self, "_schema7_terminal_drain_active", False)
+            and not terminal
+        ):
+            self._logger.info(
+                "Deferring periodic checkpoint during schema-7 terminal drain"
+            )
+            return False
         self._logger.info("Saving model checkpoint to %s" % self.ckp_path)
         assert_finite_tensors(
             self.model_net.state_dict(),
@@ -1325,6 +2019,10 @@ class SModelLearner:
             "flags": vars(self.flags),
         }
         d.update(self._gradient_clip_checkpoint_state())
+        if getattr(self, "voc_model_input_seal_runtime", False):
+            d.update(self._schema7_model_input_checkpoint_evidence(
+                require_terminal=terminal
+            ))
         if self.scaler_p is not None:
             d["model_scaler_p_state_dict"] = self.scaler_p.state_dict()
         if self.flags.dual_net:
@@ -1338,16 +2036,22 @@ class SModelLearner:
                 d["model_scaler_m_state_dict"] = self.scaler_m.state_dict()
         try:
             # Save regular checkpoint
-            torch.save(d, self.ckp_path + ".tmp")
-            os.replace(self.ckp_path + ".tmp", self.ckp_path)
+            if terminal:
+                self._durable_torch_save(d, self.ckp_path)
+            else:
+                torch.save(d, self.ckp_path + ".tmp")
+                os.replace(self.ckp_path + ".tmp", self.ckp_path)
             
             # Save step-specific checkpoint if forced or at checkpoint interval
             if force or (hasattr(self.flags, 'checkpoint_interval') and 
                          self.flags.checkpoint_interval > 0 and 
                          self.real_step % self.flags.checkpoint_interval == 0):
                 checkpoint_path = f"{self.ckp_path}_step_{self.real_step}"
-                torch.save(d, checkpoint_path + ".tmp")
-                os.replace(checkpoint_path + ".tmp", checkpoint_path)
+                if terminal:
+                    self._durable_torch_save(d, checkpoint_path)
+                else:
+                    torch.save(d, checkpoint_path + ".tmp")
+                    os.replace(checkpoint_path + ".tmp", checkpoint_path)
                 self._logger.info(f"Saved model checkpoint at step {self.real_step} to {checkpoint_path}")
         except Exception as e:       
             self._logger.error(f"Error saving model checkpoint: {e}")

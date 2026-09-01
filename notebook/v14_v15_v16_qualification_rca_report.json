@@ -1,0 +1,1158 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Enduro VoC: Restore Huber, Keep Common Mode",
+    "description": "Product-stakeholder root-cause report for the frozen v14, v15, and v16 seed-1 100k Enduro qualifications, with a bounded v17 recommendation and explicit causal limits.",
+    "generatedAt": "2026-08-28T12:08:42Z",
+    "sources": [
+      {
+        "id": "rca_notebook",
+        "label": "Executed frozen v14-v15-v16 qualification comparison notebook (SHA-256 d32ebb602bdf38f8392878f7e76b3e91d32528203565843429dad4d0ad3bc87a)",
+        "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb"
+      },
+      {
+        "id": "headline_sql",
+        "label": "Reviewed qualification headline metrics",
+        "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T12:08:42Z",
+          "description": "Materializes the reviewed headline, hard-gate, late-window, and clipping-boundary outputs from the executed frozen notebook.",
+          "sql": "SELECT * FROM (VALUES (0.5247954789453232::DOUBLE, 0.5637126651551874::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE, 0.42412219735332535::DOUBLE, 0.9513859413944138::DOUBLE, 0.8161048402729425::DOUBLE, 5::INTEGER, 48::INTEGER, 1::INTEGER, 11722::INTEGER, 1608.0::DOUBLE, 35::INTEGER, 250::INTEGER, 7::INTEGER, 52::INTEGER, 0::INTEGER, 58::INTEGER, 0.14::DOUBLE, 0.1346153846153846::DOUBLE, 0.0::DOUBLE, 3119.21176798055::DOUBLE, 1883.75::DOUBLE, 1235.46176798055::DOUBLE, 7535::INTEGER, '95344, 96368, 97392, 98416, 99408')) AS t(v14_heldout_ema_rmse, v15_heldout_ema_rmse, v16_heldout_ema_rmse, rmse_ceiling, v16_w1_rmse, v16_w2_rmse, v16_w3_rmse, v16_undefined_trailing_endpoints, v16_eligible_trailing_endpoints, v16_w3_positive_sign_support, v16_w3_negative_sign_support, nominal_clip_boundary, v16_all_boundary_exceedances, v16_all_rows, v16_canonical_boundary_exceedances, v16_canonical_rows, v15_canonical_boundary_exceedances, v15_canonical_rows, v16_all_boundary_exceedance_rate, v16_canonical_boundary_exceedance_rate, v15_canonical_boundary_exceedance_rate, v16_heldout_ema_sse, v16_threshold_sse, v16_excess_sse, v16_heldout_support, v16_zero_positive_endpoint_steps)",
+          "filters": [
+            "Frozen Enduro seed-1 fresh 100k qualification runs only",
+            "Canonical actor rows satisfy 70000 < real_step <= 100000",
+            "Terminal overshoots are excluded",
+            "No row omission, repair, interpolation, retry, or reweighting"
+          ],
+          "metric_definitions": [
+            "Heldout EMA RMSE = sqrt(sum(row heldout support * row heldout EMA RMSE^2) / sum(row heldout support)).",
+            "A trailing-five endpoint is denominator-valid only when independently pooled positive-sign and negative-sign supports are both nonzero.",
+            "Boundary exceedance rate = rows with logged raw VoC-Q total gradient norm > 1608 divided by rows in the stated population.",
+            "The SQL materializes exact reviewed notebook outputs; raw actor CSV SHA-256 values are v14 6d72052279a59983d102bed3db767b3792b115d221f155cdd10d4dc29bbe85a8, v15 359eb6540a6265a2a5b8e77fa8ac01420b5f0077a3b84d67800f0308f448e341, and v16 45da4532357f5f150fad15c47bf1cdbb5ec52738ff3a68678afb5dca73ed20d5."
+          ]
+        }
+      },
+      {
+        "id": "window_sql",
+        "label": "Reviewed heldout EMA qualification-window rows",
+        "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T12:08:42Z",
+          "description": "Materializes the nine reviewed version-window rows used by the native grouped-bar chart.",
+          "sql": "SELECT * FROM (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W1 (70k-80k]', 1, 32, 3647, 0.4734519019::DOUBLE, 0.3070468494240733::DOUBLE, 0.3069186481::DOUBLE, 343.8310189523::DOUBLE, 911.75::DOUBLE, -567.9189810477::DOUBLE, 0.16207087859592553::DOUBLE, 0.5247954789453232::DOUBLE, 0.5::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W2 (80k-90k]', 2, 19, 2485, 0.3226015838::DOUBLE, 0.4805763254032396::DOUBLE, 0.4812888845::DOUBLE, 573.9197072771::DOUBLE, 621.25::DOUBLE, -47.3302927229::DOUBLE, 0.270527282516125::DOUBLE, 0.5247954789453232::DOUBLE, 0.5::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W3 (90k-100k]', 3, 12, 1571, 0.2039465143::DOUBLE, 0.8753410807478021::DOUBLE, 0.8748756785::DOUBLE, 1203.7347740099::DOUBLE, 392.75::DOUBLE, 810.9847740099::DOUBLE, 0.5674018388879494::DOUBLE, 0.5247954789453232::DOUBLE, 0.5::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W1 (70k-80k]', 1, 19, 2452, 0.3007113073::DOUBLE, 0.6350000482991449::DOUBLE, 0.6355039321::DOUBLE, 988.7078504055::DOUBLE, 613.0::DOUBLE, 375.7078504055::DOUBLE, 0.38157656190278516::DOUBLE, 0.5637126651551874::DOUBLE, 0.5::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W2 (80k-90k]', 2, 26, 3509, 0.4303409370::DOUBLE, 0.5262197892944133::DOUBLE, 0.5276178190::DOUBLE, 971.6675986575::DOUBLE, 877.25::DOUBLE, 94.4175986575::DOUBLE, 0.3750001392787582::DOUBLE, 0.5637126651551874::DOUBLE, 0.5::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W3 (90k-100k]', 3, 13, 2193, 0.2689477557::DOUBLE, 0.536296424979157::DOUBLE, 0.5372708960::DOUBLE, 630.7371849918::DOUBLE, 548.25::DOUBLE, 82.4871849918::DOUBLE, 0.24342329881845667::DOUBLE, 0.5637126651551874::DOUBLE, 0.5::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W1 (70k-80k]', 1, 32, 4621, 0.6132714001::DOUBLE, 0.42412219735332535::DOUBLE, 0.4225059308::DOUBLE, 831.2238085280::DOUBLE, 1155.25::DOUBLE, -324.0261914720::DOUBLE, 0.26648521176430207::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W2 (80k-90k]', 2, 10, 1452, 0.1927007299::DOUBLE, 0.9513859413944138::DOUBLE, 0.9580587217::DOUBLE, 1314.2563241692::DOUBLE, 363.0::DOUBLE, 951.2563241692::DOUBLE, 0.4213424486469157::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W3 (90k-100k]', 3, 10, 1462, 0.1940278699::DOUBLE, 0.8161048402729425::DOUBLE, 0.8102244292::DOUBLE, 973.7316352833::DOUBLE, 365.5::DOUBLE, 608.2316352833::DOUBLE, 0.31217233958876617::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE)) AS t(version, schema_version, loss, reconstruction, window_label, window_order, canonical_rows, heldout_support, support_share, ema_rmse, online_rmse, ema_sse, threshold_sse, excess_sse, sse_share, full_ema_rmse, rmse_ceiling)",
+          "filters": [
+            "W1=(70000,80000], W2=(80000,90000], W3=(90000,100000]",
+            "Terminal overshoots are excluded",
+            "Support-weighted within version and window"
+          ],
+          "metric_definitions": [
+            "Window EMA RMSE pools row squared error by heldout support before taking the square root.",
+            "SSE share is the window heldout EMA SSE divided by the version full-population heldout EMA SSE.",
+            "Different versions have separately generated on-policy rows and supports; window comparisons are descriptive rather than paired."
+          ]
+        }
+      },
+      {
+        "id": "gradient_sql",
+        "label": "Reviewed canonical raw VoC-Q gradient-norm and clipping-boundary comparison",
+        "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T12:08:42Z",
+          "description": "Materializes mean, median, p95, and maximum canonical raw VoC-Q total gradient norms plus all-CSV and canonical boundary counts.",
+          "sql": "SELECT * FROM (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Mean', 1, 128.9525264861::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Median', 2, 62.3866691589::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'P95', 3, 443.1804840088::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Maximum', 4, 886.306884765625::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Mean', 1, 181.8296942875::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Median', 2, 131.7394409180::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'P95', 3, 537.2278793335::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Maximum', 4, 802.5406494140625::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Mean', 1, 696.7852480962::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Median', 2, 428.2610778809::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'P95', 3, 1842.8370300293::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Maximum', 4, 2687.010986328125::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE)) AS t(version, schema_version, loss, reconstruction, statistic, statistic_order, raw_q_total_norm, nominal_clip_boundary, canonical_boundary_exceedances, canonical_rows, canonical_boundary_exceedance_rate, all_boundary_exceedances, all_rows, all_boundary_exceedance_rate, canonical_max_norm, all_max_norm)",
+          "filters": [
+            "Canonical norm statistics use 70000 < real_step <= 100000",
+            "All-CSV counts retain every complete frozen actor row",
+            "Boundary exceedance is logged raw VoC-Q total gradient norm > 1608"
+          ],
+          "metric_definitions": [
+            "The logged raw total gradient norm is measured before the unchanged nominal global clipping boundary of 0.5 * 201 * 16 = 1608.",
+            "Boundary exceedance counts indicate scale pressure, not the post-clipping optimizer-step norm and not a causal mechanism.",
+            "P95 uses the executed notebook's pandas quantile calculation on canonical rows."
+          ]
+        }
+      },
+      {
+        "id": "version_sql",
+        "label": "Reviewed exact v14-v16 version comparison",
+        "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T12:08:42Z",
+          "description": "Materializes the exact version, mechanism, population, gate, SSE, and raw-gradient boundary summary for the audit table.",
+          "sql": "SELECT * FROM (VALUES ('v14', 'schema 7', 'Huber beta=1', 'Detached value + policy-centered raw head', 'No', 63, 7703, 0.5247954789453232::DOUBLE, 2121.4855002393::DOUBLE, 195.7355002393::DOUBLE, 0, '0/63', 'Heldout EMA RMSE', 'FAIL'), ('v15', 'schema 8', 'Half-MSE', 'Detached value + policy-centered raw head', 'No', 58, 8154, 0.5637126651551874::DOUBLE, 2591.1126340548::DOUBLE, 552.6126340548::DOUBLE, 0, '0/58', 'Heldout EMA RMSE', 'FAIL'), ('v16', 'schema 9', 'Half-MSE', 'Detached value + raw-head mean + policy-centered raw head', 'Yes', 52, 7535, 0.643399622874774::DOUBLE, 3119.21176798055::DOUBLE, 1235.46176798055::DOUBLE, 5, '7/52', 'Heldout EMA RMSE; trailing-five denominator validity', 'FAIL')) AS t(version, schema, q_regression_loss, q_reconstruction, learnable_common_mode, canonical_rows, heldout_support, heldout_ema_rmse, heldout_ema_sse, threshold_excess_sse, undefined_trailing_endpoints, canonical_raw_norm_boundary_exceedances, hard_failures, qualification_decision)",
+          "filters": [
+            "Strict canonical qualification population 70000 < real_step <= 100000",
+            "Unchanged heldout EMA RMSE ceiling <= 0.5",
+            "Terminal overshoots excluded"
+          ],
+          "metric_definitions": [
+            "Threshold-excess SSE = heldout EMA SSE - 0.25 * heldout support.",
+            "Learnable common mode describes whether an equal feature-conditioned shift of both raw action-head rows survives Q reconstruction.",
+            "Qualification decision is irreversible for each frozen run; a failed run cannot proceed to primary, fixed evaluation, retry, resume, or rescue."
+          ]
+        }
+      },
+      {
+        "id": "candidate_sql",
+        "label": "Reviewed ranked v17 hypotheses from frozen RCA and independent mechanism/numeric consensus",
+        "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+        "query": {
+          "engine": "DuckDB",
+          "language": "sql",
+          "executed_at": "2026-08-28T12:08:42Z",
+          "description": "Materializes the two ranked, falsifiable successor hypotheses; neither row is a pass prediction or launch authorization.",
+          "sql": "SELECT * FROM (VALUES (1, 'Huber beta=1 + schema-9 common-mode reconstruction', 'Restore the Q regression loss only relative to v16', 'No new parameters; represented Q form and common-mode capacity stay unchanged', 'Fills the untested Huber/common cell and tests a per-example slope cap; aggregate raw norm or clipping need not fall'), (2, 'Orthonormal mean/difference coordinates with separate Adam moments', 'Change parameter and optimizer coordinates while preserving represented Q values', 'Broader implementation and checkpoint/optimizer-state surface', 'Separates common and action-difference optimizer moments if candidate 1 is falsified or remains unstable')) AS t(candidate_rank, candidate, delta_from_v16, implementation_scope, falsifiable_rationale)",
+          "metric_definitions": [
+            "Candidate 1 is one semantic change from v16: restore SmoothL1/Huber beta=1 and retain schema-9 common-mode reconstruction exactly.",
+            "Candidate 2 uses orthonormal coordinates m=(A_CONTINUE+A_STOP)/sqrt(2) and d=(A_CONTINUE-A_STOP)/sqrt(2) on the raw two-row head parameters, with separate Adam moments; it is ranked second because the frozen evidence does not identify optimizer-coordinate causality.",
+            "The ranking is a preregistration recommendation, not a causal estimate, expected-pass claim, implementation, launch, retry, or evaluation authorization."
+          ]
+        }
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Enduro VoC: Restore Huber, Keep Common Mode"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "sourceId": "headline_sql",
+        "body": "## Executive Summary\n\n- **All three frozen qualifications failed the unchanged heldout calibration gate.** Support-weighted heldout EMA TD RMSE rose from **0.524795** in v14 to **0.563713** in v15 and **0.643400** in v16, all above the **0.5** ceiling. V16 also produced **five undefined trailing-five endpoints** because positive-sign support vanished; those endpoints cannot be repaired or counted as nonnegative.\n- **V16's risk is late and scale-related, but the runs do not prove a cause.** Its W1 RMSE was **0.424122**, then W2/W3 rose to **0.951386/0.816105**. The raw Q-gradient norm crossed the nominal 1,608 clipping boundary on **35/250** all-CSV rows and **7/52** canonical rows, versus **0/58** canonical rows in v15.\n- **The best-bounded v17 hypothesis is one change from v16: restore Huber beta=1 while keeping schema-9 common mode.** This fills the untested Huber-plus-common design cell without adding parameters or changing represented Q values. If that test is falsified or remains unstable, the second candidate is explicit orthonormal mean/difference coordinates with separate Adam moments. Neither recommendation predicts a pass or authorizes a launch."
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "v16_gate_card",
+          "v16_late_window_card",
+          "v16_scale_card",
+          "v16_denominator_card"
+        ]
+      },
+      {
+        "id": "window_findings",
+        "type": "markdown",
+        "sourceId": "window_sql",
+        "body": "## The failure moved across windows instead of disappearing\n\n**Each version failed in a different temporal regime.** V14 was below the ceiling in W1/W2 and spiked to **0.875341** in W3. V15 spread elevated error across all three windows. V16 improved W1 to **0.424122** but deteriorated sharply to **0.951386** in W2 and **0.816105** in W3. Its W1-heavy support mix therefore softens the pooled number rather than removing late-window risk. The grouped bars compare discrete preregistered windows; they do not treat the separately generated trajectories as paired observations."
+      },
+      {
+        "id": "window_chart_block",
+        "type": "chart",
+        "chartId": "window_rmse_chart"
+      },
+      {
+        "id": "gradient_findings",
+        "type": "markdown",
+        "sourceId": "gradient_sql",
+        "body": "## The common-mode run coincided with much larger raw Q-gradient norms\n\n**V16's canonical median/p95/maximum raw Q-gradient norms were 428.26/1,842.84/2,687.01, compared with 131.74/537.23/802.54 in v15.** Its p95 and maximum sit above the unchanged nominal clipping boundary of **1,608**, and **13.46%** of canonical rows crossed that boundary. The chart shows pre-clipping raw total norms, not parameter deltas or post-clipping step norms. The association motivates a robust-loss test; it does not establish that common mode caused the scale increase."
+      },
+      {
+        "id": "gradient_chart_block",
+        "type": "chart",
+        "chartId": "gradient_norm_chart"
+      },
+      {
+        "id": "version_findings",
+        "type": "markdown",
+        "sourceId": "version_sql",
+        "body": "## The observed design leaves one decisive cell untested\n\n**V14 used Huber without learnable common mode; v15 used half-MSE without common mode; v16 used half-MSE with common mode.** The missing Huber-plus-common cell is therefore the smallest immediate successor to v16: change only the loss while retaining its reconstruction. This is a useful design completion, not a retrospective factorial estimate, because each row below came from one unpaired, closed-loop trajectory with different support and state visitation."
+      },
+      {
+        "id": "version_table_block",
+        "type": "table",
+        "tableId": "version_comparison_table"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "sourceId": "candidate_sql",
+        "body": "## Next experiment: restore Huber, keep common mode\n\n1. **Preregister Huber beta=1 plus the unchanged schema-9 reconstruction as v17.** Relative to v16, change only the Q regression loss; add no parameters, relax no gate, and preserve the common-mode representation.\n2. **Keep the decision evidence prospective and unchanged.** Retain exact window RMSE, raw-norm/boundary telemetry, trailing-five sign denominators, the one-of-one wire, and the fresh seed-1 100k qualification. Do not use post-hoc support repair, window reweighting, threshold relaxation, retry, or rescue.\n3. **Use orthonormal mean/difference-coordinate Adam only as the second hypothesis.** If Huber-plus-common does not control scale or late-window error, separate common and action-difference optimizer moments while preserving represented Q values. This is broader than candidate 1 and should not be bundled into the same test.\n4. **Advance only on a full preregistered pass.** A mechanics pass, lower norm, better W1, or improved aggregate RMSE cannot substitute for every hard gate."
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## Further questions\n\n- Does Huber-plus-common reduce raw-gradient boundary pressure while preserving useful feature-conditioned common correction?\n- Does W2/W3 calibration improve without recreating v14's late-window spike or v16's positive-sign support collapse?\n- If the first candidate is falsified, do orthonormal mean/difference optimizer states change the norm and calibration regimes, or is the pattern driven primarily by policy-coupled state visitation?\n- Is event-level residual telemetry needed before choosing any additional tail-control mechanism?"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "sourceId": "headline_sql",
+        "body": "## Caveats and assumptions\n\n- **This is descriptive single-seed evidence.** V14, v15, and v16 are separate on-policy runs with different row cadence, support, states, and policies; there are no paired states, counterfactual actions, or replicated seeds.\n- **The gradient chart is causal-adjacent, not causal.** Logged raw norms and boundary crossings do not reveal post-clipping step norms, per-parameter updates, or whether loss, reconstruction, optimizer coordinates, or visitation produced the change.\n- **Undefined endpoints remain failures.** V16's zero-positive endpoints at steps 95,344, 96,368, 97,392, 98,416, and 99,408 are neither zero gaps nor negative gaps and cannot be omitted or repaired.\n- **No future result is forecast.** The ranked candidates are falsifiable preregistration choices only; this report performs no v17 implementation, launch, evaluation, fixed evaluation, retry, resume, or rescue."
+      }
+    ],
+    "cards": [
+      {
+        "id": "v16_gate_card",
+        "description": "The controlling support-weighted heldout EMA selected-action TD RMSE; lower is better.",
+        "dataset": "headline",
+        "sourceId": "headline_sql",
+        "metrics": [
+          {
+            "label": "v16 heldout EMA RMSE",
+            "field": "v16_heldout_ema_rmse",
+            "format": "number"
+          },
+          {
+            "label": "Hard ceiling",
+            "field": "rmse_ceiling",
+            "format": "number"
+          },
+          {
+            "label": "Best observed (v14)",
+            "field": "v14_heldout_ema_rmse",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "v16_late_window_card",
+        "description": "V16 heldout EMA RMSE by the three preregistered qualification windows.",
+        "dataset": "headline",
+        "sourceId": "headline_sql",
+        "metrics": [
+          {
+            "label": "v16 W2 RMSE",
+            "field": "v16_w2_rmse",
+            "format": "number"
+          },
+          {
+            "label": "W1",
+            "field": "v16_w1_rmse",
+            "format": "number"
+          },
+          {
+            "label": "W3",
+            "field": "v16_w3_rmse",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "v16_scale_card",
+        "description": "Share of rows whose logged raw VoC-Q total gradient norm exceeded the nominal clipping boundary of 1,608.",
+        "dataset": "headline",
+        "sourceId": "headline_sql",
+        "metrics": [
+          {
+            "label": "v16 canonical exceed rate",
+            "field": "v16_canonical_boundary_exceedance_rate",
+            "format": "percent"
+          },
+          {
+            "label": "All v16 rows",
+            "field": "v16_all_boundary_exceedance_rate",
+            "format": "percent"
+          },
+          {
+            "label": "v15 canonical",
+            "field": "v15_canonical_boundary_exceedance_rate",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "v16_denominator_card",
+        "description": "Trailing-five endpoints need both positive-sign and negative-sign support to be defined.",
+        "dataset": "headline",
+        "sourceId": "headline_sql",
+        "metrics": [
+          {
+            "label": "Undefined endpoints",
+            "field": "v16_undefined_trailing_endpoints",
+            "format": "number"
+          },
+          {
+            "label": "Eligible endpoints",
+            "field": "v16_eligible_trailing_endpoints",
+            "format": "number"
+          },
+          {
+            "label": "W3 positive support",
+            "field": "v16_w3_positive_sign_support",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "window_rmse_chart",
+        "title": "Heldout EMA TD RMSE by qualification window",
+        "subtitle": "W1=(70k,80k], W2=(80k,90k], W3=(90k,100k]; support-weighted within each version and window.",
+        "intent": "comparison",
+        "question": "How did heldout calibration error redistribute across the three preregistered windows in v14, v15, and v16?",
+        "rationale": "Grouped bars compare three discrete ordered periods without implying a dense time trend or paired trajectories.",
+        "type": "bar",
+        "dataset": "window_rmse",
+        "sourceId": "window_sql",
+        "encodings": {
+          "x": {
+            "field": "window_label",
+            "type": "ordinal",
+            "label": "Qualification window"
+          },
+          "y": {
+            "field": "ema_rmse",
+            "type": "quantitative",
+            "label": "Heldout EMA TD RMSE"
+          },
+          "color": {
+            "field": "version",
+            "type": "nominal",
+            "label": "Version"
+          },
+          "tooltip": [
+            {
+              "field": "heldout_support",
+              "type": "quantitative",
+              "label": "Heldout support"
+            },
+            {
+              "field": "support_share",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "Share of version support"
+            },
+            {
+              "field": "ema_sse",
+              "type": "quantitative",
+              "label": "Heldout EMA SSE"
+            },
+            {
+              "field": "sse_share",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "Share of version SSE"
+            },
+            {
+              "field": "online_rmse",
+              "type": "quantitative",
+              "label": "Heldout online RMSE"
+            },
+            {
+              "field": "loss",
+              "type": "nominal",
+              "label": "Q regression loss"
+            }
+          ]
+        },
+        "yAxisTitle": "RMSE (raw TD units)",
+        "valueFormat": "number",
+        "referenceLines": [
+          {
+            "axis": "y",
+            "value": 0.5,
+            "label": "Qualification ceiling",
+            "color": "neutral",
+            "lineStyle": "dashed"
+          }
+        ],
+        "palette": {
+          "kind": "categorical",
+          "name": "version-comparison"
+        },
+        "legend": {
+          "position": "bottom",
+          "interactive": true,
+          "title": "Version"
+        },
+        "labels": {
+          "values": "all"
+        },
+        "layout": "full"
+      },
+      {
+        "id": "gradient_norm_chart",
+        "title": "Canonical raw VoC-Q gradient-norm summary",
+        "subtitle": "Mean, median, p95, and maximum for 70k < real step <= 100k; nominal clipping boundary = 1,608.",
+        "intent": "comparison",
+        "question": "How did the scale and clipping-boundary pressure of logged raw VoC-Q total gradients differ across versions?",
+        "rationale": "Grouped bars make the same-unit distribution summaries and the common reference boundary directly comparable across the three versions.",
+        "type": "bar",
+        "dataset": "gradient_norms",
+        "sourceId": "gradient_sql",
+        "encodings": {
+          "x": {
+            "field": "statistic",
+            "type": "ordinal",
+            "label": "Distribution statistic"
+          },
+          "y": {
+            "field": "raw_q_total_norm",
+            "type": "quantitative",
+            "label": "Raw VoC-Q total gradient norm"
+          },
+          "color": {
+            "field": "version",
+            "type": "nominal",
+            "label": "Version"
+          },
+          "tooltip": [
+            {
+              "field": "canonical_boundary_exceedances",
+              "type": "quantitative",
+              "label": "Canonical boundary exceedances"
+            },
+            {
+              "field": "canonical_rows",
+              "type": "quantitative",
+              "label": "Canonical rows"
+            },
+            {
+              "field": "canonical_boundary_exceedance_rate",
+              "type": "quantitative",
+              "format": "percent",
+              "label": "Canonical exceedance rate"
+            },
+            {
+              "field": "all_boundary_exceedances",
+              "type": "quantitative",
+              "label": "All-CSV boundary exceedances"
+            },
+            {
+              "field": "all_rows",
+              "type": "quantitative",
+              "label": "All CSV rows"
+            },
+            {
+              "field": "all_max_norm",
+              "type": "quantitative",
+              "label": "All-CSV maximum norm"
+            },
+            {
+              "field": "loss",
+              "type": "nominal",
+              "label": "Q regression loss"
+            }
+          ]
+        },
+        "yAxisTitle": "Raw total gradient norm",
+        "valueFormat": "number",
+        "referenceLines": [
+          {
+            "axis": "y",
+            "value": 1608.0,
+            "label": "Nominal clipping boundary",
+            "color": "neutral",
+            "lineStyle": "dashed"
+          }
+        ],
+        "palette": {
+          "kind": "categorical",
+          "name": "version-comparison"
+        },
+        "legend": {
+          "position": "bottom",
+          "interactive": true,
+          "title": "Version"
+        },
+        "labels": {
+          "values": "all"
+        },
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "version_comparison_table",
+        "title": "Exact v14-v16 qualification comparison",
+        "subtitle": "Frozen seed-1 100k runs; strict 70k < real step <= 100k population; terminal overshoots excluded.",
+        "dataset": "version_comparison",
+        "sourceId": "version_sql",
+        "defaultSort": {
+          "field": "version",
+          "direction": "asc"
+        },
+        "density": "compact",
+        "columns": [
+          {
+            "field": "version",
+            "label": "Version",
+            "type": "text"
+          },
+          {
+            "field": "schema",
+            "label": "Schema",
+            "type": "text"
+          },
+          {
+            "field": "q_regression_loss",
+            "label": "Q loss",
+            "type": "text"
+          },
+          {
+            "field": "q_reconstruction",
+            "label": "Q reconstruction",
+            "type": "text"
+          },
+          {
+            "field": "learnable_common_mode",
+            "label": "Common mode",
+            "type": "text"
+          },
+          {
+            "field": "canonical_rows",
+            "label": "Rows",
+            "type": "number"
+          },
+          {
+            "field": "heldout_support",
+            "label": "Heldout N",
+            "type": "number"
+          },
+          {
+            "field": "heldout_ema_rmse",
+            "label": "Heldout EMA RMSE",
+            "type": "number"
+          },
+          {
+            "field": "threshold_excess_sse",
+            "label": "Excess SSE",
+            "type": "number"
+          },
+          {
+            "field": "undefined_trailing_endpoints",
+            "label": "Undefined endpoints",
+            "type": "number"
+          },
+          {
+            "field": "canonical_raw_norm_boundary_exceedances",
+            "label": "Raw norm > 1,608",
+            "type": "text"
+          },
+          {
+            "field": "hard_failures",
+            "label": "Hard failures",
+            "type": "text"
+          },
+          {
+            "field": "qualification_decision",
+            "label": "Decision",
+            "type": "text"
+          }
+        ]
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-28T12:08:42Z",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "v14_heldout_ema_rmse": 0.5247954789453232,
+          "v15_heldout_ema_rmse": 0.5637126651551874,
+          "v16_heldout_ema_rmse": 0.643399622874774,
+          "rmse_ceiling": 0.5,
+          "v16_w1_rmse": 0.42412219735332535,
+          "v16_w2_rmse": 0.9513859413944138,
+          "v16_w3_rmse": 0.8161048402729425,
+          "v16_undefined_trailing_endpoints": 5,
+          "v16_eligible_trailing_endpoints": 48,
+          "v16_w3_positive_sign_support": 1,
+          "v16_w3_negative_sign_support": 11722,
+          "nominal_clip_boundary": 1608.0,
+          "v16_all_boundary_exceedances": 35,
+          "v16_all_rows": 250,
+          "v16_canonical_boundary_exceedances": 7,
+          "v16_canonical_rows": 52,
+          "v15_canonical_boundary_exceedances": 0,
+          "v15_canonical_rows": 58,
+          "v16_all_boundary_exceedance_rate": 0.14,
+          "v16_canonical_boundary_exceedance_rate": 0.1346153846153846,
+          "v15_canonical_boundary_exceedance_rate": 0.0,
+          "v16_heldout_ema_sse": 3119.21176798055,
+          "v16_threshold_sse": 1883.75,
+          "v16_excess_sse": 1235.46176798055,
+          "v16_heldout_support": 7535,
+          "v16_zero_positive_endpoint_steps": "95344, 96368, 97392, 98416, 99408"
+        }
+      ],
+      "window_rmse": [
+        {
+          "version": "v14",
+          "schema_version": 7,
+          "loss": "Huber beta=1",
+          "reconstruction": "Centered / no common mode",
+          "window_label": "W1 (70k-80k]",
+          "window_order": 1,
+          "canonical_rows": 32,
+          "heldout_support": 3647,
+          "support_share": 0.4734519019,
+          "ema_rmse": 0.3070468494240733,
+          "online_rmse": 0.3069186481,
+          "ema_sse": 343.8310189523,
+          "threshold_sse": 911.75,
+          "excess_sse": -567.9189810477,
+          "sse_share": 0.16207087859592553,
+          "full_ema_rmse": 0.5247954789453232,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v14",
+          "schema_version": 7,
+          "loss": "Huber beta=1",
+          "reconstruction": "Centered / no common mode",
+          "window_label": "W2 (80k-90k]",
+          "window_order": 2,
+          "canonical_rows": 19,
+          "heldout_support": 2485,
+          "support_share": 0.3226015838,
+          "ema_rmse": 0.4805763254032396,
+          "online_rmse": 0.4812888845,
+          "ema_sse": 573.9197072771,
+          "threshold_sse": 621.25,
+          "excess_sse": -47.3302927229,
+          "sse_share": 0.270527282516125,
+          "full_ema_rmse": 0.5247954789453232,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v14",
+          "schema_version": 7,
+          "loss": "Huber beta=1",
+          "reconstruction": "Centered / no common mode",
+          "window_label": "W3 (90k-100k]",
+          "window_order": 3,
+          "canonical_rows": 12,
+          "heldout_support": 1571,
+          "support_share": 0.2039465143,
+          "ema_rmse": 0.8753410807478021,
+          "online_rmse": 0.8748756785,
+          "ema_sse": 1203.7347740099,
+          "threshold_sse": 392.75,
+          "excess_sse": 810.9847740099,
+          "sse_share": 0.5674018388879494,
+          "full_ema_rmse": 0.5247954789453232,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v15",
+          "schema_version": 8,
+          "loss": "Half-MSE",
+          "reconstruction": "Centered / no common mode",
+          "window_label": "W1 (70k-80k]",
+          "window_order": 1,
+          "canonical_rows": 19,
+          "heldout_support": 2452,
+          "support_share": 0.3007113073,
+          "ema_rmse": 0.6350000482991449,
+          "online_rmse": 0.6355039321,
+          "ema_sse": 988.7078504055,
+          "threshold_sse": 613.0,
+          "excess_sse": 375.7078504055,
+          "sse_share": 0.38157656190278516,
+          "full_ema_rmse": 0.5637126651551874,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v15",
+          "schema_version": 8,
+          "loss": "Half-MSE",
+          "reconstruction": "Centered / no common mode",
+          "window_label": "W2 (80k-90k]",
+          "window_order": 2,
+          "canonical_rows": 26,
+          "heldout_support": 3509,
+          "support_share": 0.430340937,
+          "ema_rmse": 0.5262197892944133,
+          "online_rmse": 0.527617819,
+          "ema_sse": 971.6675986575,
+          "threshold_sse": 877.25,
+          "excess_sse": 94.4175986575,
+          "sse_share": 0.3750001392787582,
+          "full_ema_rmse": 0.5637126651551874,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v15",
+          "schema_version": 8,
+          "loss": "Half-MSE",
+          "reconstruction": "Centered / no common mode",
+          "window_label": "W3 (90k-100k]",
+          "window_order": 3,
+          "canonical_rows": 13,
+          "heldout_support": 2193,
+          "support_share": 0.2689477557,
+          "ema_rmse": 0.536296424979157,
+          "online_rmse": 0.537270896,
+          "ema_sse": 630.7371849918,
+          "threshold_sse": 548.25,
+          "excess_sse": 82.4871849918,
+          "sse_share": 0.24342329881845667,
+          "full_ema_rmse": 0.5637126651551874,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v16",
+          "schema_version": 9,
+          "loss": "Half-MSE",
+          "reconstruction": "Raw-head mean + centered residual",
+          "window_label": "W1 (70k-80k]",
+          "window_order": 1,
+          "canonical_rows": 32,
+          "heldout_support": 4621,
+          "support_share": 0.6132714001,
+          "ema_rmse": 0.42412219735332535,
+          "online_rmse": 0.4225059308,
+          "ema_sse": 831.223808528,
+          "threshold_sse": 1155.25,
+          "excess_sse": -324.026191472,
+          "sse_share": 0.26648521176430207,
+          "full_ema_rmse": 0.643399622874774,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v16",
+          "schema_version": 9,
+          "loss": "Half-MSE",
+          "reconstruction": "Raw-head mean + centered residual",
+          "window_label": "W2 (80k-90k]",
+          "window_order": 2,
+          "canonical_rows": 10,
+          "heldout_support": 1452,
+          "support_share": 0.1927007299,
+          "ema_rmse": 0.9513859413944138,
+          "online_rmse": 0.9580587217,
+          "ema_sse": 1314.2563241692,
+          "threshold_sse": 363.0,
+          "excess_sse": 951.2563241692,
+          "sse_share": 0.4213424486469157,
+          "full_ema_rmse": 0.643399622874774,
+          "rmse_ceiling": 0.5
+        },
+        {
+          "version": "v16",
+          "schema_version": 9,
+          "loss": "Half-MSE",
+          "reconstruction": "Raw-head mean + centered residual",
+          "window_label": "W3 (90k-100k]",
+          "window_order": 3,
+          "canonical_rows": 10,
+          "heldout_support": 1462,
+          "support_share": 0.1940278699,
+          "ema_rmse": 0.8161048402729425,
+          "online_rmse": 0.8102244292,
+          "ema_sse": 973.7316352833,
+          "threshold_sse": 365.5,
+          "excess_sse": 608.2316352833,
+          "sse_share": 0.31217233958876617,
+          "full_ema_rmse": 0.643399622874774,
+          "rmse_ceiling": 0.5
+        }
+      ],
+      "gradient_norms": [
+        {
+          "version": "v14",
+          "schema_version": 7,
+          "loss": "Huber beta=1",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "Mean",
+          "statistic_order": 1,
+          "raw_q_total_norm": 128.9525264861,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 63,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 0,
+          "all_rows": 204,
+          "all_boundary_exceedance_rate": 0.0,
+          "canonical_max_norm": 886.306884765625,
+          "all_max_norm": 1551.61767578125
+        },
+        {
+          "version": "v14",
+          "schema_version": 7,
+          "loss": "Huber beta=1",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "Median",
+          "statistic_order": 2,
+          "raw_q_total_norm": 62.3866691589,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 63,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 0,
+          "all_rows": 204,
+          "all_boundary_exceedance_rate": 0.0,
+          "canonical_max_norm": 886.306884765625,
+          "all_max_norm": 1551.61767578125
+        },
+        {
+          "version": "v14",
+          "schema_version": 7,
+          "loss": "Huber beta=1",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "P95",
+          "statistic_order": 3,
+          "raw_q_total_norm": 443.1804840088,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 63,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 0,
+          "all_rows": 204,
+          "all_boundary_exceedance_rate": 0.0,
+          "canonical_max_norm": 886.306884765625,
+          "all_max_norm": 1551.61767578125
+        },
+        {
+          "version": "v14",
+          "schema_version": 7,
+          "loss": "Huber beta=1",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "Maximum",
+          "statistic_order": 4,
+          "raw_q_total_norm": 886.306884765625,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 63,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 0,
+          "all_rows": 204,
+          "all_boundary_exceedance_rate": 0.0,
+          "canonical_max_norm": 886.306884765625,
+          "all_max_norm": 1551.61767578125
+        },
+        {
+          "version": "v15",
+          "schema_version": 8,
+          "loss": "Half-MSE",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "Mean",
+          "statistic_order": 1,
+          "raw_q_total_norm": 181.8296942875,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 58,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 1,
+          "all_rows": 149,
+          "all_boundary_exceedance_rate": 0.006711409395973154,
+          "canonical_max_norm": 802.5406494140625,
+          "all_max_norm": 1767.575439453125
+        },
+        {
+          "version": "v15",
+          "schema_version": 8,
+          "loss": "Half-MSE",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "Median",
+          "statistic_order": 2,
+          "raw_q_total_norm": 131.739440918,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 58,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 1,
+          "all_rows": 149,
+          "all_boundary_exceedance_rate": 0.006711409395973154,
+          "canonical_max_norm": 802.5406494140625,
+          "all_max_norm": 1767.575439453125
+        },
+        {
+          "version": "v15",
+          "schema_version": 8,
+          "loss": "Half-MSE",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "P95",
+          "statistic_order": 3,
+          "raw_q_total_norm": 537.2278793335,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 58,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 1,
+          "all_rows": 149,
+          "all_boundary_exceedance_rate": 0.006711409395973154,
+          "canonical_max_norm": 802.5406494140625,
+          "all_max_norm": 1767.575439453125
+        },
+        {
+          "version": "v15",
+          "schema_version": 8,
+          "loss": "Half-MSE",
+          "reconstruction": "Centered / no common mode",
+          "statistic": "Maximum",
+          "statistic_order": 4,
+          "raw_q_total_norm": 802.5406494140625,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 0,
+          "canonical_rows": 58,
+          "canonical_boundary_exceedance_rate": 0.0,
+          "all_boundary_exceedances": 1,
+          "all_rows": 149,
+          "all_boundary_exceedance_rate": 0.006711409395973154,
+          "canonical_max_norm": 802.5406494140625,
+          "all_max_norm": 1767.575439453125
+        },
+        {
+          "version": "v16",
+          "schema_version": 9,
+          "loss": "Half-MSE",
+          "reconstruction": "Raw-head mean + centered residual",
+          "statistic": "Mean",
+          "statistic_order": 1,
+          "raw_q_total_norm": 696.7852480962,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 7,
+          "canonical_rows": 52,
+          "canonical_boundary_exceedance_rate": 0.1346153846153846,
+          "all_boundary_exceedances": 35,
+          "all_rows": 250,
+          "all_boundary_exceedance_rate": 0.14,
+          "canonical_max_norm": 2687.010986328125,
+          "all_max_norm": 9307.25390625
+        },
+        {
+          "version": "v16",
+          "schema_version": 9,
+          "loss": "Half-MSE",
+          "reconstruction": "Raw-head mean + centered residual",
+          "statistic": "Median",
+          "statistic_order": 2,
+          "raw_q_total_norm": 428.2610778809,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 7,
+          "canonical_rows": 52,
+          "canonical_boundary_exceedance_rate": 0.1346153846153846,
+          "all_boundary_exceedances": 35,
+          "all_rows": 250,
+          "all_boundary_exceedance_rate": 0.14,
+          "canonical_max_norm": 2687.010986328125,
+          "all_max_norm": 9307.25390625
+        },
+        {
+          "version": "v16",
+          "schema_version": 9,
+          "loss": "Half-MSE",
+          "reconstruction": "Raw-head mean + centered residual",
+          "statistic": "P95",
+          "statistic_order": 3,
+          "raw_q_total_norm": 1842.8370300293,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 7,
+          "canonical_rows": 52,
+          "canonical_boundary_exceedance_rate": 0.1346153846153846,
+          "all_boundary_exceedances": 35,
+          "all_rows": 250,
+          "all_boundary_exceedance_rate": 0.14,
+          "canonical_max_norm": 2687.010986328125,
+          "all_max_norm": 9307.25390625
+        },
+        {
+          "version": "v16",
+          "schema_version": 9,
+          "loss": "Half-MSE",
+          "reconstruction": "Raw-head mean + centered residual",
+          "statistic": "Maximum",
+          "statistic_order": 4,
+          "raw_q_total_norm": 2687.010986328125,
+          "nominal_clip_boundary": 1608.0,
+          "canonical_boundary_exceedances": 7,
+          "canonical_rows": 52,
+          "canonical_boundary_exceedance_rate": 0.1346153846153846,
+          "all_boundary_exceedances": 35,
+          "all_rows": 250,
+          "all_boundary_exceedance_rate": 0.14,
+          "canonical_max_norm": 2687.010986328125,
+          "all_max_norm": 9307.25390625
+        }
+      ],
+      "version_comparison": [
+        {
+          "version": "v14",
+          "schema": "schema 7",
+          "q_regression_loss": "Huber beta=1",
+          "q_reconstruction": "Detached value + policy-centered raw head",
+          "learnable_common_mode": "No",
+          "canonical_rows": 63,
+          "heldout_support": 7703,
+          "heldout_ema_rmse": 0.5247954789453232,
+          "heldout_ema_sse": 2121.4855002393,
+          "threshold_excess_sse": 195.7355002393,
+          "undefined_trailing_endpoints": 0,
+          "canonical_raw_norm_boundary_exceedances": "0/63",
+          "hard_failures": "Heldout EMA RMSE",
+          "qualification_decision": "FAIL"
+        },
+        {
+          "version": "v15",
+          "schema": "schema 8",
+          "q_regression_loss": "Half-MSE",
+          "q_reconstruction": "Detached value + policy-centered raw head",
+          "learnable_common_mode": "No",
+          "canonical_rows": 58,
+          "heldout_support": 8154,
+          "heldout_ema_rmse": 0.5637126651551874,
+          "heldout_ema_sse": 2591.1126340548,
+          "threshold_excess_sse": 552.6126340548,
+          "undefined_trailing_endpoints": 0,
+          "canonical_raw_norm_boundary_exceedances": "0/58",
+          "hard_failures": "Heldout EMA RMSE",
+          "qualification_decision": "FAIL"
+        },
+        {
+          "version": "v16",
+          "schema": "schema 9",
+          "q_regression_loss": "Half-MSE",
+          "q_reconstruction": "Detached value + raw-head mean + policy-centered raw head",
+          "learnable_common_mode": "Yes",
+          "canonical_rows": 52,
+          "heldout_support": 7535,
+          "heldout_ema_rmse": 0.643399622874774,
+          "heldout_ema_sse": 3119.21176798055,
+          "threshold_excess_sse": 1235.46176798055,
+          "undefined_trailing_endpoints": 5,
+          "canonical_raw_norm_boundary_exceedances": "7/52",
+          "hard_failures": "Heldout EMA RMSE; trailing-five denominator validity",
+          "qualification_decision": "FAIL"
+        }
+      ],
+      "candidates": [
+        {
+          "candidate_rank": 1,
+          "candidate": "Huber beta=1 + schema-9 common-mode reconstruction",
+          "delta_from_v16": "Restore the Q regression loss only relative to v16",
+          "implementation_scope": "No new parameters; represented Q form and common-mode capacity stay unchanged",
+          "falsifiable_rationale": "Fills the untested Huber/common cell and tests a per-example slope cap; aggregate raw norm or clipping need not fall"
+        },
+        {
+          "candidate_rank": 2,
+          "candidate": "Orthonormal mean/difference coordinates with separate Adam moments",
+          "delta_from_v16": "Change parameter and optimizer coordinates while preserving represented Q values",
+          "implementation_scope": "Broader implementation and checkpoint/optimizer-state surface",
+          "falsifiable_rationale": "Separates common and action-difference optimizer moments if candidate 1 is falsified or remains unstable"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "rca_notebook",
+      "label": "Executed frozen v14-v15-v16 qualification comparison notebook (SHA-256 d32ebb602bdf38f8392878f7e76b3e91d32528203565843429dad4d0ad3bc87a)",
+      "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb"
+    },
+    {
+      "id": "headline_sql",
+      "label": "Reviewed qualification headline metrics",
+      "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T12:08:42Z",
+        "description": "Materializes the reviewed headline, hard-gate, late-window, and clipping-boundary outputs from the executed frozen notebook.",
+        "sql": "SELECT * FROM (VALUES (0.5247954789453232::DOUBLE, 0.5637126651551874::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE, 0.42412219735332535::DOUBLE, 0.9513859413944138::DOUBLE, 0.8161048402729425::DOUBLE, 5::INTEGER, 48::INTEGER, 1::INTEGER, 11722::INTEGER, 1608.0::DOUBLE, 35::INTEGER, 250::INTEGER, 7::INTEGER, 52::INTEGER, 0::INTEGER, 58::INTEGER, 0.14::DOUBLE, 0.1346153846153846::DOUBLE, 0.0::DOUBLE, 3119.21176798055::DOUBLE, 1883.75::DOUBLE, 1235.46176798055::DOUBLE, 7535::INTEGER, '95344, 96368, 97392, 98416, 99408')) AS t(v14_heldout_ema_rmse, v15_heldout_ema_rmse, v16_heldout_ema_rmse, rmse_ceiling, v16_w1_rmse, v16_w2_rmse, v16_w3_rmse, v16_undefined_trailing_endpoints, v16_eligible_trailing_endpoints, v16_w3_positive_sign_support, v16_w3_negative_sign_support, nominal_clip_boundary, v16_all_boundary_exceedances, v16_all_rows, v16_canonical_boundary_exceedances, v16_canonical_rows, v15_canonical_boundary_exceedances, v15_canonical_rows, v16_all_boundary_exceedance_rate, v16_canonical_boundary_exceedance_rate, v15_canonical_boundary_exceedance_rate, v16_heldout_ema_sse, v16_threshold_sse, v16_excess_sse, v16_heldout_support, v16_zero_positive_endpoint_steps)",
+        "filters": [
+          "Frozen Enduro seed-1 fresh 100k qualification runs only",
+          "Canonical actor rows satisfy 70000 < real_step <= 100000",
+          "Terminal overshoots are excluded",
+          "No row omission, repair, interpolation, retry, or reweighting"
+        ],
+        "metric_definitions": [
+          "Heldout EMA RMSE = sqrt(sum(row heldout support * row heldout EMA RMSE^2) / sum(row heldout support)).",
+          "A trailing-five endpoint is denominator-valid only when independently pooled positive-sign and negative-sign supports are both nonzero.",
+          "Boundary exceedance rate = rows with logged raw VoC-Q total gradient norm > 1608 divided by rows in the stated population.",
+          "The SQL materializes exact reviewed notebook outputs; raw actor CSV SHA-256 values are v14 6d72052279a59983d102bed3db767b3792b115d221f155cdd10d4dc29bbe85a8, v15 359eb6540a6265a2a5b8e77fa8ac01420b5f0077a3b84d67800f0308f448e341, and v16 45da4532357f5f150fad15c47bf1cdbb5ec52738ff3a68678afb5dca73ed20d5."
+        ]
+      }
+    },
+    {
+      "id": "window_sql",
+      "label": "Reviewed heldout EMA qualification-window rows",
+      "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T12:08:42Z",
+        "description": "Materializes the nine reviewed version-window rows used by the native grouped-bar chart.",
+        "sql": "SELECT * FROM (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W1 (70k-80k]', 1, 32, 3647, 0.4734519019::DOUBLE, 0.3070468494240733::DOUBLE, 0.3069186481::DOUBLE, 343.8310189523::DOUBLE, 911.75::DOUBLE, -567.9189810477::DOUBLE, 0.16207087859592553::DOUBLE, 0.5247954789453232::DOUBLE, 0.5::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W2 (80k-90k]', 2, 19, 2485, 0.3226015838::DOUBLE, 0.4805763254032396::DOUBLE, 0.4812888845::DOUBLE, 573.9197072771::DOUBLE, 621.25::DOUBLE, -47.3302927229::DOUBLE, 0.270527282516125::DOUBLE, 0.5247954789453232::DOUBLE, 0.5::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'W3 (90k-100k]', 3, 12, 1571, 0.2039465143::DOUBLE, 0.8753410807478021::DOUBLE, 0.8748756785::DOUBLE, 1203.7347740099::DOUBLE, 392.75::DOUBLE, 810.9847740099::DOUBLE, 0.5674018388879494::DOUBLE, 0.5247954789453232::DOUBLE, 0.5::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W1 (70k-80k]', 1, 19, 2452, 0.3007113073::DOUBLE, 0.6350000482991449::DOUBLE, 0.6355039321::DOUBLE, 988.7078504055::DOUBLE, 613.0::DOUBLE, 375.7078504055::DOUBLE, 0.38157656190278516::DOUBLE, 0.5637126651551874::DOUBLE, 0.5::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W2 (80k-90k]', 2, 26, 3509, 0.4303409370::DOUBLE, 0.5262197892944133::DOUBLE, 0.5276178190::DOUBLE, 971.6675986575::DOUBLE, 877.25::DOUBLE, 94.4175986575::DOUBLE, 0.3750001392787582::DOUBLE, 0.5637126651551874::DOUBLE, 0.5::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'W3 (90k-100k]', 3, 13, 2193, 0.2689477557::DOUBLE, 0.536296424979157::DOUBLE, 0.5372708960::DOUBLE, 630.7371849918::DOUBLE, 548.25::DOUBLE, 82.4871849918::DOUBLE, 0.24342329881845667::DOUBLE, 0.5637126651551874::DOUBLE, 0.5::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W1 (70k-80k]', 1, 32, 4621, 0.6132714001::DOUBLE, 0.42412219735332535::DOUBLE, 0.4225059308::DOUBLE, 831.2238085280::DOUBLE, 1155.25::DOUBLE, -324.0261914720::DOUBLE, 0.26648521176430207::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W2 (80k-90k]', 2, 10, 1452, 0.1927007299::DOUBLE, 0.9513859413944138::DOUBLE, 0.9580587217::DOUBLE, 1314.2563241692::DOUBLE, 363.0::DOUBLE, 951.2563241692::DOUBLE, 0.4213424486469157::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'W3 (90k-100k]', 3, 10, 1462, 0.1940278699::DOUBLE, 0.8161048402729425::DOUBLE, 0.8102244292::DOUBLE, 973.7316352833::DOUBLE, 365.5::DOUBLE, 608.2316352833::DOUBLE, 0.31217233958876617::DOUBLE, 0.643399622874774::DOUBLE, 0.5::DOUBLE)) AS t(version, schema_version, loss, reconstruction, window_label, window_order, canonical_rows, heldout_support, support_share, ema_rmse, online_rmse, ema_sse, threshold_sse, excess_sse, sse_share, full_ema_rmse, rmse_ceiling)",
+        "filters": [
+          "W1=(70000,80000], W2=(80000,90000], W3=(90000,100000]",
+          "Terminal overshoots are excluded",
+          "Support-weighted within version and window"
+        ],
+        "metric_definitions": [
+          "Window EMA RMSE pools row squared error by heldout support before taking the square root.",
+          "SSE share is the window heldout EMA SSE divided by the version full-population heldout EMA SSE.",
+          "Different versions have separately generated on-policy rows and supports; window comparisons are descriptive rather than paired."
+        ]
+      }
+    },
+    {
+      "id": "gradient_sql",
+      "label": "Reviewed canonical raw VoC-Q gradient-norm and clipping-boundary comparison",
+      "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T12:08:42Z",
+        "description": "Materializes mean, median, p95, and maximum canonical raw VoC-Q total gradient norms plus all-CSV and canonical boundary counts.",
+        "sql": "SELECT * FROM (VALUES ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Mean', 1, 128.9525264861::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Median', 2, 62.3866691589::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'P95', 3, 443.1804840088::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v14', 7, 'Huber beta=1', 'Centered / no common mode', 'Maximum', 4, 886.306884765625::DOUBLE, 1608.0::DOUBLE, 0, 63, 0.0::DOUBLE, 0, 204, 0.0::DOUBLE, 886.306884765625::DOUBLE, 1551.61767578125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Mean', 1, 181.8296942875::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Median', 2, 131.7394409180::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'P95', 3, 537.2278793335::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v15', 8, 'Half-MSE', 'Centered / no common mode', 'Maximum', 4, 802.5406494140625::DOUBLE, 1608.0::DOUBLE, 0, 58, 0.0::DOUBLE, 1, 149, 0.006711409395973154::DOUBLE, 802.5406494140625::DOUBLE, 1767.575439453125::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Mean', 1, 696.7852480962::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Median', 2, 428.2610778809::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'P95', 3, 1842.8370300293::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE), ('v16', 9, 'Half-MSE', 'Raw-head mean + centered residual', 'Maximum', 4, 2687.010986328125::DOUBLE, 1608.0::DOUBLE, 7, 52, 0.1346153846153846::DOUBLE, 35, 250, 0.14::DOUBLE, 2687.010986328125::DOUBLE, 9307.25390625::DOUBLE)) AS t(version, schema_version, loss, reconstruction, statistic, statistic_order, raw_q_total_norm, nominal_clip_boundary, canonical_boundary_exceedances, canonical_rows, canonical_boundary_exceedance_rate, all_boundary_exceedances, all_rows, all_boundary_exceedance_rate, canonical_max_norm, all_max_norm)",
+        "filters": [
+          "Canonical norm statistics use 70000 < real_step <= 100000",
+          "All-CSV counts retain every complete frozen actor row",
+          "Boundary exceedance is logged raw VoC-Q total gradient norm > 1608"
+        ],
+        "metric_definitions": [
+          "The logged raw total gradient norm is measured before the unchanged nominal global clipping boundary of 0.5 * 201 * 16 = 1608.",
+          "Boundary exceedance counts indicate scale pressure, not the post-clipping optimizer-step norm and not a causal mechanism.",
+          "P95 uses the executed notebook's pandas quantile calculation on canonical rows."
+        ]
+      }
+    },
+    {
+      "id": "version_sql",
+      "label": "Reviewed exact v14-v16 version comparison",
+      "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T12:08:42Z",
+        "description": "Materializes the exact version, mechanism, population, gate, SSE, and raw-gradient boundary summary for the audit table.",
+        "sql": "SELECT * FROM (VALUES ('v14', 'schema 7', 'Huber beta=1', 'Detached value + policy-centered raw head', 'No', 63, 7703, 0.5247954789453232::DOUBLE, 2121.4855002393::DOUBLE, 195.7355002393::DOUBLE, 0, '0/63', 'Heldout EMA RMSE', 'FAIL'), ('v15', 'schema 8', 'Half-MSE', 'Detached value + policy-centered raw head', 'No', 58, 8154, 0.5637126651551874::DOUBLE, 2591.1126340548::DOUBLE, 552.6126340548::DOUBLE, 0, '0/58', 'Heldout EMA RMSE', 'FAIL'), ('v16', 'schema 9', 'Half-MSE', 'Detached value + raw-head mean + policy-centered raw head', 'Yes', 52, 7535, 0.643399622874774::DOUBLE, 3119.21176798055::DOUBLE, 1235.46176798055::DOUBLE, 5, '7/52', 'Heldout EMA RMSE; trailing-five denominator validity', 'FAIL')) AS t(version, schema, q_regression_loss, q_reconstruction, learnable_common_mode, canonical_rows, heldout_support, heldout_ema_rmse, heldout_ema_sse, threshold_excess_sse, undefined_trailing_endpoints, canonical_raw_norm_boundary_exceedances, hard_failures, qualification_decision)",
+        "filters": [
+          "Strict canonical qualification population 70000 < real_step <= 100000",
+          "Unchanged heldout EMA RMSE ceiling <= 0.5",
+          "Terminal overshoots excluded"
+        ],
+        "metric_definitions": [
+          "Threshold-excess SSE = heldout EMA SSE - 0.25 * heldout support.",
+          "Learnable common mode describes whether an equal feature-conditioned shift of both raw action-head rows survives Q reconstruction.",
+          "Qualification decision is irreversible for each frozen run; a failed run cannot proceed to primary, fixed evaluation, retry, resume, or rescue."
+        ]
+      }
+    },
+    {
+      "id": "candidate_sql",
+      "label": "Reviewed ranked v17 hypotheses from frozen RCA and independent mechanism/numeric consensus",
+      "path": "notebook/v14_v15_v16_qualification_comparison_rca.ipynb",
+      "query": {
+        "engine": "DuckDB",
+        "language": "sql",
+        "executed_at": "2026-08-28T12:08:42Z",
+        "description": "Materializes the two ranked, falsifiable successor hypotheses; neither row is a pass prediction or launch authorization.",
+        "sql": "SELECT * FROM (VALUES (1, 'Huber beta=1 + schema-9 common-mode reconstruction', 'Restore the Q regression loss only relative to v16', 'No new parameters; represented Q form and common-mode capacity stay unchanged', 'Fills the untested Huber/common cell and tests a per-example slope cap; aggregate raw norm or clipping need not fall'), (2, 'Orthonormal mean/difference coordinates with separate Adam moments', 'Change parameter and optimizer coordinates while preserving represented Q values', 'Broader implementation and checkpoint/optimizer-state surface', 'Separates common and action-difference optimizer moments if candidate 1 is falsified or remains unstable')) AS t(candidate_rank, candidate, delta_from_v16, implementation_scope, falsifiable_rationale)",
+        "metric_definitions": [
+          "Candidate 1 is one semantic change from v16: restore SmoothL1/Huber beta=1 and retain schema-9 common-mode reconstruction exactly.",
+          "Candidate 2 uses orthonormal coordinates m=(A_CONTINUE+A_STOP)/sqrt(2) and d=(A_CONTINUE-A_STOP)/sqrt(2) on the raw two-row head parameters, with separate Adam moments; it is ranked second because the frozen evidence does not identify optimizer-coordinate causality.",
+          "The ranking is a preregistration recommendation, not a causal estimate, expected-pass claim, implementation, launch, retry, or evaluation authorization."
+        ]
+      }
+    }
+  ]
+}

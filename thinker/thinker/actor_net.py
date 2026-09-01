@@ -46,8 +46,17 @@ ActorOut = namedtuple(
         "control_valid",
         "policy_valid",
         "policy_type",
+        # Return-based Value-of-Computation critic.  The final dimension is
+        # ordered as [CONTINUE, STOP].  This is deliberately appended so all
+        # legacy ActorOut field indices remain stable.
+        "voc_q",
+        # Loss-only detached input to the linear VoC head.  Online/self-play
+        # forwards leave this unset, so action sampling and rollout payloads
+        # are unchanged.  The learner reuses it after the isolated critic
+        # step instead of running the full actor network a second time.
+        "voc_features",
     ],
-    defaults=[None] * 6,
+    defaults=[None] * 8,
 )
 
 def compute_discrete_log_prob(logits, actions):
@@ -70,15 +79,41 @@ DynamicControlEntropy = namedtuple(
     "DynamicControlEntropy",
     ("gate", "bout", "continue_prob", "stop_prob"),
 )
+VoCGateDistribution = namedtuple(
+    "VoCGateDistribution",
+    (
+        "gate_logits",
+        "bout_logits",
+        "joint_logits",
+        "continue_prob",
+        "stop_prob",
+    ),
+)
 
 
-def _dynamic_continue_score(logits, project_gate_gradient):
+def _dynamic_continue_score(
+    logits, project_gate_gradient, legal_continue_mask=None
+):
     """Exact-forward CONTINUE score with an optional common-shift gradient."""
 
     exact_score = torch.logsumexp(logits[..., :2], dim=-1)
     if not project_gate_gradient:
         return exact_score
-    common_shift = logits[..., :2].mean(dim=-1)
+    if legal_continue_mask is None:
+        common_shift = logits[..., :2].mean(dim=-1)
+    else:
+        legal_continue_mask = legal_continue_mask.to(
+            device=logits.device, dtype=torch.bool
+        )
+        if tuple(legal_continue_mask.shape) != tuple(logits.shape[:-1]) + (2,):
+            raise ValueError(
+                "legal_continue_mask must match the first two controls, got "
+                f"{tuple(legal_continue_mask.shape)} versus "
+                f"{tuple(logits.shape[:-1]) + (2,)}"
+            )
+        weights = legal_continue_mask.to(dtype=logits.dtype)
+        common_shift = torch.sum(logits[..., :2] * weights, dim=-1)
+        common_shift = common_shift / weights.sum(dim=-1).clamp_min(1.0)
     # Parenthesize the zero-valued straight-through term first. Otherwise a
     # masked -1e9 logit can cause catastrophic cancellation in the forward
     # value before its detached copy is subtracted.
@@ -180,6 +215,202 @@ def compute_dynamic_control_entropy(logits, *, project_gate_gradient=True):
         bout=bout_entropy,
         continue_prob=continue_prob,
         stop_prob=stop_prob,
+    )
+
+
+def compute_voc_gate_distribution(
+    logits,
+    *,
+    temperature=1.0,
+    epsilon=0.0,
+    legal_control_mask=None,
+    raw_gate_log_odds=None,
+    epsilon_greedy_execution=False,
+):
+    """Factor a control policy into a soft gate and conditional bout.
+
+    By default the gate is derived from the existing three-way
+    ``PROCEED/RESET/STOP`` head.  ``raw_gate_log_odds``, when supplied, is a
+    scalar ``logit(CONTINUE) - logit(STOP)`` with shape ``logits.shape[:-1]``;
+    it replaces only that binary gate.  The conditional ``PROCEED/RESET``
+    distribution always comes from the first two input logits.  Temperature
+    and uniform exploration affect only the gate.  ``joint_logits`` is an
+    equivalent normalized three-way distribution and must be used for
+    behavior likelihoods when exploration is active.  With the explicit
+    ``epsilon_greedy_execution`` switch, the scalar gate is instead detached
+    and executed as epsilon-greedy by the exact sign of its raw log-odds:
+    positive selects CONTINUE, negative selects STOP, and a bit-exact zero
+    remains the neutral 1/2 tie.  Exploration is uniform over legal binary
+    gate actions; the conditional PROCEED/RESET policy remains unchanged.
+
+    No Q value is accepted here by design: the VoC critic trains the gate via
+    an advantage loss but never directly selects an action.
+    """
+
+    if logits.ndim < 1 or logits.shape[-1] != 3:
+        raise ValueError(
+            "Dynamic control logits must end in three controls, got "
+            f"shape {tuple(logits.shape)}"
+        )
+    temperature = float(temperature)
+    epsilon = float(epsilon)
+    if not isinstance(epsilon_greedy_execution, (bool, np.bool_)):
+        raise TypeError("epsilon_greedy_execution must be boolean")
+    epsilon_greedy_execution = bool(epsilon_greedy_execution)
+    if not np.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError(
+            f"VoC gate temperature must be finite and positive, got {temperature}"
+        )
+    if not np.isfinite(epsilon) or not 0.0 <= epsilon <= 1.0:
+        raise ValueError(
+            f"VoC gate epsilon must be in [0, 1], got {epsilon}"
+        )
+
+    if legal_control_mask is None:
+        legal_control_mask = torch.ones_like(logits, dtype=torch.bool)
+    else:
+        if tuple(legal_control_mask.shape) != tuple(logits.shape):
+            raise ValueError(
+                "legal_control_mask must match control logits, got "
+                f"{tuple(legal_control_mask.shape)} versus {tuple(logits.shape)}"
+            )
+        legal_control_mask = legal_control_mask.to(
+            device=logits.device, dtype=torch.bool
+        )
+
+    continue_legal = torch.any(legal_control_mask[..., :2], dim=-1)
+    stop_legal = legal_control_mask[..., STOP]
+    gate_legal = torch.stack((continue_legal, stop_legal), dim=-1)
+    if not torch.all(torch.any(gate_legal, dim=-1)):
+        raise ValueError("VoC gate requires at least one legal action per row")
+
+    masked_logits = logits.masked_fill(
+        ~legal_control_mask, ILLEGAL_CONTROL_LOGIT
+    )
+    if raw_gate_log_odds is None:
+        # Preserve the legacy forward and backward path byte-for-byte when
+        # the dedicated gate is not explicitly enabled.
+        continue_score = _dynamic_continue_score(
+            masked_logits,
+            project_gate_gradient=True,
+            legal_continue_mask=legal_control_mask[..., :2],
+        )
+        gate_logits = torch.stack(
+            (continue_score, masked_logits[..., STOP]), dim=-1
+        ) / temperature
+    else:
+        if not torch.is_tensor(raw_gate_log_odds):
+            raise TypeError("raw_gate_log_odds must be a tensor")
+        if tuple(raw_gate_log_odds.shape) != tuple(logits.shape[:-1]):
+            raise ValueError(
+                "raw_gate_log_odds must match the control-logit prefix, got "
+                f"{tuple(raw_gate_log_odds.shape)} versus "
+                f"{tuple(logits.shape[:-1])}"
+            )
+        if not torch.is_floating_point(raw_gate_log_odds):
+            raise TypeError("raw_gate_log_odds must use a floating dtype")
+        if raw_gate_log_odds.device != logits.device:
+            raise ValueError("raw_gate_log_odds must share the logits device")
+        gate_log_odds = raw_gate_log_odds.to(dtype=logits.dtype)
+        # STOP is the fixed reference logit.  A zero-initialized scalar head
+        # therefore represents an exactly neutral 1/2 binary gate rather than
+        # the legacy three-way head's 2/3 aggregate CONTINUE probability.
+        gate_logits = torch.stack(
+            (gate_log_odds, torch.zeros_like(gate_log_odds)), dim=-1
+        ) / temperature
+    gate_logits = gate_logits.masked_fill(~gate_legal, ILLEGAL_CONTROL_LOGIT)
+    gate_probs = F.softmax(gate_logits, dim=-1)
+
+    if epsilon_greedy_execution:
+        if raw_gate_log_odds is None:
+            raise ValueError(
+                "epsilon_greedy_execution requires raw_gate_log_odds"
+            )
+        # Comparisons deliberately sever the gate-head gradient.  The
+        # execution policy is a behavior transform only; the soft sigmoid
+        # above remains available to the isolated BCE/calibration path.
+        detached_log_odds = raw_gate_log_odds.detach()
+        execution_template = gate_probs[..., 0]
+        base_continue = torch.where(
+            detached_log_odds > 0,
+            torch.ones_like(execution_template),
+            torch.where(
+                detached_log_odds < 0,
+                torch.zeros_like(execution_template),
+                torch.full_like(execution_template, 0.5),
+            ),
+        )
+        # If only one binary gate action is legal, it receives probability
+        # one under both the greedy component and uniform exploration.
+        base_continue = torch.where(
+            continue_legal & ~stop_legal,
+            torch.ones_like(base_continue),
+            base_continue,
+        )
+        base_continue = torch.where(
+            stop_legal & ~continue_legal,
+            torch.zeros_like(base_continue),
+            base_continue,
+        )
+        base_gate = torch.stack((base_continue, 1.0 - base_continue), dim=-1)
+        uniform_gate = gate_legal.to(dtype=gate_probs.dtype)
+        uniform_gate = uniform_gate / uniform_gate.sum(dim=-1, keepdim=True)
+        gate_probs = (
+            (1.0 - epsilon) * base_gate + epsilon * uniform_gate
+        ).detach()
+    elif epsilon > 0.0:
+        uniform_gate = gate_legal.to(dtype=gate_probs.dtype)
+        uniform_gate = uniform_gate / uniform_gate.sum(dim=-1, keepdim=True)
+        gate_probs = (1.0 - epsilon) * gate_probs + epsilon * uniform_gate
+
+    # Log probabilities are valid categorical logits and retain the gradient
+    # through the temperature/epsilon policy.  Explicit masking keeps illegal
+    # controls at the public sentinel instead of exposing log(0).
+    tiny = torch.finfo(gate_probs.dtype).tiny
+    if epsilon_greedy_execution:
+        # -1000 is finite and softmax-underflows to an exact zero in every
+        # supported floating dtype, without polluting range/RMS telemetry with
+        # the dtype's enormous finite minimum.
+        finite_zero_logit = -1000.0
+        normalized_gate_logits = torch.where(
+            gate_probs > 0.0,
+            gate_probs.clamp_min(tiny).log(),
+            torch.full_like(gate_probs, finite_zero_logit),
+        )
+    else:
+        # Preserve schemas 1--4 byte-for-byte, including their historical
+        # finite representation of an underflowed legal probability.
+        normalized_gate_logits = gate_probs.clamp_min(tiny).log()
+    normalized_gate_logits = normalized_gate_logits.masked_fill(
+        ~gate_legal, ILLEGAL_CONTROL_LOGIT
+    )
+
+    bout_logits = masked_logits[..., :2]
+    bout_probs = F.softmax(bout_logits, dim=-1)
+    joint_probs = torch.cat(
+        (
+            gate_probs[..., :1] * bout_probs,
+            gate_probs[..., 1:],
+        ),
+        dim=-1,
+    )
+    if epsilon_greedy_execution:
+        joint_logits = torch.where(
+            joint_probs > 0.0,
+            joint_probs.clamp_min(tiny).log(),
+            torch.full_like(joint_probs, finite_zero_logit),
+        )
+    else:
+        joint_logits = joint_probs.clamp_min(tiny).log()
+    joint_logits = joint_logits.masked_fill(
+        ~legal_control_mask, ILLEGAL_CONTROL_LOGIT
+    )
+    return VoCGateDistribution(
+        gate_logits=normalized_gate_logits,
+        bout_logits=bout_logits,
+        joint_logits=joint_logits,
+        continue_prob=gate_probs[..., 0],
+        stop_prob=gate_probs[..., 1],
     )
 
 
@@ -417,6 +648,232 @@ class ActorBaseNet(nn.Module):
         super(ActorBaseNet, self).__init__()
         self.disable_thinker = flags.wrapper_type == 1
         self.dynamic_search = bool(getattr(flags, "dynamic_search", False)) and not self.disable_thinker
+        self.dynamic_voc_mode = str(
+            getattr(flags, "dynamic_voc_mode", "off")
+        ).lower()
+        if self.dynamic_voc_mode not in ("off", "shadow", "control"):
+            raise ValueError(
+                "dynamic_voc_mode must be one of off, shadow, control, got "
+                f"{self.dynamic_voc_mode!r}"
+            )
+        self.voc_enabled = (
+            self.dynamic_search and self.dynamic_voc_mode != "off"
+        )
+        self.voc_control = (
+            self.dynamic_search and self.dynamic_voc_mode == "control"
+        )
+        self.voc_dedicated_gate = bool(
+            getattr(flags, "voc_dedicated_gate", False)
+        )
+        raw_voc_gate_epsilon_greedy_execution = getattr(
+            flags, "voc_gate_epsilon_greedy_execution", False
+        )
+        if not isinstance(
+            raw_voc_gate_epsilon_greedy_execution, (bool, np.bool_)
+        ):
+            raise ValueError(
+                "voc_gate_epsilon_greedy_execution must be boolean"
+            )
+        configured_voc_gate_epsilon_greedy_execution = bool(
+            raw_voc_gate_epsilon_greedy_execution
+        )
+        raw_policy_version_barrier = getattr(
+            flags, "voc_actor_policy_version_barrier", False
+        )
+        if not isinstance(raw_policy_version_barrier, (bool, np.bool_)):
+            raise ValueError("voc_actor_policy_version_barrier must be boolean")
+        self.voc_actor_policy_version_barrier = bool(
+            raw_policy_version_barrier
+        )
+        raw_execution_epsilon = getattr(
+            flags, "voc_gate_execution_epsilon", 0.02
+        )
+        if (
+            isinstance(raw_execution_epsilon, (bool, np.bool_))
+            or not isinstance(raw_execution_epsilon, (int, float, np.number))
+            or not np.isfinite(raw_execution_epsilon)
+            or not 0.0 <= float(raw_execution_epsilon) <= 1.0
+        ):
+            raise ValueError(
+                "voc_gate_execution_epsilon must be finite and in [0, 1]"
+            )
+        self.voc_gate_execution_epsilon = float(raw_execution_epsilon)
+        raw_exact_projection = getattr(
+            flags, "voc_gate_exact_projection", False
+        )
+        raw_param_align = getattr(flags, "voc_gate_param_align", False)
+        if configured_voc_gate_epsilon_greedy_execution:
+            raw_param_align_coef = getattr(
+                flags, "voc_gate_param_align_coef", 1.0
+            )
+            if self.dynamic_voc_mode != "control":
+                raise ValueError(
+                    "voc_gate_epsilon_greedy_execution requires control mode"
+                )
+            if not isinstance(raw_exact_projection, (bool, np.bool_)) or not bool(
+                raw_exact_projection
+            ):
+                raise ValueError(
+                    "voc_gate_epsilon_greedy_execution requires "
+                    "voc_gate_exact_projection=true"
+                )
+            if not isinstance(raw_param_align, (bool, np.bool_)) or bool(
+                raw_param_align
+            ):
+                raise ValueError(
+                    "voc_gate_epsilon_greedy_execution requires "
+                    "voc_gate_param_align=false"
+                )
+            if (
+                isinstance(raw_param_align_coef, (bool, np.bool_))
+                or not isinstance(
+                    raw_param_align_coef, (int, float, np.number)
+                )
+                or not np.isfinite(raw_param_align_coef)
+                or float(raw_param_align_coef) != 1.0
+            ):
+                raise ValueError(
+                    "voc_gate_epsilon_greedy_execution requires "
+                    "voc_gate_param_align_coef=1.0 exactly"
+                )
+        if self.voc_actor_policy_version_barrier:
+            raw_gate_schema = getattr(
+                flags, "voc_gate_policy_schema_version", 6
+            )
+            if (
+                type(raw_gate_schema) is not int
+                or raw_gate_schema
+                not in (
+                    6,
+                    7,
+                    util.VOC_GATE_POLICY_HALF_SQUARED_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_COMMON_MODE_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_HUBER_COMMON_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_ORTHOCD_ADAM_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_TAU1_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_TELEMETRY_Q_SCHEMA_VERSION,
+                )
+            ):
+                raise ValueError(
+                    "versioned actor policy barrier requires exact integer "
+                    "gate schema 6, 7, 8, 9, 10, 11, 12, or 13"
+                )
+            expected_model_input_seal_schema = (
+                1
+                if raw_gate_schema
+                in (
+                    7,
+                    util.VOC_GATE_POLICY_HALF_SQUARED_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_COMMON_MODE_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_HUBER_COMMON_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_ORTHOCD_ADAM_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_TAU1_Q_SCHEMA_VERSION,
+                    util.VOC_GATE_POLICY_TELEMETRY_Q_SCHEMA_VERSION,
+                )
+                else 0
+            )
+            raw_model_input_seal_schema = getattr(
+                flags, "voc_model_input_seal_schema_version", 0
+            )
+            if (
+                type(raw_model_input_seal_schema) is not int
+                or raw_model_input_seal_schema
+                != expected_model_input_seal_schema
+            ):
+                raise ValueError(
+                    "versioned actor policy barrier atomically requires "
+                    "voc_model_input_seal_schema_version="
+                    f"{expected_model_input_seal_schema}; got "
+                    f"{raw_model_input_seal_schema!r}"
+                )
+            raw_bundle_schema = getattr(
+                flags, "voc_actor_policy_bundle_schema_version", 1
+            )
+            if (
+                isinstance(raw_bundle_schema, (bool, np.bool_))
+                or not isinstance(raw_bundle_schema, (int, np.integer))
+            ):
+                raise ValueError(
+                    "voc_actor_policy_bundle_schema_version must be integer 1"
+                )
+            raw_actor_amp_scale = getattr(flags, "actor_amp_init_scale", 256.0)
+            raw_timeout = getattr(
+                flags, "voc_actor_policy_barrier_timeout_s", 120.0
+            )
+            atomic_fields = (
+                (
+                    "voc_gate_epsilon_greedy_execution",
+                    configured_voc_gate_epsilon_greedy_execution,
+                    True,
+                ),
+                ("voc_gate_exact_projection", bool(raw_exact_projection), True),
+                ("voc_gate_param_align", bool(raw_param_align), False),
+                ("voc_gate_execution_epsilon", self.voc_gate_execution_epsilon, 0.25),
+                ("voc_train_epsilon", float(getattr(flags, "voc_train_epsilon", 0.02)), 0.02),
+                ("voc_actor_policy_bundle_schema_version", int(raw_bundle_schema), 1),
+                (
+                    "voc_model_input_seal_schema_version",
+                    raw_model_input_seal_schema,
+                    expected_model_input_seal_schema,
+                ),
+                ("actor_amp_init_scale", raw_actor_amp_scale, 32.0),
+                ("voc_actor_policy_barrier_timeout_s", raw_timeout, 120.0),
+            )
+            for name, actual, expected in atomic_fields:
+                if actual != expected:
+                    raise ValueError(
+                        "versioned actor policy barrier atomically requires "
+                        f"{name}={expected!r}; got {actual!r}"
+                    )
+            for name in (
+                "voc_actor_policy_ray_max_restarts",
+                "voc_actor_policy_ray_max_task_retries",
+            ):
+                value = getattr(flags, name, 0)
+                if (
+                    isinstance(value, (bool, np.bool_))
+                    or not isinstance(value, (int, np.integer))
+                    or int(value) != 0
+                ):
+                    raise ValueError(f"{name} must equal integer 0 exactly")
+            if bool(getattr(flags, "train_actor", False)):
+                for name, expected in (
+                    ("ppo_k", 1),
+                    ("self_play_n", 1),
+                    ("env_n", 16),
+                    ("actor_batch_size", 16),
+                ):
+                    value = getattr(flags, name, None)
+                    if (
+                        isinstance(value, (bool, np.bool_))
+                        or not isinstance(value, (int, np.integer))
+                        or int(value) != expected
+                    ):
+                        raise ValueError(
+                            "schema-6 actor policy barrier requires exact "
+                            f"{name}={expected}; got {value!r}"
+                        )
+        elif self.voc_gate_execution_epsilon != 0.02:
+            raise ValueError(
+                "voc_gate_execution_epsilon differs from the legacy value "
+                "without voc_actor_policy_version_barrier=true"
+            )
+        self.voc_gate_epsilon_greedy_execution = (
+            self.voc_control
+            and configured_voc_gate_epsilon_greedy_execution
+        )
+        self.voc_gate_temperature = float(
+            getattr(flags, "voc_gate_temperature", 1.0)
+        )
+        self.voc_train_epsilon = float(
+            getattr(flags, "voc_train_epsilon", 0.02)
+        )
+        self.voc_eval_stochastic = bool(
+            getattr(flags, "voc_eval_stochastic", True)
+        )
+        # ``greedy=False`` is also used by stochastic evaluation self-play,
+        # so it cannot by itself mean that training-only epsilon is enabled.
+        self.train_actor_enabled = bool(getattr(flags, "train_actor", False))
         self.dynamic_factorized_control = (
             self.dynamic_search
             and bool(getattr(flags, "dynamic_factorized_control", False))
@@ -658,6 +1115,8 @@ class ActorNetSep(ActorBaseNet):
             control_valid=actor_out.control_valid,
             policy_valid=actor_out.policy_valid,
             policy_type=actor_out.policy_type,
+            voc_q=critic_out.voc_q,
+            voc_features=critic_out.voc_features,
         )
         core_state = actor_state + critic_state
         return actor_out, core_state
@@ -847,6 +1306,21 @@ class ActorNetSingle(ActorBaseNet):
                     
                 self.reset = nn.Linear(last_out_size, 3 if self.dynamic_search else 2)
 
+                if (
+                    self.dynamic_search
+                    and self.voc_enabled
+                    and self.voc_dedicated_gate
+                ):
+                    # This scalar is the raw CONTINUE-vs-STOP log-odds.  It is
+                    # optimizer-separable from the P/R bout head, and forward()
+                    # consumes a detached representation so its eventual loss
+                    # cannot update the shared actor.  Forking RNG preserves
+                    # off/shadow construction parity despite the extra module.
+                    with torch.random.fork_rng(devices=[]):
+                        self.voc_gate_head = nn.Linear(last_out_size, 1)
+                    nn.init.zeros_(self.voc_gate_head.weight)
+                    nn.init.zeros_(self.voc_gate_head.bias)
+
         if self.critic:
             self.rv_tran = None
             if self.enc_type == 0:
@@ -866,6 +1340,20 @@ class ActorNetSingle(ActorBaseNet):
             if self.critic_zero_init:
                 nn.init.constant_(self.baseline.weight, 0.0)
                 nn.init.constant_(self.baseline.bias, 0.0)                
+
+            if self.voc_enabled:
+                # A separate scalar-return critic for CONTINUE and STOP.  It
+                # consumes a detached representation in forward(), so its
+                # regression loss cannot update the shared encoder/baseline.
+                # Equal zero initialization is neutral before shadow training.
+                # Module construction normally advances the global RNG even
+                # though we immediately zero-initialize.  Forking preserves
+                # the exact RNG continuation of an off-mode actor, which is
+                # essential for shadow-mode behavioral equivalence.
+                with torch.random.fork_rng(devices=[]):
+                    self.voc_head = nn.Linear(last_out_size, 2)
+                nn.init.zeros_(self.voc_head.weight)
+                nn.init.zeros_(self.voc_head.bias)
 
         self.initial_state(batch_size=1) # initialize self.state_idx        
 
@@ -1172,9 +1660,21 @@ class ActorNetSingle(ActorBaseNet):
                         self.max_log_var,
                     )
                 reset_logits = self.reset(final_out)
+                raw_voc_gate_log_odds = None
+                if self.voc_control and self.voc_dedicated_gate:
+                    raw_voc_gate_log_odds = self.voc_gate_head(
+                        final_out.detach()
+                    ).view(T, B)
+                    if compute_loss:
+                        # ``misc`` is learner-only and excluded from
+                        # TrainActorOut/Ray replay, so this does not widen the
+                        # rollout schema.  Keep the graph only to the dedicated
+                        # scalar head for the later distillation loss.
+                        misc["voc_gate_log_odds"] = raw_voc_gate_log_odds
             else:
                 search_logits = None
                 reset_logits = None
+                raw_voc_gate_log_odds = None
 
             if self.dynamic_search:
                 search_phase_mask = phase == SEARCH_PHASE
@@ -1229,9 +1729,81 @@ class ActorNetSingle(ActorBaseNet):
                 search_control_logits = raw_control_logits.masked_fill(
                     ~legal_control_mask, ILLEGAL_CONTROL_LOGIT
                 )
-                search_control = sample(
-                    search_control_logits, greedy=greedy, dim=-1
-                )
+                if self.voc_control:
+                    # The VoC Q head never enters action selection.  Control
+                    # retains the learned stochastic gate from the existing
+                    # three-way policy, with temperature/exploration applied
+                    # only to CONTINUE versus STOP.  Once CONTINUE is sampled,
+                    # the unmodified conditional head chooses PROCEED/RESET.
+                    voc_training = (not greedy) and self.train_actor_enabled
+                    voc_evaluation = greedy or not self.train_actor_enabled
+                    soft_gate_distribution = compute_voc_gate_distribution(
+                        raw_control_logits,
+                        temperature=self.voc_gate_temperature,
+                        epsilon=(
+                            self.voc_train_epsilon if voc_training else 0.0
+                        ),
+                        legal_control_mask=legal_control_mask,
+                        raw_gate_log_odds=raw_voc_gate_log_odds,
+                    )
+                    if self.voc_gate_epsilon_greedy_execution:
+                        gate_distribution = compute_voc_gate_distribution(
+                            raw_control_logits,
+                            temperature=self.voc_gate_temperature,
+                            epsilon=(
+                                (
+                                    self.voc_gate_execution_epsilon
+                                    if self.voc_actor_policy_version_barrier
+                                    else self.voc_train_epsilon
+                                )
+                                if voc_training else 0.0
+                            ),
+                            legal_control_mask=legal_control_mask,
+                            raw_gate_log_odds=raw_voc_gate_log_odds,
+                            epsilon_greedy_execution=True,
+                        )
+                        # Keep the v11 soft probability available for learner
+                        # calibration and fixed evaluation without widening
+                        # ActorOut/TrainActorOut.  Actual behavior likelihoods
+                        # remain the execution logits below.
+                        misc["voc_gate_soft_control_logits"] = (
+                            soft_gate_distribution.joint_logits
+                        )
+                        misc["voc_gate_soft_continue_probability"] = (
+                            soft_gate_distribution.continue_prob
+                        )
+                        misc["voc_gate_execution_continue_probability"] = (
+                            gate_distribution.continue_prob
+                        )
+                    else:
+                        gate_distribution = soft_gate_distribution
+                    gate_greedy = (
+                        not self.voc_gate_epsilon_greedy_execution
+                        and voc_evaluation
+                        and not self.voc_eval_stochastic
+                    )
+                    gate_action = sample(
+                        gate_distribution.gate_logits,
+                        greedy=gate_greedy,
+                        dim=-1,
+                    )
+                    bout_action = sample(
+                        gate_distribution.bout_logits,
+                        greedy=greedy,
+                        dim=-1,
+                    )
+                    search_control = torch.where(
+                        gate_action == 1,
+                        torch.full_like(bout_action, STOP),
+                        bout_action,
+                    )
+                    # Store/use the exact behavior distribution so V-trace
+                    # likelihoods include temperature and epsilon.
+                    search_control_logits = gate_distribution.joint_logits
+                else:
+                    search_control = sample(
+                        search_control_logits, greedy=greedy, dim=-1
+                    )
                 search_control = torch.where(
                     search_phase_mask,
                     search_control,
@@ -1339,6 +1911,7 @@ class ActorNetSingle(ActorBaseNet):
                         search_control_logits,
                         search_control,
                         control_valid,
+                        project_gate_gradient=not self.voc_control,
                     )
                 c_action_log_prob = primary_log_prob + control_log_prob
 
@@ -1360,9 +1933,14 @@ class ActorNetSingle(ActorBaseNet):
                         )
                     else:
                         primary_entropy_loss = -torch.sum(pri_log_var, dim=-1)
-                    if self.dynamic_factorized_control:
+                    factorized_entropy = (
+                        self.dynamic_factorized_control
+                        or (self.voc_control and self.voc_dedicated_gate)
+                    )
+                    if factorized_entropy:
                         control_entropy_parts = compute_dynamic_control_entropy(
-                            search_control_logits
+                            search_control_logits,
+                            project_gate_gradient=not self.voc_control,
                         )
                         non_stop_prob = control_entropy_parts.continue_prob
                         # Conditional entropy must not reward the gate merely
@@ -1384,11 +1962,24 @@ class ActorNetSingle(ActorBaseNet):
                     primary_entropy_loss = (
                         primary_entropy_loss * primary_entropy_weight
                     )
-                    if self.dynamic_factorized_control:
-                        gate_entropy_loss = (
-                            -control_entropy_parts.gate
-                            * control_valid.float()
-                        )
+                    if factorized_entropy:
+                        raw_gate_entropy = control_entropy_parts.gate
+                        if self.voc_control and self.voc_dedicated_gate:
+                            # Soft-Q distillation is the sole optimizer route
+                            # for the dedicated gate.  Preserve the exact
+                            # entropy value for metrics while removing it from
+                            # the generic actor-entropy backward graph.
+                            misc["voc_gate_entropy"] = (
+                                raw_gate_entropy.detach()
+                            )
+                            gate_entropy_loss = (
+                                -raw_gate_entropy.detach()
+                                * control_valid.float()
+                            )
+                        else:
+                            gate_entropy_loss = (
+                                -raw_gate_entropy * control_valid.float()
+                            )
                         bout_entropy_loss = (
                             -control_entropy_parts.bout
                             * conditional_entropy_weight
@@ -1413,7 +2004,7 @@ class ActorNetSingle(ActorBaseNet):
                         )
                     entropy_loss = primary_entropy_loss + control_entropy_loss
                     misc["primary_entropy_loss"] = primary_entropy_loss
-                    if self.dynamic_factorized_control:
+                    if factorized_entropy:
                         misc["gate_entropy_loss"] = gate_entropy_loss
                         misc["bout_entropy_loss"] = bout_entropy_loss
                     misc["control_entropy_loss"] = control_entropy_loss
@@ -1588,6 +2179,16 @@ class ActorNetSingle(ActorBaseNet):
             )
             baseline = baseline.view(T, B, self.num_rewards)
 
+        voc_q = None
+        voc_features = None
+        if self.critic and self.voc_enabled:
+            # Detaching here isolates Q regression from every shared encoder,
+            # recurrent state and legacy value/policy head.  Gradients still
+            # update voc_head itself.
+            voc_q = self.voc_head(final_out.detach()).view(T, B, 2)
+            if compute_loss:
+                voc_features = final_out.detach().view(T, B, -1)
+
         if compute_loss:
             reg_loss = 1e-6 * torch.sum(final_out**2, dim=-1).view(T, B) / 2
             if self.dynamic_search and self.actor:
@@ -1640,6 +2241,8 @@ class ActorNetSingle(ActorBaseNet):
             control_valid=control_valid if self.actor else None,
             policy_valid=policy_valid if self.actor else None,
             policy_type=policy_type if self.actor else None,
+            voc_q=voc_q,
+            voc_features=voc_features,
         )
         core_state = tuple(new_core_state)
         return actor_out, core_state    

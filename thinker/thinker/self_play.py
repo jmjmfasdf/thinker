@@ -6,10 +6,18 @@ import random
 import traceback
 import torch
 import ray
-from thinker.buffer import AB_FULL, AB_FINISH
+from thinker.buffer import (
+    AB_FINISH,
+    AB_FULL,
+    validate_schema7_model_buffer_status,
+)
 from thinker.actor_net import ActorNet, ActorOut
 from thinker.learn_actor import ActorLearner, SActorLearner
-from thinker.main import Env
+from thinker.main import (
+    Env,
+    _resolve_model_input_seal_runtime,
+    _resolve_model_input_seal_schema_version,
+)
 import thinker.util as util
 
 from thinker.util import EnvOut
@@ -20,6 +28,10 @@ exc_list = ["action",
             "reg_loss", 
             "baseline_enc", 
             "misc",
+            # Learner-only detached critic input.  Never serialize it through
+            # self-play/Ray replay; the learner regenerates it in its one full
+            # ActorNet loss forward.
+            "voc_features",
             # Evaluation-only carry observability remains available on
             # EnvOut without widening the actor replay/Ray buffer schema.
             "carried_descendant_visit_count",
@@ -28,6 +40,11 @@ exc_list = ["action",
             ]
 _fields = (item for item in _fields if item not in exc_list)
 TrainActorOut = namedtuple("TrainActorOut", _fields)
+# Schema 6 alone carries a per-row policy epoch.  Keeping a distinct tuple
+# type leaves schemas 1--5 replay/Ray interfaces byte-for-byte unchanged.
+VersionedTrainActorOut = namedtuple(
+    "VersionedTrainActorOut", tuple(TrainActorOut._fields) + ("policy_version",)
+)
 
 @ray.remote
 class SelfPlayWorker:
@@ -66,6 +83,43 @@ class SelfPlayWorker:
         self.env_n = env_n
         self.flags = flags
         self.dynamic_search = util.dynamic_search_enabled(flags)
+        self.voc_actor_policy_version_barrier = bool(
+            getattr(flags, "voc_actor_policy_version_barrier", False)
+        )
+        self.voc_actor_policy_barrier_runtime = bool(
+            self.voc_actor_policy_version_barrier
+            and bool(getattr(flags, "train_actor", False))
+            and bool(getattr(flags, "parallel_actor", False))
+        )
+        self.voc_model_input_seal_schema_version = (
+            _resolve_model_input_seal_schema_version(flags)
+        )
+        self.voc_model_input_seal_runtime = _resolve_model_input_seal_runtime(
+            flags
+        )
+        raw_gate_schema = getattr(flags, "voc_gate_policy_schema_version", None)
+        if self.voc_actor_policy_barrier_runtime:
+            if (
+                type(raw_gate_schema) is not int
+                or raw_gate_schema not in (6, 7, 8, 9, 10, 11, 12, 13)
+            ):
+                raise ValueError(
+                    "versioned actor policy barrier requires exact gate schema 6--13"
+                )
+            self.voc_gate_policy_schema_version = raw_gate_schema
+        else:
+            self.voc_gate_policy_schema_version = None
+        self.voc_actor_policy_barrier_timeout_s = float(
+            getattr(
+                flags,
+                "voc_actor_policy_barrier_timeout_s",
+                util.VOC_ACTOR_POLICY_BARRIER_TIMEOUT_SECONDS,
+            )
+        )
+        self.voc_actor_policy_version = -1
+        self.voc_actor_policy_heartbeat_count = 0
+        self._monotonic = time.monotonic
+        self._barrier_sleep = time.sleep
      
         self.timing = util.Timings()
         self.actor_id = (
@@ -110,14 +164,37 @@ class SelfPlayWorker:
             if self.train_actor and self.rank == 0:
                 if self.flags.parallel_actor:
                     # init. the actor learner thread
+                    learner_options = {
+                        "num_cpus": 1,
+                        "num_gpus": self.flags.gpu_learn_actor,
+                    }
+                    if self.voc_actor_policy_barrier_runtime:
+                        learner_options.update(
+                            max_restarts=0, max_task_retries=0
+                        )
                     self.actor_learner = ActorLearner.options(
-                        num_cpus=1, num_gpus=self.flags.gpu_learn_actor,
-                    ).remote(ray_obj_actor, actor_param, self.flags)
+                        **learner_options
+                    ).remote(
+                        ray_obj_actor,
+                        actor_param,
+                        self.flags,
+                        runtime_action_meanings=(
+                            self.env.get_primary_action_meanings()
+                        ),
+                    )
                     # start learning
                     self.r_learner = self.actor_learner.learn_data.remote()
                 else:
                     self.actor_learner = SActorLearner(
-                        None, actor_param, self.flags, self.actor_net, self.device)
+                        None,
+                        actor_param,
+                        self.flags,
+                        self.actor_net,
+                        self.device,
+                        runtime_action_meanings=(
+                            self.env.get_primary_action_meanings()
+                        ),
+                    )
 
         self.disable_thinker = flags.wrapper_type == 1
         self.finish_train_actor = False
@@ -130,6 +207,10 @@ class SelfPlayWorker:
         try:
             if verbose:
                 self._logger.info("Actor %d started." % self.rank)
+            if self.voc_actor_policy_barrier_runtime:
+                terminal = self._refresh_policy_bundle(expected_version=0)
+                if terminal:
+                    raise RuntimeError("initial actor policy bundle is terminal")
             n = 0
             state, info = self.env.reset()
             env_out = self.init_env_out(state, info)                        
@@ -173,10 +254,20 @@ class SelfPlayWorker:
                     )
                     status = 0
                     if self.time: self.timing.time("mics2")
-        
+                    status_deadline = (
+                        self._monotonic()
+                        + self.voc_actor_policy_barrier_timeout_s
+                    )
                     while True:
                         data_full_ptr = self.actor_buffer.get_status.remote()
-                        status = ray.get(data_full_ptr)
+                        if self.voc_actor_policy_barrier_runtime:
+                            status = self._barrier_ray_get(
+                                data_full_ptr,
+                                deadline=status_deadline,
+                                label="ActorBuffer status",
+                            )
+                        else:
+                            status = ray.get(data_full_ptr)
                         if status == AB_FULL:
                             time.sleep(0.1)
                         else:
@@ -186,7 +277,17 @@ class SelfPlayWorker:
                                 # zero owns the learner future and must resolve it
                                 # before treating FINISH as a normal termination.
                                 if self.rank == 0 and hasattr(self, "r_learner"):
-                                    learner_ok = ray.get(self.r_learner)
+                                    if self.voc_actor_policy_barrier_runtime:
+                                        learner_ok = self._barrier_ray_get(
+                                            self.r_learner,
+                                            deadline=(
+                                                self._monotonic()
+                                                + self.voc_actor_policy_barrier_timeout_s
+                                            ),
+                                            label="actor learner terminal health",
+                                        )
+                                    else:
+                                        learner_ok = ray.get(self.r_learner)
                                     if learner_ok is not True:
                                         raise RuntimeError(
                                             "actor learner terminated without success"
@@ -194,10 +295,20 @@ class SelfPlayWorker:
                                 self.train_actor = False
                             break
                     if self.train_actor:
-                        self.actor_buffer.write.remote(
+                        write_ref = self.actor_buffer.write.remote(
                             ray.put(self.actor_local_buffer),
                             ray.put(initial_actor_state),
                         )
+                        if self.voc_actor_policy_barrier_runtime:
+                            self._barrier_ray_get(
+                                write_ref,
+                                deadline=(
+                                    self._monotonic()
+                                    + self.voc_actor_policy_barrier_timeout_s
+                                ),
+                                label="ActorBuffer.write acknowledgement",
+                            )
+                            self._publish_policy_heartbeat("enqueue")
                     if self.time: self.timing.time("send actor buffer")     
 
                 if self.log:
@@ -235,7 +346,16 @@ class SelfPlayWorker:
                     self.actor_net.train(False)
                 
                 if send_buffer and self.flags.parallel_actor:
-                    self._refresh_net()
+                    if self.voc_actor_policy_barrier_runtime:
+                        terminal = self._refresh_policy_bundle(
+                            expected_version=self.voc_actor_policy_version + 1
+                        )
+                        if terminal:
+                            self.train_actor = False
+                            self.finish_train_actor = True
+                            return self._complete_terminal_policy(info)
+                    else:
+                        self._refresh_net()
 
                 if self.time:
                     self.timing.time("update actor net weight")
@@ -255,6 +375,18 @@ class SelfPlayWorker:
                     return True
 
         except Exception as e:
+            if getattr(self, "voc_model_input_seal_runtime", False):
+                try:
+                    self.env.abort_model_input_no_step(
+                        timeout=self.voc_actor_policy_barrier_timeout_s
+                    )
+                except Exception as abort_error:
+                    self._logger.error(
+                        "Failed to acknowledge schema-7 model input abort: %s",
+                        abort_error,
+                    )
+            if self.voc_actor_policy_barrier_runtime:
+                self._publish_policy_barrier_abort()
             self._logger.error(f"Exception detected in self_play: {e}")
             self._logger.error(traceback.format_exc())
             return False
@@ -326,13 +458,28 @@ class SelfPlayWorker:
                     "policy_valid", "phase",
                 ]
 
-        if t == 0:            
+        tuple_type = (
+            VersionedTrainActorOut
+            if self.voc_actor_policy_barrier_runtime and not log_only
+            else TrainActorOut
+        )
+        if t == 0:
             out = {}
             
-            for field in TrainActorOut._fields:
+            for field in tuple_type._fields:
                 out[field] = None
                 if log_only and field not in include_fields: continue
                 if field in ["id"]: continue                
+                if field == "policy_version":
+                    if self.flags.parallel_actor:
+                        out[field] = torch.empty(
+                            (self.flags.actor_unroll_len + 1, self.env_n),
+                            dtype=torch.int64,
+                            device=self.device,
+                        )
+                    else:
+                        out[field] = []
+                    continue
                 if field == "real_states" and not self.flags.see_real_state: continue
                 val = getattr(env_out if field in EnvOut._fields else actor_out, field)                
                 if val is None: continue
@@ -358,17 +505,26 @@ class SelfPlayWorker:
                 id = [self.actor_id[0]]
             out["id"] = id
 
-            self.actor_local_buffer = TrainActorOut(**out)
+            self.actor_local_buffer = tuple_type(**out)
 
-        for field in TrainActorOut._fields:
+        for field in tuple_type._fields:
             if log_only and field not in include_fields: continue
             v = getattr(self.actor_local_buffer, field)
             if v is not None and field not in ["id"]:                
-                new_val = getattr(
-                    env_out if field in EnvOut._fields else actor_out, field
-                )
+                if field == "policy_version":
+                    new_val = torch.full(
+                        (self.env_n,),
+                        -1 if t == 0 else self.voc_actor_policy_version,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                else:
+                    new_val = getattr(
+                        env_out if field in EnvOut._fields else actor_out, field
+                    )
                 assert new_val is not None, f"{field} cannot be None"
-                new_val = new_val[0]
+                if field != "policy_version":
+                    new_val = new_val[0]
                 if self.flags.parallel_actor:
                     if (not self.disable_thinker and field == "real_states"
                             and not self.dynamic_search):
@@ -402,20 +558,229 @@ class SelfPlayWorker:
     def create_env_out(self, *args, **kwargs):
         return util.create_env_out(*args, **kwargs, flags=self.flags)
 
+    def _barrier_ray_get(self, object_ref, *, deadline, label):
+        remaining = deadline - self._monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError(f"actor policy barrier timed out before {label}")
+        try:
+            return ray.get(object_ref, timeout=remaining)
+        except ray.exceptions.GetTimeoutError as error:
+            raise TimeoutError(
+                f"actor policy barrier RPC timed out during {label}"
+            ) from error
+
+    def _publish_policy_barrier_abort(self):
+        """Make worker failure immediately visible to the learner poll."""
+
+        try:
+            deadline = self._monotonic() + self.voc_actor_policy_barrier_timeout_s
+            self._barrier_ray_get(
+                self.actor_param_buffer.update_dict_item.remote(
+                    util.VOC_ACTOR_POLICY_ACKS_KEY,
+                    int(self.rank),
+                    {"abort": True},
+                ),
+                deadline=deadline,
+                label="worker abort acknowledgement",
+            )
+        except Exception:
+            self._logger.error("failed to publish actor-policy worker abort")
+
+    def _publish_policy_heartbeat(self, phase):
+        if phase not in ("load_ack", "enqueue"):
+            raise ValueError("invalid actor policy heartbeat phase")
+        self.voc_actor_policy_heartbeat_count += 1
+        heartbeat = {
+            "rank": int(self.rank),
+            "policy_version": int(self.voc_actor_policy_version),
+            "phase": phase,
+            "count": int(self.voc_actor_policy_heartbeat_count),
+        }
+        self._barrier_ray_get(
+            self.actor_param_buffer.update_dict_item.remote(
+                util.VOC_ACTOR_POLICY_HEARTBEAT_KEY,
+                int(self.rank),
+                heartbeat,
+            ),
+            deadline=(
+                self._monotonic()
+                + self.voc_actor_policy_barrier_timeout_s
+            ),
+            label="policy heartbeat",
+        )
+
+    def _refresh_policy_bundle(self, *, expected_version):
+        """Load and acknowledge exactly one next policy before any rollout."""
+
+        deadline = self._monotonic() + self.voc_actor_policy_barrier_timeout_s
+        while True:
+            bundle = self._barrier_ray_get(
+                self.actor_param_buffer.get_data.remote(
+                    util.VOC_ACTOR_POLICY_BUNDLE_KEY
+                ),
+                deadline=deadline,
+                label="policy bundle load",
+            )
+            if bundle is None:
+                self._barrier_sleep(0.01)
+                continue
+            observed = (
+                bundle.get("policy_version")
+                if isinstance(bundle, dict) else None
+            )
+            if (
+                isinstance(observed, (int, np.integer))
+                and not isinstance(observed, (bool, np.bool_))
+                and int(observed) < int(expected_version)
+            ):
+                self._barrier_sleep(0.01)
+                continue
+            validated = util.validate_actor_policy_bundle(
+                bundle,
+                expected_epoch=expected_version,
+                expected_actor_state=self.actor_net.state_dict(),
+                expected_gate_schema=self.voc_gate_policy_schema_version,
+                label=f"worker {self.rank} actor policy bundle",
+            )
+            self.actor_net.set_weights(validated["actor_state_dict"])
+            self.voc_actor_policy_version = validated["policy_version"]
+            ack = util.make_actor_policy_ack(
+                self.rank,
+                self.voc_actor_policy_version,
+                terminal=validated["terminal"],
+                gate_schema=self.voc_gate_policy_schema_version,
+            )
+            self._barrier_ray_get(
+                self.actor_param_buffer.update_dict_item.remote(
+                    util.VOC_ACTOR_POLICY_ACKS_KEY, int(self.rank), ack
+                ),
+                deadline=deadline,
+                label="policy load acknowledgement",
+            )
+            self._publish_policy_heartbeat("load_ack")
+            return validated["terminal"]
+
+    def _wait_for_model_finish_without_env_actions(self, info):
+        """After terminal policy, poll only model health; never step the env."""
+
+        deadline = self._monotonic() + self.voc_actor_policy_barrier_timeout_s
+        status = info.get("model_status", {})
+        if getattr(self, "voc_model_input_seal_runtime", False):
+            status = self._validate_schema7_model_status(status)
+        while status.get("finish") is not True:
+            if (
+                getattr(self, "voc_model_input_seal_runtime", False)
+                and status.get("voc_model_input_aborted") is True
+            ):
+                raise RuntimeError("model input aborted before normal finish")
+            remaining = deadline - self._monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError(
+                    "model did not report normal finish after terminal policy"
+                )
+            status = self.env.poll_model_status_no_step(timeout=remaining)
+            if getattr(self, "voc_model_input_seal_runtime", False):
+                status = self._validate_schema7_model_status(status)
+            if status.get("finish") is True:
+                break
+            self._barrier_sleep(0.01)
+
+    def _complete_terminal_policy(self, info):
+        """Finish without any post-terminal environment action."""
+
+        if self.rank == 0 and hasattr(self, "r_learner"):
+            learner_ok = self._barrier_ray_get(
+                self.r_learner,
+                deadline=(
+                    self._monotonic()
+                    + self.voc_actor_policy_barrier_timeout_s
+                ),
+                label="terminal actor learner health",
+            )
+            if learner_ok is not True:
+                raise RuntimeError("actor learner terminated without success")
+        if getattr(self, "voc_model_input_seal_runtime", False):
+            seal_status = self.env.seal_model_input_no_step(
+                timeout=self.voc_actor_policy_barrier_timeout_s
+            )
+            seal_status = self._validate_schema7_model_status(seal_status)
+            info = dict(info)
+            info["model_status"] = seal_status
+        self._wait_for_model_finish_without_env_actions(info)
+        self._logger.info(
+            "Terminating self-play thread %d after terminal actor policy",
+            self.rank,
+        )
+        self.env.close()
+        return True
+
+    def _validate_schema7_model_status(self, status, *, require_sealed=False):
+        return validate_schema7_model_buffer_status(
+            status,
+            total_steps=self.flags.total_steps,
+            self_play_n=self.flags.self_play_n,
+            warm_up_n=self.flags.model_warm_up_n,
+            require_sealed=require_sealed,
+            label=f"schema-7 SelfPlay rank {self.rank} ModelBuffer status",
+        )
+
     def _load_net(self):
         if self.rank == 0:
+            util.validate_voc_fresh_control_inputs(
+                self.flags, label="Self-play fresh VoC control"
+            )
             # load the network from preload or load_checkpoint  
             path = None
             if self.flags.ckp:
                 path = os.path.join(self.flags.ckpdir, "ckp_actor.tar")
             else:
-                if self.flags.preload_actor:
+                voc_parent_checkpoint = util.resolve_voc_parent_checkpoint(
+                    self.flags
+                )
+                if (
+                    getattr(self.flags, "dynamic_voc_mode", "off")
+                    == "control"
+                    and voc_parent_checkpoint
+                ):
+                    path = voc_parent_checkpoint
+                elif self.flags.preload_actor:
                     path = os.path.join(self.flags.preload_actor, "ckp_actor.tar")
             if path is not None:
-                checkpoint = torch.load(
-                    path, map_location=torch.device("cpu"), weights_only = False
-                )
+                if (
+                    not self.flags.ckp
+                    and getattr(self.flags, "dynamic_voc_mode", "off")
+                    == "control"
+                ):
+                    promotion = util.validate_voc_control_preload(
+                        path, flags=self.flags
+                    )
+                    checkpoint = promotion["_validated_checkpoint"]
+                    self.flags.voc_resolved_parent_checkpoint_sha256 = (
+                        promotion["voc_parent_checkpoint_sha256"]
+                    )
+                else:
+                    checkpoint = torch.load(
+                        path,
+                        map_location=torch.device("cpu"),
+                        weights_only=False,
+                    )
+                if (
+                    not self.flags.ckp
+                    and getattr(self.flags, "dynamic_voc_mode", "off")
+                    == "shadow"
+                ):
+                    # A new shadow lineage may migrate legacy/off weights only.
+                    # Importing an active head while resetting its counters and
+                    # EMA provenance would launder a prior shadow/control run.
+                    util.validate_voc_shadow_preload(
+                        checkpoint, label="Self-play shadow preload"
+                    )
                 if self.flags.ckp:
+                    util.validate_voc_active_resume_checkpoint(
+                        checkpoint,
+                        self.flags,
+                        label="Self-play actor resume checkpoint",
+                    )
                     checkpoint_flags = checkpoint.get("flags", {})
                     checkpoint_dynamic = bool(checkpoint.get(
                         "dynamic_search",
@@ -477,24 +842,51 @@ class SelfPlayWorker:
                 # Fixed checkpoints retain their historical strict-load
                 # contract.  The only permissive path is the explicitly
                 # supported legacy-fixed -> Dynamic preload migration.
-                strict = bool(self.flags.ckp or not self.dynamic_search)
+                strict = bool(
+                    self.flags.ckp
+                    or not self.dynamic_search
+                    # Shadow and control have the same ActorNet schema.  A
+                    # promotion must therefore be an exact weight load; the
+                    # permissive path is reserved for explicit legacy/off to
+                    # shadow initialization.
+                    or getattr(self.flags, "dynamic_voc_mode", "off")
+                    == "control"
+                )
                 self.actor_net.set_weights(
                     checkpoint["actor_net_state_dict"], strict=strict
                 )
                 self._logger.info("Loaded actor net from %s" % path)
             if self.flags.parallel_actor:            
-                self.actor_param_buffer.set_data.remote(
+                ref = self.actor_param_buffer.set_data.remote(
                     "actor_net", self.actor_net.get_weights()
                 )
+                if self.voc_actor_policy_barrier_runtime:
+                    self._barrier_ray_get(
+                        ref,
+                        deadline=(
+                            self._monotonic()
+                            + self.voc_actor_policy_barrier_timeout_s
+                        ),
+                        label="raw actor bootstrap publication",
+                    )
         else:
             self._refresh_net()
         return
     
     def _refresh_net(self):
+        deadline = (
+            self._monotonic() + self.voc_actor_policy_barrier_timeout_s
+            if self.voc_actor_policy_barrier_runtime else None
+        )
         while True:
-            weights = ray.get(
-                self.actor_param_buffer.get_data.remote("actor_net")
-            )  
+            ref = self.actor_param_buffer.get_data.remote("actor_net")
+            weights = (
+                self._barrier_ray_get(
+                    ref, deadline=deadline, label="raw actor bootstrap load"
+                )
+                if self.voc_actor_policy_barrier_runtime
+                else ray.get(ref)
+            )
             if weights is not None:
                 self.actor_net.set_weights(weights)
                 del weights

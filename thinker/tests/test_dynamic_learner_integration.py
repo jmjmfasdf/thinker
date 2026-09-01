@@ -27,6 +27,7 @@ def test_useful_carry_observability_does_not_widen_actor_replay_schema():
     }
     assert telemetry.issubset(EnvOut._fields)
     assert telemetry.isdisjoint(TrainActorOut._fields)
+    assert "voc_features" not in TrainActorOut._fields
 
 
 class _NullWriter:
@@ -203,6 +204,42 @@ def _stack_train_rows(rows, batch_size):
     return TrainActorOut(**data)
 
 
+def test_environment_noop_metrics_use_only_executed_real_transitions():
+    actions = torch.tensor([
+        [2, 4, 2],
+        [1, 2, 0],
+    ])
+    real_transition = torch.tensor([
+        [True, False, False],
+        [False, True, True],
+    ])
+
+    stats = learn_actor_module.environment_noop_observability_stats(
+        actions,
+        real_transition,
+        num_actions=5,
+        noop_action_index=2,
+    )
+
+    assert stats == {
+        "interaction/noop_action_index": 2,
+        "interaction/noop_supported": 1,
+        "interaction/real_action_count": 3,
+        "interaction/noop_count": 2,
+        "interaction/noop_frequency": pytest.approx(2.0 / 3.0),
+    }
+    unsupported = learn_actor_module.environment_noop_observability_stats(
+        actions,
+        torch.zeros_like(real_transition),
+        num_actions=5,
+        noop_action_index=None,
+    )
+    assert unsupported["interaction/noop_supported"] == 0
+    assert unsupported["interaction/real_action_count"] == 0
+    assert unsupported["interaction/noop_count"] == 0
+    assert unsupported["interaction/noop_frequency"] == 0.0
+
+
 def _rollout(flags):
     """Collect one overlapped learner unroll with STOP, cap and WAIT rows."""
     env = FakeVectorEnv()
@@ -360,6 +397,7 @@ def test_dynamic_cap_rollout_backpropagates_through_stop_and_think_cost(
         flags=flags,
         actor_net=actor,
         device=torch.device("cpu"),
+        runtime_action_meanings=("A0", "A1", "NOOP", "A3", "A4"),
     )
 
     imitation_observability = None
@@ -371,10 +409,24 @@ def test_dynamic_cap_rollout_backpropagates_through_stop_and_think_cost(
             "target_vs_best_other_logit_gap_p99": 6.5,
             "scored_logits_absmax": 101.0,
             "scored_logits_rms": 31.0,
+            "behavioral_argmax_accuracy": 0.25,
+            "behavioral_sampled_accuracy": 0.25,
+            "behavioral_argmax_correct_count": 1.0,
+            "behavioral_sampled_correct_count": 1.0,
+            "behavioral_support_count": 4.0,
+            "noop_action_index": 2.0,
+            "noop_supported": 1.0,
+            "noop_support_count": 4.0,
+            "target_noop_count": 2.0,
+            "target_noop_frequency": 0.5,
+            "argmax_noop_count": 1.0,
+            "argmax_noop_frequency": 0.25,
+            "sampled_noop_count": 3.0,
+            "sampled_noop_frequency": 0.75,
         }
         detached_metrics = {
             "accuracy": 0.25,
-            "sampled_accuracy": 0.125,
+            "sampled_accuracy": 0.25,
             "root_carried_rate": 0.5,
             **imitation_observability,
         }
@@ -517,6 +569,11 @@ def test_dynamic_cap_rollout_backpropagates_through_stop_and_think_cost(
     stats = learner.compute_stat(
         shifted, losses=stat_losses, total_norm=0.0, actor_id=train_out.id
     )
+    assert stats["interaction/noop_action_index"] == 2
+    assert stats["interaction/noop_supported"] == 1
+    assert stats["interaction/real_action_count"] == 3
+    assert stats["interaction/noop_count"] == 1
+    assert stats["interaction/noop_frequency"] == pytest.approx(1.0 / 3.0)
     if imitation_observability is not None:
         for name, expected in imitation_observability.items():
             assert stats[f"actor/icopro_{name}"] == pytest.approx(expected)

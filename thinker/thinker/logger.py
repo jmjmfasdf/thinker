@@ -82,6 +82,9 @@ class SLogWorker:
         self.timer = timeit.default_timer
         self.video = None
         self.env_init = False
+        self.voc_actor_policy_barrier_runtime = bool(
+            getattr(flags, "voc_actor_policy_barrier_runtime", False)
+        )
 
         if self.vis_policy:            
             self.env =  Env(
@@ -112,6 +115,8 @@ class SLogWorker:
         
     @torch.no_grad()
     def start(self):
+        if self.voc_actor_policy_barrier_runtime:
+            return self._start_schema6()
         try:
             while True:
                 time.sleep(self.log_freq)
@@ -163,6 +168,82 @@ class SLogWorker:
             self.close()
             return True
 
+    def _run_schema6_log_iteration(
+        self, *, force_artifact_upload=False, require_complete_stat=False
+    ):
+        """Run one strict logger iteration without legacy exception masking."""
+
+        self.log_stat(require_complete=require_complete_stat)
+        if (
+            self.vis_policy
+            and self.real_step - self.last_real_step_v
+            >= self.flags.policy_vis_freq
+        ):
+            self._logger.info(
+                f"Steps {self.real_step}: Uploading video to wandb..."
+            )
+            self.last_real_step_v = self.real_step
+            self.visualize_wandb()
+            self._logger.info(
+                f"Steps {self.real_step}: Finish uploading video to wandb..."
+            )
+        if (
+            force_artifact_upload
+            or (
+                self.real_step - self.last_real_step_c
+                >= self.flags.wandb_ckp_freq
+                and self.flags.wandb_ckp_freq > 0
+            )
+        ):
+            self._logger.info(
+                f"Steps {self.real_step}: Uploading files to wandb..."
+            )
+            self.last_real_step_c = self.real_step
+            self.wlogger.wandb.save(os.path.join(self.ckpdir, "*"))
+            self._logger.info(
+                f"Steps {self.real_step}: Finish uploading files to wandb..."
+            )
+
+    def _start_schema6(self):
+        """Close only after a private request and propagate every failure."""
+
+        try:
+            while True:
+                request = util.read_actor_policy_logger_finish_request(
+                    self.ckpdir
+                )
+                if request is not None:
+                    self._validate_schema6_request_checkpoint_files(request)
+                    self._run_schema6_log_iteration(
+                        force_artifact_upload=True,
+                        require_complete_stat=True,
+                    )
+                    self.close()
+                    self._validate_schema6_request_checkpoint_files(request)
+                    util.write_actor_policy_logger_finish_ack(
+                        self.ckpdir, request
+                    )
+                    return True
+                time.sleep(self.log_freq)
+                self._run_schema6_log_iteration()
+        except Exception as error:
+            self._logger.error(
+                f"Steps {self.real_step}: Exception detected in strict "
+                f"schema-6 log_worker: {error}"
+            )
+            self._logger.error(traceback.format_exc())
+            raise
+
+    def _validate_schema6_request_checkpoint_files(self, request):
+        """Bind the strict final upload/close pass to the requested triplet."""
+
+        evidence = util.collect_run_completion_evidence(self.ckpdir)
+        if evidence["checkpoint_files"] != request["checkpoint_files"]:
+            raise RuntimeError(
+                "schema-6 logger checkpoint triplet changed around final upload"
+            )
+        return True
+
     def read_stat(self, log, fields, tick, name):
         # read the last line in log file and parse it as dict
         # if log file not yet exists or last line has not been
@@ -188,18 +269,28 @@ class SLogWorker:
                 return stat, fields, tick
         return None, fields, tick
 
-    def log_stat(self):
+    def log_stat(self, *, require_complete=False):
         try:
             if self.log_actor:
+                actor_tick = -1 if require_complete else self.last_actor_tick
                 actor_stat, self.actor_fields, self.last_actor_tick = self.read_stat(
-                    self.actor_log_path, self.actor_fields, self.last_actor_tick, "actor"
+                    self.actor_log_path, self.actor_fields, actor_tick, "actor"
                 )
             if self.log_model:
+                model_tick = -1 if require_complete else self.last_model_tick
                 model_stat, self.model_fields, self.last_model_tick = self.read_stat(
                     self.model_log_path,
                     self.model_fields,
-                    self.last_model_tick,
+                    model_tick,
                     "model",
+                )
+            if require_complete and (
+                (self.log_actor and actor_stat is None)
+                or (self.log_model and model_stat is None)
+            ):
+                raise RuntimeError(
+                    "strict schema-6 final logger pass lacks a complete "
+                    "actor/model statistic"
                 )
            
             stat = {}
@@ -227,21 +318,31 @@ class SLogWorker:
                 f"Steps {self.real_step}: Error loading stat from log: {e}"
             )
             self._logger.error(traceback.format_exc())
+            if self.voc_actor_policy_barrier_runtime:
+                raise
             return None
-        return
+        return bool(stat)
 
     def visualize_wandb(self):
             
         if not os.path.exists(self.actor_net_path):
-            self._logger.info(
-                f"Steps {self.real_step}: Actor net checkpoint {self.actor_net_path} does not exist"
+            message = (
+                f"Steps {self.real_step}: Actor net checkpoint "
+                f"{self.actor_net_path} does not exist"
             )
+            self._logger.info(message)
+            if self.voc_actor_policy_barrier_runtime:
+                raise FileNotFoundError(message)
             return None
         if self.wrapper_type != 1:
             if not os.path.exists(self.model_net_path):
-                self._logger.info(
-                    f"Steps {self.real_step}: Model net checkpoint {self.model_net_path} does not exist"
+                message = (
+                    f"Steps {self.real_step}: Model net checkpoint "
+                    f"{self.model_net_path} does not exist"
                 )
+                self._logger.info(message)
+                if self.voc_actor_policy_barrier_runtime:
+                    raise FileNotFoundError(message)
                 return None
             try:
                 checkpoint = torch.load(
@@ -254,6 +355,8 @@ class SLogWorker:
                 self.env.model_net.set_weights(checkpoint["model_net_state_dict"])
             except Exception as e:
                 self._logger.error(f"Steps {self.real_step}: Error loading checkpoint: {e}")
+                if self.voc_actor_policy_barrier_runtime:
+                    raise
                 return None
 
         if True: #not self.env_init:

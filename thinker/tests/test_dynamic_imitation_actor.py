@@ -18,8 +18,11 @@ from thinker.dynamic_imitation import (
     HumanActionExecutionAdapter,
     compute_imitation_objective,
     compute_masked_imitation_objective,
+    detached_behavioral_action_metrics,
     detached_imitation_logit_metrics,
+    empty_behavioral_action_metrics,
     imitation_checkpoint_state,
+    resolve_noop_action_index,
     scale_imitation_for_online_rows,
     validate_behavior_batch,
 )
@@ -345,6 +348,74 @@ def test_detached_bc_logit_metrics_are_stable_for_extreme_finite_rows():
     assert logits.grad is None
 
 
+def test_behavioral_accuracy_and_noop_metrics_are_count_aggregatable():
+    # Runtime semantics intentionally place NOOP at index 2.  The diagnostic
+    # must never infer index zero from Atari convention.
+    noop_index = resolve_noop_action_index(
+        ("FIRE", "RIGHT", "NOOP"), num_actions=3
+    )
+    assert noop_index == 2
+    metrics = detached_behavioral_action_metrics(
+        targets=torch.tensor([2, 0, 2, 1]),
+        argmax_actions=torch.tensor([2, 2, 1, 1]),
+        sampled_actions=torch.tensor([0, 0, 2, 1]),
+        num_actions=3,
+        noop_action_index=noop_index,
+    )
+
+    assert metrics["behavioral_support_count"] == 4
+    assert metrics["behavioral_argmax_correct_count"] == 2
+    assert metrics["behavioral_sampled_correct_count"] == 3
+    assert metrics["behavioral_argmax_accuracy"] == pytest.approx(0.5)
+    assert metrics["behavioral_sampled_accuracy"] == pytest.approx(0.75)
+    assert metrics["noop_action_index"] == 2
+    assert metrics["noop_supported"] == 1
+    assert metrics["noop_support_count"] == 4
+    assert metrics["target_noop_count"] == 2
+    assert metrics["argmax_noop_count"] == 2
+    assert metrics["sampled_noop_count"] == 1
+    assert metrics["target_noop_frequency"] == pytest.approx(0.5)
+    assert metrics["argmax_noop_frequency"] == pytest.approx(0.5)
+    assert metrics["sampled_noop_frequency"] == pytest.approx(0.25)
+    assert all(np.isfinite(value) for value in metrics.values())
+
+
+def test_behavioral_noop_metrics_have_finite_zero_support_semantics():
+    empty = empty_behavioral_action_metrics(
+        num_actions=4, noop_action_index=3
+    )
+    assert empty["behavioral_support_count"] == 0
+    assert empty["noop_support_count"] == 0
+    assert empty["behavioral_argmax_accuracy"] == 0.0
+    assert empty["target_noop_frequency"] == 0.0
+    assert empty["argmax_noop_frequency"] == 0.0
+    assert empty["sampled_noop_frequency"] == 0.0
+    assert all(np.isfinite(value) for value in empty.values())
+
+    unsupported = detached_behavioral_action_metrics(
+        targets=torch.tensor([0, 1]),
+        argmax_actions=torch.tensor([0, 0]),
+        sampled_actions=torch.tensor([1, 1]),
+        num_actions=2,
+        noop_action_index=None,
+    )
+    assert unsupported["noop_action_index"] == -1
+    assert unsupported["noop_supported"] == 0
+    assert unsupported["noop_support_count"] == 0
+    assert unsupported["target_noop_count"] == 0
+    assert unsupported["target_noop_frequency"] == 0.0
+    assert all(np.isfinite(value) for value in unsupported.values())
+
+
+def test_runtime_noop_resolution_rejects_ambiguous_or_malformed_tables():
+    assert resolve_noop_action_index(("LEFT", "RIGHT"), 2) is None
+    assert resolve_noop_action_index(None, 2) is None
+    with pytest.raises(ValueError, match="match the policy width"):
+        resolve_noop_action_index(("NOOP",), 2)
+    with pytest.raises(ValueError, match="multiple NOOP"):
+        resolve_noop_action_index(("NOOP", "noop"), 2)
+
+
 def test_bc_mean_is_scaled_by_online_real_policy_rows_only():
     mean_loss = torch.tensor(2.5, requires_grad=True)
     real_mask = torch.tensor([[True, False, False], [False, True, False]])
@@ -557,6 +628,27 @@ def test_self_play_resume_rejects_control_objective_mismatch(tmp_path):
 
     with pytest.raises(ValueError, match="control objectives"):
         worker._load_net()
+
+
+def test_self_play_fresh_control_does_not_require_or_load_parent(tmp_path):
+    worker_class = SelfPlayWorker.__ray_metadata__.modified_class
+    worker = worker_class.__new__(worker_class)
+    worker.rank = 0
+    worker.dynamic_search = True
+    worker.actor_net = object()
+    worker.flags = SimpleNamespace(
+        ckp=False,
+        ckpdir=str(tmp_path),
+        preload_actor="",
+        voc_parent_checkpoint="",
+        dynamic_voc_mode="control",
+        parallel_actor=False,
+    )
+
+    # No checkpoint exists.  The worker must preserve its freshly constructed
+    # ActorNet, whose VoC head is zero-initialized by the architecture.
+    worker._load_net()
+    assert type(worker.actor_net) is object
 
 
 def test_imitation_checkpoint_cannot_resume_with_behavior_disabled():

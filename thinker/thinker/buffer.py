@@ -10,6 +10,116 @@ from thinker.core.file_writer import FileWriter
 import torch
 from datetime import datetime
 AB_CAN_WRITE, AB_FULL, AB_FINISH = 0, 1, 2
+MODEL_BUFFER_ABORT = "ABORT"
+SCHEMA7_MODEL_BUFFER_STATUS_FIELDS = frozenset({
+    "processed_n",
+    "warm_up_n",
+    "replay_ratio",
+    "running",
+    "finish",
+    "voc_model_input_seal_schema_version",
+    "voc_model_input_sealed",
+    "voc_model_input_seal_count",
+    "voc_model_terminal_processed_n",
+    "voc_model_input_late_write_count",
+    "voc_model_input_abort_count",
+    "voc_model_input_aborted",
+    "voc_model_update_claim_active",
+})
+
+
+def validate_schema7_model_buffer_status(
+    status,
+    *,
+    total_steps,
+    self_play_n,
+    warm_up_n,
+    require_sealed=False,
+    label="schema-7 ModelBuffer status",
+):
+    """Validate the exact runtime-only schema-7 ModelBuffer status."""
+
+    for name, value, positive in (
+        ("total_steps", total_steps, True),
+        ("self_play_n", self_play_n, True),
+        ("warm_up_n", warm_up_n, False),
+    ):
+        if type(value) is not int or value < int(positive):
+            raise ValueError(f"{label} expected {name} is invalid")
+    if type(require_sealed) is not bool:
+        raise ValueError(f"{label} require_sealed must be Python bool")
+    if type(status) is not dict or set(status) != SCHEMA7_MODEL_BUFFER_STATUS_FIELDS:
+        raise RuntimeError(f"{label} must have the exact 13-key mapping")
+    for name in (
+        "processed_n",
+        "warm_up_n",
+        "voc_model_input_seal_count",
+        "voc_model_input_late_write_count",
+        "voc_model_input_abort_count",
+    ):
+        value = status[name]
+        if type(value) is not int or value < 0:
+            raise RuntimeError(f"{label} has invalid {name}")
+    if status["warm_up_n"] != warm_up_n:
+        raise RuntimeError(f"{label} warm_up_n disagrees with configuration")
+    replay_ratio = status["replay_ratio"]
+    if (
+        type(replay_ratio) is not float
+        or not np.isfinite(replay_ratio)
+        or replay_ratio < 0.0
+    ):
+        raise RuntimeError(f"{label} has invalid replay_ratio")
+    for name in (
+        "running",
+        "finish",
+        "voc_model_input_sealed",
+        "voc_model_input_aborted",
+        "voc_model_update_claim_active",
+    ):
+        if type(status[name]) is not bool:
+            raise RuntimeError(f"{label} has invalid {name}")
+    if status["running"] is not (status["processed_n"] >= warm_up_n):
+        raise RuntimeError(f"{label} running disagrees with progress")
+    if (
+        type(status["voc_model_input_seal_schema_version"]) is not int
+        or status["voc_model_input_seal_schema_version"] != 1
+    ):
+        raise RuntimeError(f"{label} has invalid seal schema")
+    seal_count = status["voc_model_input_seal_count"]
+    if seal_count > self_play_n:
+        raise RuntimeError(f"{label} has invalid seal count")
+    sealed = status["voc_model_input_sealed"]
+    terminal_processed_n = status["voc_model_terminal_processed_n"]
+    if sealed:
+        if (
+            seal_count != self_play_n
+            or type(terminal_processed_n) is not int
+            or terminal_processed_n != status["processed_n"]
+            or terminal_processed_n < total_steps
+        ):
+            raise RuntimeError(f"{label} has invalid sealed progress")
+    elif terminal_processed_n is not None or seal_count == self_play_n:
+        raise RuntimeError(f"{label} has invalid unsealed progress")
+    if require_sealed and not sealed:
+        raise RuntimeError(f"{label} is not sealed")
+    aborted = status["voc_model_input_aborted"]
+    abort_count = status["voc_model_input_abort_count"]
+    if aborted:
+        if abort_count != 1 or status["finish"]:
+            raise RuntimeError(f"{label} has invalid abort state")
+    elif abort_count != 0:
+        raise RuntimeError(f"{label} has invalid abort count")
+    if (aborted or status["finish"]) and status[
+        "voc_model_update_claim_active"
+    ]:
+        raise RuntimeError(f"{label} terminal state retained an update claim")
+    if status["finish"] and (
+        not sealed
+        or status["voc_model_input_late_write_count"] != 0
+        or abort_count != 0
+    ):
+        raise RuntimeError(f"{label} has invalid success state")
+    return status
 
 
 def validate_priorities(priority, *, context, expected_shape=None):
@@ -172,7 +282,16 @@ class ActorBuffer:
 
 
 class SModelBuffer:
-    def __init__(self, buffer_n, max_rank, batch_size, alpha=1., warm_up_n=0):
+    def __init__(
+        self,
+        buffer_n,
+        max_rank,
+        batch_size,
+        alpha=1.,
+        warm_up_n=0,
+        model_input_seal_schema_version=0,
+        total_steps=None,
+    ):
         self.buffer_n = buffer_n                
         self.max_rank = max_rank
         self.batch_size = batch_size        
@@ -186,6 +305,35 @@ class SModelBuffer:
         self.initialized = False       
         self.finish = False 
         self.frame_stack_n = 1
+        if (
+            type(model_input_seal_schema_version) is not int
+            or model_input_seal_schema_version not in (0, 1)
+        ):
+            raise ValueError(
+                "model_input_seal_schema_version must be exact integer 0 or 1"
+            )
+        self.model_input_seal_schema_version = (
+            model_input_seal_schema_version
+        )
+        if self.model_input_seal_schema_version == 1:
+            if type(max_rank) is not int or max_rank <= 0:
+                raise ValueError(
+                    "schema-7 ModelBuffer max_rank must be a positive integer"
+                )
+            if type(total_steps) is not int or total_steps <= 0:
+                raise ValueError(
+                    "schema-7 ModelBuffer total_steps must be a positive integer"
+                )
+            self.total_steps = total_steps
+            self.voc_model_input_sealed = False
+            self.voc_model_input_seal_count = 0
+            self.voc_model_terminal_processed_n = None
+            self.voc_model_input_late_write_count = 0
+            self.voc_model_input_abort_count = 0
+            self.voc_model_input_aborted = False
+            self._voc_model_input_sealed_ranks = set()
+            self._voc_model_update_claim_token = None
+            self._voc_model_update_claim_next_token = 1
 
     def init_buffer(self, data):
         self.keys = list(data.keys()) # all inputs are of shape (B, *)    
@@ -201,6 +349,20 @@ class SModelBuffer:
 
     def write(self, data, rank, idx=None, priority=None):
         # data is a dict of numpy array, each with shape (batch_size, *).          
+        if self.model_input_seal_schema_version == 1:
+            if type(rank) is not int or not 0 <= rank < self.max_rank:
+                raise ValueError(
+                    "schema-7 ModelBuffer write rank must be an in-range integer"
+                )
+            if (
+                self.finish
+                or self.voc_model_input_aborted
+                or rank in self._voc_model_input_sealed_ranks
+            ):
+                self.voc_model_input_late_write_count += 1
+                raise RuntimeError(
+                    "schema-7 ModelBuffer rejects writes after producer closure"
+                )
         if idx is None:
             b = self.batch_size      
         else:
@@ -237,13 +399,20 @@ class SModelBuffer:
             self.priority[self.idx[b_idx], b_idx] = max(self.priority.max(), 1e-8)
         self.filled_t[b_idx] = np.minimum(self.filled_t[b_idx]+1, self.T)
         self.read_time[self.idx[b_idx], b_idx] = 0
-        self.idx[b_idx] = (self.idx[b_idx] + 1) % self.T            
+        self.idx[b_idx] = (self.idx[b_idx] + 1) % self.T
+        if self.model_input_seal_schema_version == 1:
+            return {"rank": rank, "processed_n": int(self.processed_n)}
 
     def read(self, t, b, beta=1., add_t=0):
         # Sample a trajectory with shape (t, b, *)
         # items in add_keys will have shape (t+add_t, b)        
         add_keys = ["baseline", "reward", "done", "truncated_done", "action_prob", "action"] 
 
+        if (
+            self.model_input_seal_schema_version == 1
+            and self.voc_model_input_aborted
+        ):
+            return MODEL_BUFFER_ABORT
         if self.finish: return "FINISH"
         if not self.initialized: return None
         priority_ = self.priority.copy()
@@ -348,12 +517,22 @@ class SModelBuffer:
             data["real_state"] = stack_frame(frame, self.frame_stack_n, done=stack_done)
         avg_replay_ratio = np.nanmean(self.read_time)
         
-        return {"data": data, 
-                "replay_ratio": avg_replay_ratio, 
-                "processed_n": self.processed_n,
-                "weights": weights,
-                "idx": idx,
-                }
+        result = {"data": data,
+                  "replay_ratio": avg_replay_ratio,
+                  "processed_n": self.processed_n,
+                  "weights": weights,
+                  "idx": idx,
+                  }
+        if self.model_input_seal_schema_version == 1:
+            result["replay_ratio"] = float(result["replay_ratio"])
+            result.update({
+                "voc_model_input_seal_schema_version": 1,
+                "voc_model_input_sealed": self.voc_model_input_sealed,
+                "voc_model_terminal_processed_n": (
+                    self.voc_model_terminal_processed_n
+                ),
+            })
+        return result
     
     def check_avail(self, t, b):
         if not self.initialized: return False
@@ -363,18 +542,147 @@ class SModelBuffer:
         return sample_n >= b
     
     def get_status(self):
-        return {"processed_n": self.processed_n,
-                "warm_up_n": self.warm_up_n,
-                "replay_ratio": np.nanmean(self.read_time) if self.initialized else 0,
-                "running": self.processed_n >= self.warm_up_n,
-                "finish": self.finish,                
-                 }    
+        status = {"processed_n": self.processed_n,
+                  "warm_up_n": self.warm_up_n,
+                  "replay_ratio": np.nanmean(self.read_time) if self.initialized else 0,
+                  "running": self.processed_n >= self.warm_up_n,
+                  "finish": self.finish,
+                   }
+        if self.model_input_seal_schema_version == 1:
+            status["replay_ratio"] = float(status["replay_ratio"])
+            status.update({
+                "voc_model_input_seal_schema_version": 1,
+                "voc_model_input_sealed": self.voc_model_input_sealed,
+                "voc_model_input_seal_count": self.voc_model_input_seal_count,
+                "voc_model_terminal_processed_n": (
+                    self.voc_model_terminal_processed_n
+                ),
+                "voc_model_input_late_write_count": (
+                    self.voc_model_input_late_write_count
+                ),
+                "voc_model_input_abort_count": self.voc_model_input_abort_count,
+                "voc_model_input_aborted": self.voc_model_input_aborted,
+                "voc_model_update_claim_active": (
+                    self._voc_model_update_claim_token is not None
+                ),
+            })
+        return status
     
     def set_frame_stack_n(self, frame_stack_n):
         self.frame_stack_n = frame_stack_n
     
     def set_finish(self):
+        if self.model_input_seal_schema_version == 1:
+            raise RuntimeError(
+                "schema-7 ModelBuffer success requires complete_success"
+            )
         self.finish = True    
+
+    def seal_input(self, rank, expected_min):
+        if self.model_input_seal_schema_version != 1:
+            raise RuntimeError("model input sealing is inactive")
+        if type(rank) is not int or not 0 <= rank < self.max_rank:
+            raise ValueError(
+                "schema-7 ModelBuffer seal rank must be an in-range integer"
+            )
+        if type(expected_min) is not int or expected_min != self.total_steps:
+            raise ValueError(
+                "schema-7 ModelBuffer seal expected_min must equal total_steps"
+            )
+        if self.finish or self.voc_model_input_aborted:
+            raise RuntimeError("cannot seal a completed or aborted ModelBuffer")
+        if rank in self._voc_model_input_sealed_ranks:
+            raise RuntimeError("schema-7 ModelBuffer producer sealed twice")
+        self._voc_model_input_sealed_ranks.add(rank)
+        self.voc_model_input_seal_count = len(
+            self._voc_model_input_sealed_ranks
+        )
+        if self.voc_model_input_seal_count == self.max_rank:
+            if self.processed_n < self.total_steps:
+                raise RuntimeError(
+                    "schema-7 ModelBuffer input sealed before total_steps"
+                )
+            self.voc_model_input_sealed = True
+            self.voc_model_terminal_processed_n = int(self.processed_n)
+        return self.get_status()
+
+    def begin_model_update(self, expected_processed_n):
+        if self.model_input_seal_schema_version != 1:
+            raise RuntimeError("model update claims are inactive")
+        if (
+            type(expected_processed_n) is not int
+            or expected_processed_n < 0
+            or expected_processed_n > self.processed_n
+        ):
+            raise ValueError(
+                "schema-7 model update claim has invalid replay progress"
+            )
+        if self._voc_model_update_claim_token is not None:
+            raise RuntimeError("schema-7 ModelBuffer already has an active update claim")
+        if self.voc_model_input_sealed or self.voc_model_input_aborted or self.finish:
+            return {
+                "allowed": False,
+                "token": None,
+                "status": self.get_status(),
+            }
+        token = self._voc_model_update_claim_next_token
+        self._voc_model_update_claim_next_token += 1
+        self._voc_model_update_claim_token = token
+        return {
+            "allowed": True,
+            "token": token,
+            "status": self.get_status(),
+        }
+
+    def end_model_update(self, token):
+        if self.model_input_seal_schema_version != 1:
+            raise RuntimeError("model update claims are inactive")
+        if type(token) is not int or token <= 0:
+            raise ValueError("schema-7 model update claim token must be positive")
+        if self._voc_model_update_claim_token != token:
+            raise RuntimeError("schema-7 model update claim token is stale")
+        self._voc_model_update_claim_token = None
+        return {"token": token, "status": self.get_status()}
+
+    def abort_input(self):
+        if self.model_input_seal_schema_version != 1:
+            raise RuntimeError("model input abort is inactive")
+        if self.finish:
+            raise RuntimeError("cannot abort a successfully completed ModelBuffer")
+        if not self.voc_model_input_aborted:
+            self.voc_model_input_aborted = True
+            self.voc_model_input_abort_count = 1
+        self._voc_model_update_claim_token = None
+        return self.get_status()
+
+    def complete_success(self, terminal_processed_n):
+        if self.model_input_seal_schema_version != 1:
+            raise RuntimeError("schema-7 ModelBuffer success is inactive")
+        if (
+            type(terminal_processed_n) is not int
+            or terminal_processed_n < self.total_steps
+        ):
+            raise ValueError(
+                "terminal_processed_n must be a terminal non-bool integer"
+            )
+        if self.finish:
+            raise RuntimeError("schema-7 ModelBuffer completed twice")
+        if self.voc_model_input_aborted:
+            raise RuntimeError("aborted ModelBuffer cannot complete successfully")
+        if (
+            not self.voc_model_input_sealed
+            or self.voc_model_input_seal_count != self.max_rank
+            or self.voc_model_terminal_processed_n != terminal_processed_n
+            or self.processed_n != terminal_processed_n
+            or self.voc_model_input_late_write_count != 0
+            or self.voc_model_input_abort_count != 0
+            or self._voc_model_update_claim_token is not None
+        ):
+            raise RuntimeError(
+                "schema-7 ModelBuffer success disagrees with sealed input"
+            )
+        self.finish = True
+        return self.get_status()
 
     def update_priority(self, idx, priority):
         """Update priority in the buffer"""

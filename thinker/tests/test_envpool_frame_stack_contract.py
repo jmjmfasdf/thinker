@@ -8,7 +8,10 @@ import pytest
 from thinker import util
 from thinker.actor_net import ActorBaseNet
 from thinker.gym_add.wrapper import EnvPoolWrap, create_envpool
-from thinker.main import _validate_online_env_contract
+from thinker.main import (
+    _runtime_primary_action_meanings,
+    _validate_online_env_contract,
+)
 from thinker.model_net import ModelNet
 
 
@@ -37,6 +40,14 @@ def test_envpool_preserves_atari_frame_stack_metadata(name, action_n):
         assert isinstance(env.single_action_space, spaces.Discrete)
         assert env.single_action_space.n == action_n
         assert env.frame_stack_n == 4
+        meanings = _runtime_primary_action_meanings(
+            env,
+            env.single_action_space,
+            name=name,
+            envpool=True,
+        )
+        assert len(meanings) == action_n
+        assert meanings.count("NOOP") == 1
         assert _validate_online_env_contract(
             env.single_observation_space,
             env.single_action_space,
@@ -46,6 +57,34 @@ def test_envpool_preserves_atari_frame_stack_metadata(name, action_n):
         ) == 3
     finally:
         env.close()
+
+
+def test_vector_runtime_action_tables_must_agree_and_receive_no_env_kwargs():
+    class _ActionTableVector:
+        def __init__(self, tables):
+            self.tables = tables
+            self.calls = []
+
+        def call(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return self.tables
+
+    vector = _ActionTableVector(
+        [("FIRE", "NOOP", "LEFT"), ("FIRE", "NOOP", "LEFT")]
+    )
+    meanings = _runtime_primary_action_meanings(
+        vector, spaces.Discrete(3), envpool=False
+    )
+    assert meanings == ("FIRE", "NOOP", "LEFT")
+    assert vector.calls == [(("get_action_meanings",), {})]
+
+    disagreeing = _ActionTableVector(
+        [("FIRE", "NOOP"), ("NOOP", "FIRE")]
+    )
+    with pytest.raises(ValueError, match="disagree"):
+        _runtime_primary_action_meanings(
+            disagreeing, spaces.Discrete(2), envpool=False
+        )
 
 
 def test_envpool_wrapper_requires_explicit_valid_stack_metadata():

@@ -251,6 +251,181 @@ def detached_imitation_logit_metrics(
         }
 
 
+def resolve_noop_action_index(
+    action_meanings: Optional[Sequence[str]], num_actions: int
+) -> Optional[int]:
+    """Resolve a unique runtime-declared NOOP action without assuming index 0.
+
+    ``None`` means that the runtime did not declare action semantics.  A
+    declared action table is validated exactly against the live policy width;
+    malformed or ambiguous metadata must not silently produce a NOOP metric.
+    An action table with no ``NOOP`` entry is valid and represents an
+    environment with no supported NOOP-frequency diagnostic.
+    """
+
+    if isinstance(num_actions, (bool, np.bool_)) or not isinstance(
+        num_actions, (int, np.integer)
+    ):
+        raise TypeError("num_actions must be an integer")
+    num_actions = int(num_actions)
+    if num_actions <= 0:
+        raise ValueError("num_actions must be positive")
+    if action_meanings is None:
+        return None
+    if isinstance(action_meanings, (str, bytes)):
+        raise TypeError("action_meanings must be a sequence of names")
+    meanings = tuple(action_meanings)
+    if len(meanings) != num_actions:
+        raise ValueError(
+            "runtime action meanings must match the policy width: "
+            f"{len(meanings)} != {num_actions}"
+        )
+    if any(not isinstance(name, str) or not name.strip() for name in meanings):
+        raise ValueError("runtime action meanings must be non-empty strings")
+    matches = [
+        index
+        for index, name in enumerate(meanings)
+        if name.strip().upper() == "NOOP"
+    ]
+    if len(matches) > 1:
+        raise ValueError("runtime action meanings contain multiple NOOP actions")
+    return matches[0] if matches else None
+
+
+def detached_behavioral_action_metrics(
+    targets: torch.Tensor,
+    argmax_actions: torch.Tensor,
+    sampled_actions: torch.Tensor,
+    *,
+    num_actions: int,
+    noop_action_index: Optional[int],
+) -> Dict[str, float]:
+    """Count-based BC accuracy and NOOP diagnostics for scored human rows.
+
+    Every ratio is accompanied by its numerator and denominator so multiple
+    learner rows can be aggregated without averaging batch means.  Unsupported
+    or empty NOOP diagnostics deliberately return finite zero ratios with a
+    zero ``noop_support_count``.
+    """
+
+    if isinstance(num_actions, (bool, np.bool_)) or not isinstance(
+        num_actions, (int, np.integer)
+    ):
+        raise TypeError("num_actions must be an integer")
+    num_actions = int(num_actions)
+    if num_actions <= 0:
+        raise ValueError("num_actions must be positive")
+    if noop_action_index is not None:
+        if isinstance(noop_action_index, (bool, np.bool_)) or not isinstance(
+            noop_action_index, (int, np.integer)
+        ):
+            raise TypeError("noop_action_index must be an integer or None")
+        noop_action_index = int(noop_action_index)
+        if noop_action_index < 0 or noop_action_index >= num_actions:
+            raise ValueError(
+                "noop_action_index lies outside the runtime action space"
+            )
+
+    with torch.no_grad():
+        vectors = []
+        for name, value in (
+            ("targets", targets),
+            ("argmax_actions", argmax_actions),
+            ("sampled_actions", sampled_actions),
+        ):
+            vector = torch.as_tensor(value).detach().reshape(-1).to("cpu")
+            if vector.dtype == torch.bool or torch.is_floating_point(vector):
+                raise TypeError(f"{name} must use an integer dtype")
+            vector = vector.long()
+            if torch.any(vector < 0) or torch.any(vector >= num_actions):
+                raise ValueError(
+                    f"{name} contains an action outside [0,{num_actions - 1}]"
+                )
+            vectors.append(vector)
+        scored_targets, scored_argmax, scored_samples = vectors
+        if not (
+            scored_targets.numel()
+            == scored_argmax.numel()
+            == scored_samples.numel()
+        ):
+            raise ValueError(
+                "targets, argmax_actions and sampled_actions must have the "
+                "same number of scored rows"
+            )
+
+        support_count = int(scored_targets.numel())
+        argmax_correct_count = int(
+            torch.count_nonzero(scored_argmax == scored_targets).item()
+        )
+        sampled_correct_count = int(
+            torch.count_nonzero(scored_samples == scored_targets).item()
+        )
+
+        def finite_rate(numerator: int, denominator: int) -> float:
+            return float(numerator) / denominator if denominator else 0.0
+
+        noop_supported = noop_action_index is not None
+        noop_support_count = support_count if noop_supported else 0
+        if noop_supported:
+            target_noop_count = int(
+                torch.count_nonzero(scored_targets == noop_action_index).item()
+            )
+            argmax_noop_count = int(
+                torch.count_nonzero(scored_argmax == noop_action_index).item()
+            )
+            sampled_noop_count = int(
+                torch.count_nonzero(scored_samples == noop_action_index).item()
+            )
+        else:
+            target_noop_count = 0
+            argmax_noop_count = 0
+            sampled_noop_count = 0
+
+    return {
+        "behavioral_argmax_accuracy": finite_rate(
+            argmax_correct_count, support_count
+        ),
+        "behavioral_sampled_accuracy": finite_rate(
+            sampled_correct_count, support_count
+        ),
+        "behavioral_argmax_correct_count": float(argmax_correct_count),
+        "behavioral_sampled_correct_count": float(sampled_correct_count),
+        "behavioral_support_count": float(support_count),
+        "noop_action_index": float(
+            noop_action_index if noop_action_index is not None else -1
+        ),
+        "noop_supported": float(noop_supported),
+        "noop_support_count": float(noop_support_count),
+        "target_noop_count": float(target_noop_count),
+        "target_noop_frequency": finite_rate(
+            target_noop_count, noop_support_count
+        ),
+        "argmax_noop_count": float(argmax_noop_count),
+        "argmax_noop_frequency": finite_rate(
+            argmax_noop_count, noop_support_count
+        ),
+        "sampled_noop_count": float(sampled_noop_count),
+        "sampled_noop_frequency": finite_rate(
+            sampled_noop_count, noop_support_count
+        ),
+    }
+
+
+def empty_behavioral_action_metrics(
+    *, num_actions: int, noop_action_index: Optional[int]
+) -> Dict[str, float]:
+    """Return the finite zero-support form used on unscored learner rows."""
+
+    empty = torch.empty(0, dtype=torch.long)
+    return detached_behavioral_action_metrics(
+        empty,
+        empty,
+        empty,
+        num_actions=num_actions,
+        noop_action_index=noop_action_index,
+    )
+
+
 def scale_imitation_for_online_rows(
     mean_loss: torch.Tensor, real_policy_mask: torch.Tensor
 ) -> torch.Tensor:
@@ -388,17 +563,29 @@ class DynamicImitationResult:
     burnin_proposal: torch.Tensor
     burnin_executed: torch.Tensor
     augmented_steps: int
+    noop_action_index: Optional[int] = None
 
     def detached_metrics(self) -> Dict[str, float]:
         count = max(self.count, 1)
+        action_metrics = detached_behavioral_action_metrics(
+            self.targets,
+            self.argmax,
+            self.proposal,
+            num_actions=int(self.logits.shape[-1]),
+            noop_action_index=self.noop_action_index,
+        )
         metrics = {
             "loss": float(self.loss.detach().cpu()),
             "nll": float(self.nll_sum.detach().cpu()) / count,
             "normalized_ce": float(self.normalized_ce.detach().cpu()),
             "margin_loss": float(self.margin_loss.detach().cpu()),
             "pvp_loss": float(self.pvp_loss.detach().cpu()),
-            "accuracy": self.accuracy,
-            "sampled_accuracy": self.sampled_accuracy,
+            # Keep the historical names while defining them explicitly as
+            # scored-human-target argmax/sample accuracies.
+            "accuracy": action_metrics["behavioral_argmax_accuracy"],
+            "sampled_accuracy": action_metrics[
+                "behavioral_sampled_accuracy"
+            ],
             "root_carried_rate": float(
                 self.root_carried.float().mean().detach().cpu()
             ),
@@ -417,6 +604,7 @@ class DynamicImitationResult:
         metrics.update(
             detached_imitation_logit_metrics(self.logits, self.targets)
         )
+        metrics.update(action_metrics)
         return metrics
 
 
@@ -452,6 +640,7 @@ class DynamicImitationRunner:
         model_net: torch.nn.Module,
         flags: Any,
         device: Optional[torch.device] = None,
+        noop_action_index: Optional[int] = None,
     ):
         self.actor_net = actor_net
         self.model_net = model_net
@@ -468,6 +657,13 @@ class DynamicImitationRunner:
         self._planner_key = None
         self._validate_flags()
         self._validate_component_contracts()
+        self.noop_action_index = noop_action_index
+        if self.noop_action_index is not None:
+            self.noop_action_index = int(self.noop_action_index)
+            if not 0 <= self.noop_action_index < int(self.actor_net.num_actions):
+                raise ValueError(
+                    "noop_action_index lies outside the Actor action space"
+                )
         self.model_net.eval()
         for parameter in self.model_net.parameters():
             parameter.requires_grad_(False)
@@ -995,6 +1191,7 @@ class DynamicImitationRunner:
             burnin_proposal=proposals_all[:, 0].detach(),
             burnin_executed=actions[:, 0].detach(),
             augmented_steps=augmented_steps,
+            noop_action_index=self.noop_action_index,
         )
 
     def close(self) -> None:
