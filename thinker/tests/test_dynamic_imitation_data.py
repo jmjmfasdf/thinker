@@ -91,6 +91,166 @@ def test_session_split_discovery_and_selected_action_prior(tmp_path):
     np.testing.assert_allclose(train.action_distribution, expected / expected.sum())
 
 
+def test_source_paths_none_preserves_default_discovery_and_batch_bytes(tmp_path):
+    _archive(_modern_path(tmp_path, 1, block=2), length=24, times=False)
+    _archive(_modern_path(tmp_path, 1, block=1), length=24, times=False)
+    kwargs = dict(
+        base_path=tmp_path,
+        subjects=(1,),
+        sessions=(1,),
+        split=None,
+        game_id=0,
+        num_actions=9,
+        frame_stack_n=1,
+        target_size=(6, 7),
+        seed=31,
+    )
+
+    omitted = FrameStackedBehavioralDataLoader(**kwargs)
+    explicit_none = FrameStackedBehavioralDataLoader(
+        **kwargs,
+        source_paths=None,
+    )
+
+    assert omitted.data_files == explicit_none.data_files
+    assert omitted.file_records == explicit_none.file_records
+    np.testing.assert_array_equal(
+        omitted.action_distribution, explicit_none.action_distribution
+    )
+    omitted_batch = omitted.get_sequence_batch(4, replace=False)
+    none_batch = explicit_none.get_sequence_batch(4, replace=False)
+    assert omitted_batch.keys() == none_batch.keys()
+    for key in omitted_batch:
+        np.testing.assert_array_equal(omitted_batch[key], none_batch[key])
+
+
+def test_source_paths_exactly_select_archives_before_indexing(tmp_path):
+    selected = _archive(
+        _modern_path(tmp_path, 1, block=1), length=24, times=False
+    )
+    invalid = _modern_path(tmp_path, 1, block=2)
+    invalid.parent.mkdir(parents=True, exist_ok=True)
+    invalid.write_bytes(b"not an npz archive")
+
+    loader = FrameStackedBehavioralDataLoader(
+        tmp_path,
+        subjects=(1,),
+        sessions=(1,),
+        split=None,
+        game_id=0,
+        num_actions=9,
+        source_paths=[selected.relative_to(tmp_path)],
+    )
+
+    assert loader.data_files == [str(selected.resolve())]
+    assert {record.path for record in loader.file_records} == {selected.resolve()}
+    with pytest.raises(ValueError, match="Invalid behavioral archive"):
+        FrameStackedBehavioralDataLoader(
+            tmp_path,
+            subjects=(1,),
+            sessions=(1,),
+            split=None,
+            game_id=0,
+            num_actions=9,
+        )
+
+
+def test_source_paths_reject_invalid_or_duplicate_paths(tmp_path):
+    root = tmp_path / "root"
+    selected = _archive(_modern_path(root, 1), length=24, times=False)
+    outside = _archive(
+        _modern_path(tmp_path / "outside", 1), length=24, times=False
+    )
+    wrong_suffix = selected.with_suffix(".npy")
+    wrong_suffix.write_bytes(b"not relevant")
+    directory = selected.parent / "directory.npz"
+    directory.mkdir()
+
+    common = dict(
+        base_path=root,
+        subjects=(1,),
+        sessions=(1,),
+        split=None,
+        game_id=0,
+        num_actions=9,
+    )
+    with pytest.raises(ValueError, match="duplicate archive"):
+        FrameStackedBehavioralDataLoader(
+            **common, source_paths=[selected, selected]
+        )
+    with pytest.raises(ValueError, match="outside base_path"):
+        FrameStackedBehavioralDataLoader(**common, source_paths=[outside])
+    with pytest.raises(ValueError, match="regular file"):
+        FrameStackedBehavioralDataLoader(**common, source_paths=[directory])
+    with pytest.raises(ValueError, match=r"\.npz suffix"):
+        FrameStackedBehavioralDataLoader(**common, source_paths=[wrong_suffix])
+    with pytest.raises(ValueError, match="does not exist"):
+        FrameStackedBehavioralDataLoader(
+            **common, source_paths=[root / "missing.npz"]
+        )
+    with pytest.raises(TypeError, match="sequence of paths"):
+        FrameStackedBehavioralDataLoader(**common, source_paths=selected)
+    with pytest.raises(ValueError, match="cannot be empty"):
+        FrameStackedBehavioralDataLoader(**common, source_paths=[])
+
+
+def test_source_paths_fail_closed_on_entity_filter_mismatch(tmp_path):
+    root = tmp_path / "root"
+    subject_two = _archive(
+        root / "sub-002" / "ses-01" / "sub002-ses01-block1-game0.npz",
+        length=24,
+        times=False,
+    )
+    session_four = _archive(_modern_path(root, 4), length=24, times=False)
+    game_one = _archive(
+        _modern_path(root, 1, block=2, game=1),
+        length=24,
+        times=False,
+        game_actions=6,
+    )
+    missing_entity = _archive(
+        root / "unlabelled" / "archive.npz", length=24, times=False
+    )
+
+    common = dict(base_path=root, num_actions=9)
+    with pytest.raises(ValueError, match="subject 2 does not match"):
+        FrameStackedBehavioralDataLoader(
+            **common,
+            subjects=(1,),
+            sessions=(1,),
+            split=None,
+            game_id=0,
+            source_paths=[subject_two],
+        )
+    with pytest.raises(ValueError, match="session 4 does not match"):
+        FrameStackedBehavioralDataLoader(
+            **common,
+            subjects=(1,),
+            sessions=(1,),
+            split=None,
+            game_id=0,
+            source_paths=[session_four],
+        )
+    with pytest.raises(ValueError, match="game 1 does not match"):
+        FrameStackedBehavioralDataLoader(
+            **common,
+            subjects=(1,),
+            sessions=(1,),
+            split=None,
+            game_id=0,
+            source_paths=[game_one],
+        )
+    with pytest.raises(ValueError, match="missing a subject, session, or game"):
+        FrameStackedBehavioralDataLoader(
+            **common,
+            subjects=(1,),
+            sessions=(1,),
+            split=None,
+            game_id=0,
+            source_paths=[missing_entity],
+        )
+
+
 def test_generic_five_action_archive_uses_runtime_action_count(tmp_path):
     game_id = 17
     path = _modern_path(tmp_path, 1, game=game_id)

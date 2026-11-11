@@ -3327,6 +3327,51 @@ class SActorLearner:
         if self.voc_gate_exact_projection:
             self._assert_voc_gate_exact_projection_invariant()
         self._restore_training_rng_state()
+        if getattr(self.flags, "voc_gru_connected", False):
+            if not self.voc_gate_exact_projection:
+                raise ValueError("VOC GRU connection requires the projected-gate lineage")
+            from thinker.voc_gru_gradient import SelectiveVOCGradient
+            self._voc_gru_adapter = SelectiveVOCGradient(self, True)
+            self._voc_campaign_bc_attempted = 0
+            self._voc_campaign_bc_committed = 0
+            self._voc_campaign_actor_updates = 0
+            self._voc_campaign_start_step = self.real_step
+            self._voc_campaign_start_time = time.monotonic()
+            original_log = self.plogger.log
+            def log_with_voc_gradient(stats, *args, **kwargs):
+                stats = dict(stats)
+                for key, value in self._voc_gru_adapter.last_metrics.items():
+                    stats["gradient/" + key] = value
+                if self.device.type == "cuda":
+                    stats["resources/peak_allocated_gib"] = torch.cuda.max_memory_allocated() / 2**30
+                    stats["resources/peak_reserved_gib"] = torch.cuda.max_memory_reserved() / 2**30
+                if getattr(self.flags, "voc_campaign_metrics", False):
+                    count = int(stats.get("actor/icopro_count", 0))
+                    committed = int(stats.get("actor/optimizer_stepped", 0))
+                    self._voc_campaign_bc_attempted += count
+                    self._voc_campaign_bc_committed += count * committed
+                    self._voc_campaign_actor_updates += committed
+                    stats.update({
+                        "training/bc_targets_attempted": self._voc_campaign_bc_attempted,
+                        "training/bc_targets_committed": self._voc_campaign_bc_committed,
+                        "training/actor_updates_committed": self._voc_campaign_actor_updates,
+                        "training/actor_consumed_env_steps": self.real_step,
+                        "training/real_actions_per_second": (
+                            (self.real_step-self._voc_campaign_start_step) /
+                            max(time.monotonic()-self._voc_campaign_start_time, 1e-6)),
+                    })
+                    import json
+                    path = os.path.join(self.flags.ckpdir, "collector_metrics.json")
+                    if os.path.exists(path):
+                        with open(path) as stream:
+                            collector = json.load(stream)
+                        for key, value in collector.items():
+                            stats["collector/"+key] = value
+                        stats["collector/actor_backlog_env_steps"] = (
+                            collector["physical_env_steps"] - self.real_step)
+                        stats["max_episode_return"] = collector["max_completed_episode_return"]
+                return original_log(stats, *args, **kwargs)
+            self.plogger.log = log_with_voc_gradient
 
     @staticmethod
     def _find_voc_head_modules(actor_net):
@@ -4069,6 +4114,9 @@ class SActorLearner:
 
     def _refresh_imitation_model(self, require_weights=False):
         weights = None
+        local_model = getattr(self, "imitation_model_source", None)
+        if local_model is not None:
+            weights = local_model.state_dict()
         if self.model_param_buffer is not None:
             deadline = time.monotonic() + 120.0
             while weights is None:
@@ -4820,20 +4868,32 @@ class SActorLearner:
         batch = self._sample_imitation_batch()
         if batch is None:
             raise RuntimeError("behavioral loader returned no valid sequence batch")
-        result = self.bc_runner.rollout(
-            batch,
-            tree_carry=bool(getattr(self.flags, "tree_carry", True)),
-            training=True,
-        )
+        from thinker.numeric_diagnostics import ImitationNumericTrace
+        with ImitationNumericTrace(self, batch) as numeric_trace:
+            result = self.bc_runner.rollout(
+                batch,
+                tree_carry=bool(getattr(self.flags, "tree_carry", True)),
+                training=True,
+            )
+            numeric_trace.finish(result)
         for name in (
             "loss",
             "normalized_ce",
-            "margin_loss",
-            "pvp_loss",
             "nll_sum",
             "logits",
         ):
             _require_finite_tensor(f"dynamic imitation {name}", getattr(result, name))
+        # Zero-weight auxiliary losses are logged diagnostics only.  They
+        # must neither join the objective nor control whether an update runs.
+        if float(getattr(self.flags, "icopro_coef", 1.0)) != 0.0:
+            for name, flag in (
+                ("margin_loss", "icopro_margin_coef"),
+                ("pvp_loss", "icopro_pvp_coef"),
+            ):
+                if float(getattr(self.flags, flag, 0.0)) != 0.0:
+                    _require_finite_tensor(
+                        f"dynamic imitation {name}", getattr(result, name)
+                    )
         self._imitation_pending_update = True
         return result
 
@@ -5111,7 +5171,8 @@ class SActorLearner:
     def _step_actor_optimizer(self, optimize_params, T, B):
         """Apply one actor optimizer step, recovering isolated AMP overflows."""
 
-        raw_total_norm = util.compute_grad_norm(optimize_params)
+        from thinker.numeric_stability import stable_grad_norm, stable_clip_grad_norm_
+        raw_total_norm = stable_grad_norm(optimize_params)
         raw_total_norm = float(raw_total_norm.detach().cpu())
         nonfinite_names = ()
         if not np.isfinite(raw_total_norm):
@@ -5136,7 +5197,7 @@ class SActorLearner:
                     "gradient element is finite"
                 )
         elif self.flags.actor_grad_norm_clipping > 0:
-            torch.nn.utils.clip_grad_norm_(
+            stable_clip_grad_norm_(
                 optimize_params, self.flags.actor_grad_norm_clipping * T * B
             )
 
@@ -5462,14 +5523,26 @@ class SActorLearner:
         self._last_voc_gate_projection_post_error_norm = 0.0
 
         # compute losses
-        out = self.compute_losses(
-            train_actor_out, initial_actor_state, first_iter, last_iter
-        )
+        try:
+            out = self.compute_losses(
+                train_actor_out, initial_actor_state, first_iter, last_iter
+            )
+        except (FloatingPointError, ValueError) as exc:
+            if getattr(self, "imitation_enabled", False):
+                from thinker.numeric_diagnostics import save_actor_failure
+                save_actor_failure(self, data, exc)
+            raise
         losses, train_actor_out = out
         total_loss = losses["total_loss"]
         voc_total_loss = losses.pop("_voc_total_loss", None)
         voc_gate_total_loss = losses.pop("_voc_gate_total_loss", None)
-        _require_finite_tensor("actor total loss", total_loss)
+        try:
+            _require_finite_tensor("actor total loss", total_loss)
+        except FloatingPointError as exc:
+            if getattr(self, "imitation_enabled", False):
+                from thinker.numeric_diagnostics import save_actor_failure
+                save_actor_failure(self, data, exc, losses=losses)
+            raise
         _require_finite_tensor("VoC total loss", voc_total_loss)
         _require_finite_tensor(
             "dedicated VoC gate total loss", voc_gate_total_loss
@@ -6719,9 +6792,21 @@ class SActorLearner:
                 positive_count = max(int(soft_positive.sum().item()), 1)
                 negative_count = max(int(soft_negative.sum().item()), 1)
                 soft_valid_count = max(int(soft.valid.sum().item()), 1)
+                # For soft targets BCE includes teacher entropy.  Log its
+                # excess separately to measure fidelity, without changing
+                # either the gate objective or its confidence weights.
+                teacher_p = soft.teacher_continue_probability.detach().double()
+                teacher_entropy = -(
+                    torch.xlogy(teacher_p, teacher_p)
+                    + torch.xlogy(1.0 - teacher_p, 1.0 - teacher_p)
+                )
                 losses.update({
                     "voc_gate_bce_loss": soft.loss.detach(),
                     "voc_gate_bce_unweighted": soft_mean(soft.bce),
+                    "voc_gate_teacher_entropy": soft_mean(teacher_entropy),
+                    "voc_gate_teacher_student_kl": soft_mean(
+                        (soft.bce.detach().double() - teacher_entropy).clamp_min(0.0)
+                    ),
                     "voc_gate_student_continue_probability": soft_mean(
                         soft.student_continue_probability
                     ),
@@ -7067,6 +7152,20 @@ class SActorLearner:
                     "icopro_behavioral_support_count"
                 ]
             imitation_result = self._maybe_compute_imitation()
+            numeric_maxima = (
+                getattr(self, "_last_bc_numeric_maxima", {})
+                if imitation_result is not None else {}
+            )
+            for label, module in (
+                ("sr_dynamics", "sr_net.RNN"),
+                ("vp_dynamics", "vp_net.RNN"),
+                ("h_encoder", "actor.h_encoder"),
+                ("all_phase_logits", "actor.logits"),
+            ):
+                losses[f"icopro_numeric_{label}_absmax"] = torch.tensor(
+                    numeric_maxima.get(module, 0.), device=total_loss.device,
+                    dtype=torch.float64,
+                )
             if imitation_result is not None:
                 # The online actor objective is represented as a sum.  Scale
                 # the mean behavioral objective by the number of online real
@@ -7743,6 +7842,10 @@ class SActorLearner:
                     self.voc_scheduler.state_dict()
                     if self.voc_scheduler is not None else None
                 ),
+                "voc_lr_last_successful_real_step": (
+                    int(self.voc_scheduler.last_epoch)
+                    if self.voc_scheduler is not None else 0
+                ),
                 "voc_grad_scaler_state_dict": (
                     self.voc_scaler.state_dict()
                     if self.voc_scaler is not None else None
@@ -7756,6 +7859,10 @@ class SActorLearner:
                 "voc_gate_scheduler_state_dict": (
                     self.voc_gate_scheduler.state_dict()
                     if self.voc_gate_scheduler is not None else None
+                ),
+                "voc_gate_lr_last_successful_real_step": (
+                    int(self.voc_gate_scheduler.last_epoch)
+                    if self.voc_gate_scheduler is not None else 0
                 ),
                 "voc_gate_grad_scaler_state_dict": (
                     self.voc_gate_scaler.state_dict()

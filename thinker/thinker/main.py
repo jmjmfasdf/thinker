@@ -233,11 +233,16 @@ class Env(gym.Wrapper):
                  gpu=True,
                  load_net=True, 
                  timing=False,
+                 local_flags=None,
                  **kwargs):
         assert name is not None or env_fn is not None, \
             "need either env or env-making function"        
         
-        if ray_obj is None:
+        if local_flags is not None:
+            if ray_obj is not None or kwargs or local_flags.parallel:
+                raise ValueError("local_flags requires synchronous, fully resolved flags")
+            self.flags = local_flags
+        elif ray_obj is None:
             self.flags = util.create_flags(filename='default_thinker.yaml',
                               **kwargs)
             if self.flags.parallel:
@@ -929,6 +934,9 @@ class Env(gym.Wrapper):
         if self.frame_stack_n > 1:
             data["real_state"] = data["real_state"][:, -self.frame_ch:]
         idx = np.arange(self.env_n)[real_step_mask.detach().cpu().numpy()]
+        if not self.parallel:
+            self.model_buffer.write(data, rank=self.rank, idx=idx, priority=None)
+            return
         write_ref = self.model_buffer.write.remote(
             ray.put(data), rank=self.rank, idx=idx, priority=None
         )
@@ -956,8 +964,21 @@ class Env(gym.Wrapper):
         with torch.set_grad_enabled(True):
             beta = self.model_learner.compute_beta()
             while True:            
-                data = self.model_buffer.read(beta)            
-                self.model_learner.init_psteps(data)                  
+                data = self.model_buffer.read(
+                    self.model_learner.model_T,
+                    self.model_learner.model_B,
+                    beta,
+                    add_t=self.flags.model_return_n + 1,
+                )
+                # The synchronous buffer is newly constructed on resume.
+                # Its warm-up transitions are new interactions, unlike a
+                # restored parallel buffer's initial processed cursor.
+                cold_resume = (self.flags.ckp
+                               and not self.model_learner.start_training
+                               and data is not None)
+                self.model_learner.init_psteps(data)
+                if cold_resume:
+                    self.model_learner.last_psteps = 0
                 if data is None: 
                     self.model_learner.log_preload(self.model_buffer.get_status())
                     break
@@ -965,7 +986,11 @@ class Env(gym.Wrapper):
                 if (self.model_learner.step_per_transition() > 
                     self.flags.max_replay_ratio):
                     break   
-                self.model_learner.consume_data(data, model_buffer=self.model_buffer)
+                self.model_net.train(True)
+                try:
+                    self.model_learner.consume_data(data, model_buffer=self.model_buffer)
+                finally:
+                    self.model_net.train(False)
             if self.model_learner.real_step >= self.flags.total_steps:
                 self.model_buffer.set_finish()
         return self.model_buffer.get_status()

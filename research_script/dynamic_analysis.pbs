@@ -1,0 +1,50 @@
+#!/bin/bash
+#PBS -N dynamic-analysis
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=8:mem=24gb:host=bml2-slave5
+#PBS -l walltime=168:00:00
+#PBS -j oe
+
+set -euo pipefail
+umask 0022
+REPO=/home/jeongmin/thinker-dynamic-imitation
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+ARCHIVE=/home/jeongmin/dynamic-thinker-visual-behav-py310-zarr2.18.3-numcodecs0.13.1-20260903T004951Z-25d766c04fe7.tar.zst
+INDEX=${ANALYSIS_INDEX:?ANALYSIS_INDEX required}
+case "$INDEX" in
+  0) GAME=enduro ;;
+  1) GAME=pong ;;
+  *) exit 2 ;;
+esac
+OUT="$REPO/research_script/outputs"
+CAPTURE="$REPO/logs/visual_behav/full/${GAME}-sub-001-allsessions-step5000000-images-all-checkpoint"
+JOB_LOCAL=$(mktemp -d "${TMPDIR:-/tmp}/dynamic-analysis.${PBS_JOBID}.XXXXXX")
+ENV_DIR="$JOB_LOCAL/env"
+cleanup() { if [[ -d "$JOB_LOCAL" && "$JOB_LOCAL" == *dynamic-analysis.* ]]; then rm -rf -- "$JOB_LOCAL"; fi; }
+trap cleanup EXIT
+mkdir -p "$ENV_DIR"
+echo "job=$PBS_JOBID game=$GAME started=$(date -u +%FT%TZ) host=$(hostname)"
+printf '%s  %s\n' 25d766c04fe77564c4ff27ec2673e665f8e4d774e8b0bba572dbed8064b91bf7 "$ARCHIVE" | sha256sum -c -
+/home/jeongmin/miniconda3/bin/zstd -dc "$ARCHIVE" | tar -xf - -C "$ENV_DIR"
+CONTAINER=(/usr/local/bin/singularity exec --cleanenv
+  --bind "$REPO:$REPO:ro" --bind "$OUT:$OUT:rw" --bind "$JOB_LOCAL:$JOB_LOCAL:rw"
+  --env "PYTHONNOUSERSITE=1" --env "PYTHONDONTWRITEBYTECODE=1"
+  --env "CUDA_VISIBLE_DEVICES=" --env "MPLCONFIGDIR=$JOB_LOCAL/matplotlib"
+  --env "OMP_NUM_THREADS=2" --env "MKL_NUM_THREADS=2" --env "OPENBLAS_NUM_THREADS=2"
+  --env "NUMEXPR_NUM_THREADS=2" --env "PYTHONHASHSEED=0"
+  "$SIF")
+"${CONTAINER[@]}" "$ENV_DIR/bin/python" "$ENV_DIR/bin/conda-unpack"
+"${CONTAINER[@]}" "$ENV_DIR/bin/python" -c 'import numpy,pandas,scipy,sklearn,statsmodels,zarr,numcodecs; print("analysis-environment-ok",flush=True)'
+cd "$REPO"
+/usr/bin/time -v -o "$OUT/dynamic_jobs/${GAME}.cache.time.txt" \
+  "${CONTAINER[@]}" "$ENV_DIR/bin/python" -u "$REPO/research_script/00_cache.py" \
+  --subject 1 --game "$INDEX" --capture-dir "$CAPTURE" --cache-root "$OUT/00_dynamic_cache"
+for SCRIPT in 02_evaluation_revision_geometry 03_actor_integration_mechanisms 04_search_evidence_geometry_pathway_v2; do
+  echo "stage=$SCRIPT started=$(date -u +%FT%TZ)"
+  /usr/bin/time -v -o "$OUT/dynamic_jobs/${GAME}.${SCRIPT}.time.txt" \
+    "${CONTAINER[@]}" "$ENV_DIR/bin/python" -u "$REPO/research_script/${SCRIPT}.py" \
+    --subject 1 --game "$INDEX" --shared-cache-root "$OUT/00_dynamic_cache"
+done
+"${CONTAINER[@]}" "$ENV_DIR/bin/python" -u "$REPO/research_script/verify_dynamic_analysis.py" --game "$INDEX"
+echo "completed=$(date -u +%FT%TZ)"

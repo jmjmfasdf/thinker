@@ -1,0 +1,6 @@
+{
+  "version": "continuous-planning-v1.0",
+  "c_grid": [1.0],
+  "pca_components": 4,
+  "pca_fit_rows": 1000
+}

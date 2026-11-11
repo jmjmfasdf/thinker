@@ -48,6 +48,30 @@ class BaseNet(nn.Module):
         else:
             self.load_state_dict({k: v.to(device) for k, v in weights.items()})
 
+
+def use_dynamics_group_norm(module):
+    """Use per-sample normalization in a repeatedly queried dynamics net.
+
+    Shared BatchNorm running statistics mix rollout depths, although its
+    training forwards normalize each depth separately. GroupNorm has the
+    same train/eval computation and does not couple independent tree rows.
+    Affine parameters and convolution weights keep their shapes/values.
+    """
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.BatchNorm2d):
+            groups = math.gcd(32, child.num_features)
+            replacement = nn.GroupNorm(groups, child.num_features,
+                                       eps=child.eps, affine=child.affine)
+            if child.affine:
+                replacement = replacement.to(device=child.weight.device, dtype=child.weight.dtype)
+                with torch.no_grad():
+                    replacement.weight.copy_(child.weight)
+                    replacement.bias.copy_(child.bias)
+            replacement.train(child.training)
+            setattr(module, name, replacement)
+        else:
+            use_dynamics_group_norm(child)
+
 # Model Network
 
 class FrameEncoder(nn.Module):
@@ -613,6 +637,13 @@ class SRNet(nn.Module):
             disable_half_grad=True,
             disable_bn=self.flags.model_disable_bn,
         )
+        dynamics_norm = getattr(flags, "model_sr_dynamics_norm", "batch")
+        if dynamics_norm not in {"batch", "group"}:
+            raise ValueError("model_sr_dynamics_norm must be 'batch' or 'group'")
+        if dynamics_norm == "group":
+            if self.oned_input or self.flags.model_disable_bn:
+                raise ValueError("group SR dynamics requires image input and model_disable_bn=false")
+            use_dynamics_group_norm(self.RNN)
         self.out = OutputNet(
             action_space=self.action_space,
             input_shape=self.hidden_shape,

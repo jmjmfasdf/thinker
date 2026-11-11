@@ -1,0 +1,80 @@
+#!/bin/bash
+#PBS -N heldout-analysis
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=8:mem=24gb:host=bml2-slave5
+#PBS -l walltime=168:00:00
+#PBS -j oe
+
+set -euo pipefail
+umask 0022
+REPO=/home/jeongmin/thinker-dynamic-imitation
+SNAPSHOT=${ANALYSIS_SNAPSHOT:?required}
+OUT=${ANALYSIS_OUTPUT:?required}
+GAME=${ANALYSIS_GAME:?required}
+SUBJECT=${ANALYSIS_SUBJECT:?required; 0 denotes group}
+ONLY_04=${ANALYSIS_ONLY_04:-0}
+CACHE_ROOT=${ANALYSIS_CACHE_ROOT:-$OUT/00_dynamic_cache}
+case "$(hostname -s)" in
+  bml2-slave[5-8]) ;;
+  *) echo 'Refusing execution outside user-approved slave5-8'; exit 2 ;;
+esac
+case "$ONLY_04" in 0|1) ;; *) echo 'ANALYSIS_ONLY_04 must be 0 or 1'; exit 2 ;; esac
+ENV_DIR=/home/jeongmin/vbenv-25d766c04fe7
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+SUMS=/home/jeongmin/visual-behav-assets/shared-runtime-25d766c04fe7-core.sha256
+TAG=$(printf 'sub%03d_game%d' "$SUBJECT" "$GAME")
+if [[ "$SUBJECT" == 0 ]]; then TAG="group_game$GAME"; fi
+JOB_LOCAL=$(mktemp -d "/dev/shm/heldout-analysis.${PBS_JOBID}.XXXXXX")
+cleanup() { if [[ -d "$JOB_LOCAL" && "$JOB_LOCAL" == /dev/shm/heldout-analysis.* ]]; then rm -rf -- "$JOB_LOCAL"; fi; }
+trap cleanup EXIT
+exec > >(tee -a "$OUT/dynamic_jobs/${TAG}.${PBS_JOBID}.log") 2>&1
+echo "job=$PBS_JOBID tag=$TAG host=$(hostname) only_04=$ONLY_04 cache=$CACHE_ROOT started=$(date -u +%FT%TZ)"
+printf '%s  %s\n' d58b2635c170b87ed78f9710767e6ba3da1ef4ab14ada931677b64065e705975 "$SUMS" | sha256sum -c -
+(cd "$ENV_DIR" && sha256sum -c "$SUMS")
+(cd "$SNAPSHOT" && sha256sum -c SHA256SUMS)
+EXTRA_BINDS=()
+if [[ "$ONLY_04" == 1 ]]; then EXTRA_BINDS=(--bind "$CACHE_ROOT:$CACHE_ROOT:ro"); fi
+CONTAINER=(/usr/local/bin/singularity exec --cleanenv
+  --bind "$REPO:$REPO:ro" --bind "$OUT:$OUT:rw" --bind "$SNAPSHOT:$SNAPSHOT:ro"
+  "${EXTRA_BINDS[@]}"
+  --bind "$ENV_DIR:$ENV_DIR:ro" --bind "$JOB_LOCAL:$JOB_LOCAL:rw"
+  --env PYTHONNOUSERSITE=1 --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONHASHSEED=0
+  --env "LD_LIBRARY_PATH=$ENV_DIR/lib:$ENV_DIR/lib/python3.10/site-packages/torch/lib"
+  --env CUDA_VISIBLE_DEVICES= --env "TMPDIR=$JOB_LOCAL" --env "MPLCONFIGDIR=$JOB_LOCAL/matplotlib"
+  --env OMP_NUM_THREADS=2 --env MKL_NUM_THREADS=2 --env OPENBLAS_NUM_THREADS=2 --env NUMEXPR_NUM_THREADS=2
+  "$SIF" "$ENV_DIR/bin/python" -B -u)
+cd "$SNAPSHOT"
+"${CONTAINER[@]}" -c 'import numpy,pandas,scipy,sklearn,statsmodels,zarr,numcodecs; print("analysis-environment-ok",flush=True)'
+if [[ "$SUBJECT" != 0 ]]; then
+  INDEX="$REPO/logs/visual_behav/heldout_5m_20260921/subjects/${TAG}.json"
+fi
+if [[ "$SUBJECT" != 0 && "$ONLY_04" == 0 ]]; then
+  echo "stage=cache started=$(date -u +%FT%TZ)"
+  /usr/bin/time -v -o "$OUT/dynamic_jobs/${TAG}.cache.time.txt" \
+    "${CONTAINER[@]}" research_script/00_cache.py --subject "$SUBJECT" --game "$GAME" \
+    --capture-index "$INDEX" --cache-root "$CACHE_ROOT"
+fi
+SCRIPTS=(02_evaluation_revision_geometry 03_actor_integration_mechanisms 04_search_evidence_geometry_pathway_v2)
+if [[ "$ONLY_04" == 1 ]]; then SCRIPTS=(04_search_evidence_geometry_pathway_v2); fi
+for SCRIPT in "${SCRIPTS[@]}"; do
+  if [[ "$SUBJECT" != 0 ]]; then
+    MODE=(--subject "$SUBJECT")
+  elif [[ "$SCRIPT" == 03_* ]]; then
+    MODE=(--aggregate-subjects 1,2,3,4,5,6)
+  else
+    MODE=(--aggregate-subjects 1 2 3 4 5 6)
+  fi
+  echo "stage=$SCRIPT started=$(date -u +%FT%TZ)"
+  /usr/bin/time -v -o "$OUT/dynamic_jobs/${TAG}.${SCRIPT}.time.txt" \
+    "${CONTAINER[@]}" "research_script/${SCRIPT}.py" "${MODE[@]}" --game "$GAME" \
+    --shared-cache-root "$CACHE_ROOT" --output-root "$OUT/$SCRIPT"
+done
+if [[ "$SUBJECT" == 0 ]]; then
+  VERIFY=(--group)
+else
+  VERIFY=(--subject "$SUBJECT" --capture-index "$INDEX")
+fi
+if [[ "$ONLY_04" == 1 ]]; then VERIFY+=(--only-04 --shared-cache-root "$CACHE_ROOT"); fi
+"${CONTAINER[@]}" research_script/verify_dynamic_analysis.py --game "$GAME" --outputs-root "$OUT" "${VERIFY[@]}"
+echo "completed=$(date -u +%FT%TZ)"

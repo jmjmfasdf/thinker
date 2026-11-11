@@ -218,6 +218,21 @@ def compute_dynamic_control_entropy(logits, *, project_gate_gradient=True):
     )
 
 
+def _stabilize_singleton_control_logits(logits, legal_mask):
+    """A one-action categorical has probability one at every finite scale.
+
+    A finite illegal sentinel alone is insufficient: a learned legal logit
+    can fall below it on a deep imagined state. Remove the irrelevant common
+    offset on singleton rows. Multi-action rows retain their exact old logits
+    and gradients; singleton rows correctly have no policy gradient.
+    """
+    singleton = legal_mask.sum(dim=-1, keepdim=True) == 1
+    deterministic = torch.zeros_like(logits).masked_fill(
+        ~legal_mask, ILLEGAL_CONTROL_LOGIT
+    )
+    return torch.where(singleton, deterministic, logits)
+
+
 def compute_voc_gate_distribution(
     logits,
     *,
@@ -319,6 +334,7 @@ def compute_voc_gate_distribution(
             (gate_log_odds, torch.zeros_like(gate_log_odds)), dim=-1
         ) / temperature
     gate_logits = gate_logits.masked_fill(~gate_legal, ILLEGAL_CONTROL_LOGIT)
+    gate_logits = _stabilize_singleton_control_logits(gate_logits, gate_legal)
     gate_probs = F.softmax(gate_logits, dim=-1)
 
     if epsilon_greedy_execution:
@@ -385,7 +401,9 @@ def compute_voc_gate_distribution(
         ~gate_legal, ILLEGAL_CONTROL_LOGIT
     )
 
-    bout_logits = masked_logits[..., :2]
+    bout_logits = _stabilize_singleton_control_logits(
+        masked_logits[..., :2], legal_control_mask[..., :2]
+    )
     bout_probs = F.softmax(bout_logits, dim=-1)
     joint_probs = torch.cat(
         (
@@ -2190,20 +2208,22 @@ class ActorNetSingle(ActorBaseNet):
                 voc_features = final_out.detach().view(T, B, -1)
 
         if compute_loss:
-            reg_loss = 1e-6 * torch.sum(final_out**2, dim=-1).view(T, B) / 2
+            from thinker.numeric_stability import masked_squared_sum
+            reg_loss = 1e-6 * masked_squared_sum(
+                final_out,
+                mask=(policy_valid.reshape(-1)
+                      if self.dynamic_search and self.actor else None),
+            ).view(T, B) / 2
             if self.dynamic_search and self.actor:
-                reg_loss = reg_loss * policy_valid.float()
                 if self.discrete_action:
                     reg_loss += (
                         1e-3
-                        * torch.sum(pri_logits**2, dim=(-2, -1))
-                        * primary_valid.float()
+                        * masked_squared_sum(pri_logits, dim=(-2, -1), mask=primary_valid)
                         / 2
                     )
                 reg_loss += (
                     1e-3
-                    * torch.sum(raw_control_logits**2, dim=-1)
-                    * control_valid.float()
+                    * masked_squared_sum(raw_control_logits, mask=control_valid)
                     / 2
                 )
                 if self.see_real_state:
@@ -2212,10 +2232,10 @@ class ActorNetSingle(ActorBaseNet):
                     )
             else:
                 if self.discrete_action and self.actor:
-                    reg_loss += 1e-3 * torch.sum(pri_logits**2, dim=(-2,-1)) / 2
+                    reg_loss += 1e-3 * masked_squared_sum(pri_logits, dim=(-2,-1)) / 2
                 if not self.disable_thinker and self.actor:
                     reg_loss += (
-                        + 1e-3 * torch.sum(reset_logits**2, dim=-1) / 2
+                        + 1e-3 * masked_squared_sum(reset_logits) / 2
                     )
                     if self.see_real_state:
                         reg_loss += 1e-5 * pre_reg_loss
@@ -2311,7 +2331,8 @@ class ActorNetSingle(ActorBaseNet):
         xs = encoded_real_state        
         encoded_real_state = self.repeat_for_no_update(last_x, xs, need_update, B)
 
-        pre_reg_loss = torch.sum(torch.square(pre_encoded_real_state.view(T, B, -1)), dim=-1) / 2
+        from thinker.numeric_stability import masked_squared_sum
+        pre_reg_loss = masked_squared_sum(pre_encoded_real_state.view(T, B, -1)) / 2
         return pre_encoded_real_state, encoded_real_state, new_core_state, pre_reg_loss
 
     def repeat_for_no_update(self, last_x, xs, need_update, B):

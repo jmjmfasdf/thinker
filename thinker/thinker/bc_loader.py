@@ -156,6 +156,11 @@ class FrameStackedBehavioralDataLoader:
         Size of the runtime policy's discrete action space.  This is supplied
         by the environment/Actor rather than inferred from ``game_id`` so new
         games cannot silently inherit a stale hard-coded action count.
+    source_paths:
+        Optional exact archive selection for recorder-style consumers.  Each
+        path must name a distinct regular ``.npz`` file beneath ``base_path``
+        and must agree with the subject/session/game filters.  Omitting this
+        argument preserves the normal recursive discovery used by training.
     decision_hz:
         Causal sampling rate.  The Atari frame-skip-four default is 15 Hz.
         Archives without timestamps are treated as already decision sampled.
@@ -169,6 +174,7 @@ class FrameStackedBehavioralDataLoader:
         sessions: Optional[Sequence[int]] = None,
         *,
         num_actions: int,
+        source_paths: Optional[Sequence[str | Path]] = None,
         split: Optional[str] = "train",
         scored_length: int = 4,
         frame_stack_n: int = 4,
@@ -189,6 +195,7 @@ class FrameStackedBehavioralDataLoader:
         self.num_actions = int(num_actions)
         self.sessions = self._resolve_sessions(sessions, split)
         self.split = split
+        self._selected_source_paths = self._normalise_source_paths(source_paths)
         self.scored_length = int(scored_length)
         self.frame_stack_n = int(frame_stack_n)
         self.target_size = (int(target_size[0]), int(target_size[1]))
@@ -260,11 +267,68 @@ class FrameStackedBehavioralDataLoader:
             return (4,)
         raise ValueError(f"Unknown behavioral split: {split!r}")
 
+    def _normalise_source_paths(
+        self, source_paths: Optional[Sequence[str | Path]]
+    ) -> Optional[Tuple[Path, ...]]:
+        """Resolve and validate an exact, fail-closed archive selection."""
+
+        if source_paths is None:
+            return None
+        if isinstance(source_paths, (str, bytes, Path)):
+            raise TypeError("source_paths must be a sequence of paths, not one path")
+        try:
+            supplied = tuple(source_paths)
+        except TypeError as error:
+            raise TypeError("source_paths must be a sequence of paths") from error
+        if not supplied:
+            raise ValueError("source_paths cannot be empty")
+        if not self.base_path.is_dir():
+            raise ValueError(
+                f"source_paths base_path is not a directory: {self.base_path}"
+            )
+
+        selected: List[Path] = []
+        seen = set()
+        for value in supplied:
+            if not isinstance(value, (str, Path)):
+                raise TypeError(
+                    "source_paths entries must be strings or pathlib.Path values"
+                )
+            candidate = Path(value).expanduser()
+            if not candidate.is_absolute():
+                candidate = self.base_path / candidate
+            try:
+                path = candidate.resolve(strict=True)
+            except FileNotFoundError as error:
+                raise ValueError(
+                    f"source archive does not exist: {candidate}"
+                ) from error
+            try:
+                path.relative_to(self.base_path)
+            except ValueError as error:
+                raise ValueError(
+                    f"source archive is outside base_path {self.base_path}: {path}"
+                ) from error
+            if not path.is_file():
+                raise ValueError(f"source archive is not a regular file: {path}")
+            if path.suffix != ".npz":
+                raise ValueError(f"source archive must have a .npz suffix: {path}")
+            if path in seen:
+                raise ValueError(f"source_paths contains duplicate archive: {path}")
+            seen.add(path)
+            selected.append(path)
+        return tuple(selected)
+
     def _discover_files(self) -> List[BehaviorFile]:
         if not self.base_path.is_dir():
             return []
         records: List[BehaviorFile] = []
-        for path in self.base_path.rglob("*.npz"):
+        paths = (
+            self.base_path.rglob("*.npz")
+            if self._selected_source_paths is None
+            else self._selected_source_paths
+        )
+        for path in paths:
             subject = _path_entity(path, "subject")
             session = _path_entity(path, "session")
             block = _path_entity(path, "block")
@@ -272,12 +336,32 @@ class FrameStackedBehavioralDataLoader:
             # All entities except block are necessary to enforce leakage-safe
             # filtering.  A missing legacy block is represented by zero.
             if subject is None or session is None or game is None:
+                if self._selected_source_paths is not None:
+                    raise ValueError(
+                        "selected source archive is missing a subject, session, "
+                        f"or game entity: {path}"
+                    )
                 continue
             if self.subjects is not None and subject not in self.subjects:
+                if self._selected_source_paths is not None:
+                    raise ValueError(
+                        f"selected source subject {subject} does not match "
+                        f"subjects={self.subjects}: {path}"
+                    )
                 continue
             if self.sessions is not None and session not in self.sessions:
+                if self._selected_source_paths is not None:
+                    raise ValueError(
+                        f"selected source session {session} does not match "
+                        f"sessions={self.sessions}: {path}"
+                    )
                 continue
             if game != self.game_id:
+                if self._selected_source_paths is not None:
+                    raise ValueError(
+                        f"selected source game {game} does not match "
+                        f"game_id={self.game_id}: {path}"
+                    )
                 continue
             records.append(
                 BehaviorFile(

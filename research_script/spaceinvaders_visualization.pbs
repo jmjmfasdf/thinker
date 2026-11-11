@@ -1,0 +1,38 @@
+#!/bin/bash
+#PBS -N visual-spaceinvaders
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=8:mem=24gb:host=bml2-slave5
+#PBS -l walltime=168:00:00
+#PBS -j oe
+
+set -euo pipefail
+REPO=/home/jeongmin/thinker-dynamic-imitation
+OUT=${CAMPAIGN_OUTPUT:?}
+INDEX=${CAMPAIGN_INDEX:?}
+SOURCE="$OUT/source"
+ENV_DIR=/home/jeongmin/vbenv-25d766c04fe7
+SUMS=/home/jeongmin/visual-behav-assets/shared-runtime-25d766c04fe7-core.sha256
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+case "$(hostname -s)" in bml2-slave[5-8]) ;; *) echo 'Refusing non-approved node'; exit 2;; esac
+JOB_LOCAL=$(mktemp -d "/dev/shm/space-visual.${PBS_JOBID}.XXXXXX")
+cleanup() { if [[ "$JOB_LOCAL" == /dev/shm/space-visual.* && -d "$JOB_LOCAL" ]]; then rm -rf -- "$JOB_LOCAL"; fi; }
+trap cleanup EXIT
+exec > >(tee -a "$OUT/pbs/task-$(printf '%02d' "$INDEX").${PBS_JOBID}.log") 2>&1
+echo "job=$PBS_JOBID index=$INDEX host=$(hostname) started=$(date -u +%FT%TZ)"
+printf '%s  %s\n' "${RUNTIME_SUMS_SHA:?}" "$SUMS" | sha256sum -c -
+(cd "$ENV_DIR" && sha256sum -c "$SUMS")
+(cd "$SOURCE" && sha256sum -c SHA256SUMS >/dev/null)
+CONTAINER=(/usr/local/bin/singularity exec --cleanenv
+  --bind "$REPO:$REPO:ro" --bind "$OUT:$OUT:rw" --bind "$SOURCE:$SOURCE:ro"
+  --bind "$ENV_DIR:$ENV_DIR:ro" --bind "$JOB_LOCAL:$JOB_LOCAL:rw"
+  --env "TMPDIR=$JOB_LOCAL" --env "PBS_JOBID=$PBS_JOBID" --env "HOSTNAME=$(hostname -s)"
+  --env PYTHONNOUSERSITE=1 --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONHASHSEED=0
+  --env "LD_LIBRARY_PATH=$ENV_DIR/lib:$ENV_DIR/lib/python3.10/site-packages/torch/lib"
+  --env CUDA_VISIBLE_DEVICES= --env OMP_NUM_THREADS=2 --env MKL_NUM_THREADS=2
+  --env OPENBLAS_NUM_THREADS=1 --env NUMEXPR_NUM_THREADS=1 --env BLOSC_NTHREADS=1
+  "$SIF")
+/usr/bin/time -v -o "$OUT/reports/task-$(printf '%02d' "$INDEX").${PBS_JOBID}.time.txt" \
+  "${CONTAINER[@]}" "$ENV_DIR/bin/python" -B -u "$SOURCE/research_script/spaceinvaders_visualization.py" \
+  run --output "$OUT" --index "$INDEX"
+echo "visualization_completed=$(date -u +%FT%TZ)"

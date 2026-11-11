@@ -1,0 +1,24 @@
+#!/bin/bash
+#PBS -N continuous-supp
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=8:mem=32gb:host=bml2-slave8
+#PBS -l walltime=168:00:00
+#PBS -j oe
+set -euo pipefail
+case "$(hostname -s)" in bml2-slave[5-8]) ;; *) exit 2 ;; esac
+OUT=${CP_OUTPUT:?required}
+SOURCE=${CP_SUPPLEMENT:?required}
+ENV_DIR=/home/jeongmin/vbenv-25d766c04fe7
+LOCAL=$(mktemp -d "/dev/shm/continuous-supp.${PBS_JOBID}.XXXXXX")
+trap 'rm -rf -- "$LOCAL"' EXIT
+(cd "$SOURCE" && sha256sum -c SHA256SUMS)
+echo "started=$(date -Is) host=$(hostname)"
+/usr/local/bin/singularity exec --cleanenv --bind /home/jeongmin:/home/jeongmin:ro \
+ --bind "$OUT:$OUT:rw" --bind "$SOURCE:$SOURCE:ro" --bind "$LOCAL:$LOCAL:rw" \
+ --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONNOUSERSITE=1 \
+ --env "LD_LIBRARY_PATH=$ENV_DIR/lib" --env "MPLCONFIGDIR=$LOCAL/matplotlib" \
+ --env OPENBLAS_NUM_THREADS=2 --env OMP_NUM_THREADS=2 \
+ /home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif \
+ "$ENV_DIR/bin/python" -B -u "$SOURCE/09_supplementary_checks.py" --output-root "$OUT"
+echo "completed=$(date -Is)"

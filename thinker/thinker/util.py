@@ -7444,6 +7444,19 @@ def _voc_lambda_lr_coordinates(
     # isolated optimizer step, so even direct zero-real-step unit updates land
     # at epoch one.
     expected_epoch = max(int(real_step), 1)
+    # Real time can advance with no valid Q-training rows. New checkpoints
+    # explicitly bind the last successful isolated optimizer's coordinate.
+    # Legacy artifacts retain the strict current-step interpretation.
+    coordinate_key = (
+        "voc_lr_last_successful_real_step"
+        if component == "VoC Q scheduler"
+        else "voc_gate_lr_last_successful_real_step"
+    )
+    if coordinate_key in checkpoint:
+        coordinate = checkpoint[coordinate_key]
+        if type(coordinate) is not int or not 1 <= coordinate <= expected_epoch:
+            raise ValueError(f"{label} invalid last successful step for {component}")
+        expected_epoch = coordinate
     multiplier = 1.0 - min(max(float(expected_epoch), 0.0) / horizon, 1.0)
     return expected_epoch, multiplier
 
@@ -10678,6 +10691,10 @@ def add_parse(filename, parser=None, prefix=''):
         except:
             # if there is dulplicate key, just ignore
             pass
+    # Keep this opt-in field out of legacy default/checkpoint keysets.
+    option = f'--{prefix}model_sr_dynamics_norm'
+    if option not in parser._option_string_actions:
+        parser.add_argument(option, choices=('batch', 'group'), default=None)
     return parser
 
 def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
@@ -10713,6 +10730,9 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
         if key in kwargs and kwargs[key] is not None:
             config[key] = kwargs[key]            
             explicit_config_keys.add(key)
+    if kwargs.get("model_sr_dynamics_norm") is not None:
+        config["model_sr_dynamics_norm"] = kwargs["model_sr_dynamics_norm"]
+        explicit_config_keys.add("model_sr_dynamics_norm")
     # The schema discriminator is derived for canonical atomic CLIs and is
     # therefore intentionally absent from the global YAML/parser surface.
     # A caller can nevertheless supply it directly.  Preserve that explicit
@@ -11435,6 +11455,13 @@ class Wandb:
         self.wandb = wandb
         xpid = flags.full_xpid if hasattr(flags, "full_xpid") else flags.xpid
         exp_name = xpid + subname
+        attempt = os.environ.get("DI72_WANDB_ATTEMPT", "")
+        if attempt:
+            if re.fullmatch(r"[A-Za-z0-9_-]+", attempt) is None:
+                raise ValueError("invalid DI72_WANDB_ATTEMPT")
+            # A fresh training attempt must not append to a failed run's
+            # history. This identifier does not alter checkpoint/fold identity.
+            exp_name += "--" + attempt
         tags = []
         if subname == "_model":
             tags.append("model")
@@ -11447,12 +11474,21 @@ class Wandb:
             entity=os.getenv("WANDB_USER", ""),
             reinit=True,
             # Restore parameters
-            resume="allow",
+            resume="never" if attempt else "allow",
             id=exp_name,
             name=exp_name,
             tags=tags,
         )
         self.wandb.config.update(flags, allow_val_change=True)
+        if attempt:
+            self.wandb.config.update({
+                "campaign_attempt": attempt,
+                "campaign_source_manifest_sha256": os.environ.get("DI72_SOURCE_SHA256", ""),
+                "campaign_restart_from_zero": True,
+                "numeric_diagnostic_stop_at_logit": float(
+                    os.environ.get("DI72_NUMERIC_STOP_AT_LOGIT", "0")
+                ),
+            }, allow_val_change=True)
 
 def compute_grad_norm(parameters, norm_type=2.0):
     grads = [p.grad for p in parameters if p.grad is not None]

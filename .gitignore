@@ -1,4 +1,8 @@
 logs/
+/research_script/outputs/
+/research_script/legacy/
+# Large local resource archive; do not add it to new commits.
+/sokoban/resources.zip
 data/
 past/
 tmp/

@@ -1,0 +1,38 @@
+#!/bin/bash
+#PBS -N vis10m
+#PBS -q workq
+#PBS -r n
+#PBS -l walltime=168:00:00
+#PBS -j oe
+
+set -euo pipefail
+REPO=/home/jeongmin/thinker-dynamic-imitation
+OUT=${CAMPAIGN_OUTPUT:?}
+NODE=${CAMPAIGN_NODE:?}
+SOURCE="$OUT/source"
+VISUAL="$REPO/logs/visual_behav/allcheckpoints_allsessions_10m_20261109"
+ENV_DIR=/home/jeongmin/vbenv-25d766c04fe7
+SUMS=/home/jeongmin/visual-behav-assets/shared-runtime-25d766c04fe7-core.sha256
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+HOST=$(hostname -s)
+# This campaign's user authorization supersedes the old slave5--8 default.
+[[ "$HOST" == "bml2-slave$NODE" && "$NODE" =~ ^[1-8]$ ]] || exit 2
+JOB_LOCAL=$(mktemp -d "/dev/shm/visual10m.${PBS_JOBID}.XXXXXX")
+cleanup() { if [[ "$JOB_LOCAL" == /dev/shm/visual10m.* && -d "$JOB_LOCAL" ]]; then rm -rf -- "$JOB_LOCAL"; fi; }
+trap cleanup EXIT
+echo "job=$PBS_JOBID host=$HOST started=$(date -u +%FT%TZ)"
+(cd "$ENV_DIR" && sha256sum -c "$SUMS")
+(cd "$SOURCE" && sha256sum -c SHA256SUMS >/dev/null)
+CONTAINER=(/usr/local/bin/singularity exec --cleanenv
+  --bind "$REPO:$REPO:ro" --bind "$OUT:$OUT:rw" --bind "$VISUAL:$VISUAL:rw"
+  --bind "$SOURCE:$SOURCE:ro" --bind "$ENV_DIR:$ENV_DIR:ro" --bind "$JOB_LOCAL:$JOB_LOCAL:rw"
+  --env "TMPDIR=$JOB_LOCAL" --env "PBS_JOBID=$PBS_JOBID" --env "HOSTNAME=$HOST"
+  --env "PYTHONPATH=$SOURCE/thinker" --env PYTHONNOUSERSITE=1 --env PYTHONDONTWRITEBYTECODE=1
+  --env PYTHONHASHSEED=0 --env "LD_LIBRARY_PATH=$ENV_DIR/lib:$ENV_DIR/lib/python3.10/site-packages/torch/lib"
+  --env CUDA_VISIBLE_DEVICES= --env OMP_NUM_THREADS=2 --env MKL_NUM_THREADS=2
+  --env OPENBLAS_NUM_THREADS=1 --env NUMEXPR_NUM_THREADS=1 --env BLOSC_NTHREADS=1
+  "$SIF")
+/usr/bin/time -v -o "$OUT/reports/node-$NODE.${PBS_JOBID}.time.txt" \
+  "${CONTAINER[@]}" "$ENV_DIR/bin/python" -B -u "$SOURCE/research_script/visualization_10m.py" \
+  run-node --output "$OUT" --index "$NODE"
+echo "completed=$(date -u +%FT%TZ)"

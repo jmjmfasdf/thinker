@@ -137,7 +137,8 @@ class SelfPlayWorker:
                 timing = self.time,
             )
         else:
-            self.env = Env(gpu = gpu, **vars(flags))
+            self.env = Env(name=flags.name, env_n=env_n, gpu=gpu,
+                           timing=self.time, local_flags=flags)
             
         obs_space = self.env.observation_space
         action_space = self.env.action_space        
@@ -195,9 +196,23 @@ class SelfPlayWorker:
                             self.env.get_primary_action_meanings()
                         ),
                     )
+                    # Synchronous imitation must use the live model, just as
+                    # the parallel learner reads its model parameter buffer.
+                    if not self.flags.parallel and self.flags.train_model:
+                        self.actor_learner.imitation_model_source = self.env.model_net
 
         self.disable_thinker = flags.wrapper_type == 1
         self.finish_train_actor = False
+        self.voc_training_metrics = None
+        if getattr(flags, "voc_campaign_metrics", False):
+            if self.rank != 0 or flags.self_play_n != 1:
+                raise ValueError("VOC campaign metrics require one self-play worker")
+            from pathlib import Path
+            from thinker.voc_training_metrics import TrainingMetrics
+            self.voc_training_metrics = TrainingMetrics(
+                self.actor_net, flags, Path(flags.ckpdir)
+            )
+            self._voc_metrics_flush_step = -1024
 
     def gen_data(self, verbose: bool = True):
         """Generate self-play data
@@ -370,6 +385,9 @@ class SelfPlayWorker:
                 if not info["model_status"]["finish"]: fin = False
                 if fin: 
                     self._logger.info("Terminating self-play thread %d" % self.rank)
+                    if getattr(self, "voc_training_metrics", None) is not None:
+                        self.voc_training_metrics.publish(terminal=True)
+                        self.voc_training_metrics.close()
                     self.env.close()                    
                     self._logger.info("Terminated self-play thread %d" % self.rank)
                     return True
@@ -409,7 +427,38 @@ class SelfPlayWorker:
             step_kwargs["search_control"] = secondary_action
         else:
             step_kwargs["reset_action"] = secondary_action
-        state, reward, done, truncated_done, info = self.env.step(**step_kwargs)
+        try:
+            state, reward, done, truncated_done, info = self.env.step(**step_kwargs)
+        except AssertionError:
+            if self.dynamic_search:
+                # Preserve the actual pre-decision contract, including model
+                # features, so a rare runtime violation can be diagnosed from
+                # evidence rather than reconstructed from rolling checkpoints.
+                diagnostic = {
+                    "env_out": {
+                        key: value.detach().cpu()
+                        for key, value in env_out._asdict().items()
+                        if torch.is_tensor(value)
+                    },
+                    "primary_action": primary_action.detach().cpu(),
+                    "search_control": secondary_action.detach().cpu(),
+                    "search_control_logits": actor_out.search_control_logits.detach().cpu(),
+                }
+                diagnostic_path = os.path.join(
+                    self.flags.ckpdir, f"control_failure_rank{self.rank}.pt"
+                )
+                try:
+                    torch.save(diagnostic, diagnostic_path)
+                    self._logger.error("Saved failed control input to %s", diagnostic_path)
+                except Exception:
+                    self._logger.exception("Could not save failed control input")
+            raise
+        if getattr(self, "voc_training_metrics", None) is not None:
+            metrics = self.voc_training_metrics
+            metrics.observe(env_out, actor_out, info, real_step=metrics.steps, attempt=0)
+            if metrics.steps - self._voc_metrics_flush_step >= 1024:
+                metrics.publish()
+                self._voc_metrics_flush_step = metrics.steps
         next_env_out = self.create_env_out(
             actor_out.action, state, reward, done, truncated_done, info
         )

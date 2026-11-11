@@ -1,0 +1,42 @@
+#!/bin/bash
+#PBS -N continuous-plan
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=8:mem=32gb:host=bml2-slave5
+#PBS -l walltime=168:00:00
+#PBS -j oe
+set -euo pipefail
+REPO=/home/jeongmin/thinker-dynamic-imitation
+OUT=${CP_OUTPUT:?required}
+SNAPSHOT=${CP_SNAPSHOT:?required}
+SUBJECT=${CP_SUBJECT:?required}
+GAME=${CP_GAME:?required}
+case "$(hostname -s)" in bml2-slave[5-8]) ;; *) echo 'Only slave5-8 allowed'; exit 2 ;; esac
+ENV_DIR=/home/jeongmin/vbenv-25d766c04fe7
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+LOCAL=$(mktemp -d "/dev/shm/continuous.${PBS_JOBID}.XXXXXX")
+export TMPDIR="$LOCAL"
+(cd "$SNAPSHOT" && sha256sum -c SHA256SUMS)
+PY=(/usr/local/bin/singularity exec --cleanenv
+  --bind "$REPO:$REPO:ro" --bind "$OUT:$OUT:rw" --bind "$SNAPSHOT:$SNAPSHOT:ro"
+  --bind "$ENV_DIR:$ENV_DIR:ro" --bind "$LOCAL:$LOCAL:rw"
+  --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONNOUSERSITE=1 --env PYTHONHASHSEED=0
+  --env "CONTINUOUS_REPO=$REPO" --env "LD_LIBRARY_PATH=$ENV_DIR/lib"
+  --env "TMPDIR=$LOCAL" --env "MPLCONFIGDIR=$LOCAL/matplotlib" --env CUDA_VISIBLE_DEVICES=
+  --env OMP_NUM_THREADS=2 --env OPENBLAS_NUM_THREADS=2 --env MKL_NUM_THREADS=2 --env NUMEXPR_NUM_THREADS=2
+  "$SIF" "$ENV_DIR/bin/python" -B -u)
+cd "$SNAPSHOT"
+SCRIPT=research_script/continuous_planning
+echo "started=$(date -Is) host=$(hostname) subject=$SUBJECT game=$GAME"
+"${PY[@]}" "$SCRIPT/test_continuous_planning.py"
+if [[ "$SUBJECT" == 0 ]]; then
+  "${PY[@]}" "$SCRIPT/08_group_report.py" --output-root "$OUT"
+else
+  INDEX="$REPO/logs/visual_behav/heldout_5m_20260921/subjects/$(printf 'sub%03d_game%d' "$SUBJECT" "$GAME").json"
+  for STAGE in 00_native_cache 01_information_timescales 02_maintenance_switch_destination 03_evidence_revision_accumulation 04_dynamic_computation 05_plan_continuity_update 06_urgency_modulation 07_neural_correspondence; do
+    echo "stage=$STAGE started=$(date -Is)"
+    "${PY[@]}" "$SCRIPT/$STAGE.py" --subject "$SUBJECT" --game "$GAME" --capture-index "$INDEX" --output-root "$OUT"
+  done
+  "${PY[@]}" "$SCRIPT/08_group_report.py" --output-root "$OUT" --verify-subject "$SUBJECT" --game "$GAME"
+fi
+echo "completed=$(date -Is)"

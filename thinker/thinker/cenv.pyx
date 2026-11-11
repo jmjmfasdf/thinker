@@ -132,6 +132,49 @@ cdef int node_descendant_expanded_count(Node* pnode):
             count += 1
     return count
 
+cdef int node_subtree_allocated_count(Node* pnode):
+    """Count every live node, including unexpanded action placeholders."""
+    cdef int i
+    cdef int count = 1
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        count += node_subtree_allocated_count(pnode[0].ppchildren[0][i])
+    return count
+
+cdef int node_subtree_expanded_count(Node* pnode):
+    """Count semantically expanded nodes in the live subtree."""
+    cdef int i
+    cdef int count = <int>node_expanded(pnode, -1)
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        count += node_subtree_expanded_count(pnode[0].ppchildren[0][i])
+    return count
+
+cdef int node_subtree_visited_count(Node* pnode):
+    """Count nodes visited at least once in the live subtree."""
+    cdef int i
+    cdef int count = <int>pnode[0].visited
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        count += node_subtree_visited_count(pnode[0].ppchildren[0][i])
+    return count
+
+cdef int node_depth_from_root(Node* pnode):
+    cdef int depth = 0
+    while pnode[0].pparent != NULL:
+        depth += 1
+        pnode = pnode[0].pparent
+    return depth
+
+cdef int node_subtree_max_reachable_depth(Node* pnode):
+    """Return maximum edge depth below ``pnode``, including frontier leaves."""
+    cdef int i
+    cdef int child_depth
+    cdef int max_depth = 0
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        child_depth = 1 + node_subtree_max_reachable_depth(
+            pnode[0].ppchildren[0][i])
+        if child_depth > max_depth:
+            max_depth = child_depth
+    return max_depth
+
 cdef node_expand(Node* pnode, float r, float v, int t, bool done, float[:] logits, PyObject* encoded, bool override):
     """
     First time arriving a node and so we expand it
@@ -405,6 +448,10 @@ cdef class cWrapper():
     cdef int[:] accepted_primary_action_event
     cdef int[:] accepted_control_event
     cdef float[:] think_reward_event
+    # Exact operation status retained for recorder-only inspection.  ``status``
+    # is intentionally rewritten to 5 after a reset-control token is exposed,
+    # so it cannot by itself distinguish an expansion from a revisit.
+    cdef int[:] internal_status_event
 
     # internal variables only used in step function    
     cdef int[:] max_rollout_depth_
@@ -561,6 +608,7 @@ cdef class cWrapper():
         self.accepted_primary_action_event = np.full(self.env_n, -1, dtype=np.intc)
         self.accepted_control_event = np.full(self.env_n, -1, dtype=np.intc)
         self.think_reward_event = np.zeros(self.env_n, dtype=np.float32)
+        self.internal_status_event = np.full(self.env_n, -1, dtype=np.intc)
     
     cdef float[:, :] compute_tree_reps(self, int[:]& reset, int[:]& status):
         cdef int i, j
@@ -615,6 +663,7 @@ cdef class cWrapper():
             self.accepted_primary_action_event[i] = -1
             self.accepted_control_event[i] = -1
             self.think_reward_event[i] = 0.
+            self.internal_status_event[i] = -1
 
     cdef void reset_dynamic_state(self):
         """Initialize a fresh search stage after env.reset()."""
@@ -637,6 +686,120 @@ cdef class cWrapper():
             if not self.pending_real_valid[i]:
                 return False
         return True
+
+    def dynamic_trace_snapshot(self, include_xs=True, include_hs=True):
+        """Return a detached recorder snapshot without changing search state.
+
+        This method is deliberately not part of the ordinary state/info path.
+        Recorder code opts into the recursive size walk and latent copies; a
+        normal training rollout therefore pays neither cost.  ``include_xs``
+        and ``include_hs`` let bounded recorders skip unused latent copies.
+        Counts describe the live subtree reachable from the current root.  ``allocated``
+        includes the action placeholders created by ``node_expand`` whereas
+        ``expanded`` counts only nodes with model/tree state.
+        """
+        cdef int i
+        cdef Node* root_node
+        cdef Node* cur_node
+        cdef object encoded
+        cdef object value
+        allocated = np.zeros(self.env_n, dtype=np.int64)
+        expanded = np.zeros(self.env_n, dtype=np.int64)
+        visited = np.zeros(self.env_n, dtype=np.int64)
+        max_reachable_depth = np.zeros(self.env_n, dtype=np.int64)
+        depth = np.zeros(self.env_n, dtype=np.int64)
+        current_action = np.zeros(self.env_n, dtype=np.int64)
+        current_done = np.zeros(self.env_n, dtype=np.bool_)
+        current_expanded = np.zeros(self.env_n, dtype=np.bool_)
+        current_is_root = np.zeros(self.env_n, dtype=np.bool_)
+        current_has_real_state = np.zeros(self.env_n, dtype=np.bool_)
+        current_xs = []
+        current_hs = []
+
+        if not self.dynamic_search:
+            raise RuntimeError(
+                "dynamic_trace_snapshot requires dynamic_search=true")
+        if self.root_nodes.size() != self.env_n or self.cur_nodes.size() != self.env_n:
+            raise RuntimeError("dynamic tree forest is not initialized")
+
+        for i in range(self.env_n):
+            root_node = self.root_nodes[i]
+            cur_node = self.cur_nodes[i]
+            allocated[i] = node_subtree_allocated_count(root_node)
+            expanded[i] = node_subtree_expanded_count(root_node)
+            visited[i] = node_subtree_visited_count(root_node)
+            max_reachable_depth[i] = node_subtree_max_reachable_depth(root_node)
+            depth[i] = node_depth_from_root(cur_node)
+            current_action[i] = cur_node[0].action
+            current_done[i] = cur_node[0].done
+            current_expanded[i] = node_expanded(cur_node, -1)
+            current_is_root[i] = cur_node == root_node
+
+            encoded = <dict>cur_node[0].encoded
+            value = encoded.get("real_states")
+            current_has_real_state[i] = value is not None
+            value = encoded.get("xs") if include_xs else None
+            if include_xs:
+                if torch.is_tensor(value):
+                    value = value.detach().clone()
+                elif isinstance(value, np.ndarray):
+                    value = value.copy()
+            current_xs.append(value)
+            value = encoded.get("hs") if include_hs else None
+            if include_hs:
+                if torch.is_tensor(value):
+                    value = value.detach().clone()
+                elif isinstance(value, np.ndarray):
+                    value = value.copy()
+            current_hs.append(value)
+
+        return {
+            "tree_reachable_node_count": allocated.copy(),
+            "tree_allocated_node_count": allocated,
+            "tree_expanded_node_count": expanded,
+            "tree_visited_node_count": visited,
+            "tree_leaf_node_count": allocated - expanded,
+            "tree_frontier_node_count": allocated - expanded,
+            "tree_max_reachable_depth": max_reachable_depth,
+            "current_node_depth": depth,
+            "current_node_action": current_action,
+            "current_node_done": current_done,
+            "current_node_expanded": current_expanded,
+            "current_node_is_root": current_is_root,
+            "current_node_has_real_state": current_has_real_state,
+            # Keep model observation and hidden-state sources separate.  They
+            # can have different spatial/channel schemas across checkpoints.
+            "current_node_xs": tuple(current_xs),
+            "current_node_hs": tuple(current_hs),
+            "internal_status": np.asarray(self.internal_status_event).copy(),
+            "tree_reset": np.asarray(self.tree_reset_event).copy(),
+            # Dynamic reset_mode=0 has no legacy forced-root-reset duplicate.
+            # A post-real search_state_reset starts the next stage and must not
+            # be projected as legacy public status 3.
+            "forced_root_reset": np.zeros(self.env_n, dtype=np.bool_),
+            "tree_token_valid": np.asarray(self.tree_token_valid_event).copy(),
+            "search_state_reset": np.asarray(self.search_state_reset_event).copy(),
+            "real_transition": np.asarray(self.real_transition_event).copy(),
+            "root_carried": np.asarray(self.root_carried_event).copy(),
+            "carried_descendant_visit_count": np.asarray(
+                self.carried_descendant_visit_count_event).copy(),
+            "carried_descendant_expanded_count": np.asarray(
+                self.carried_descendant_expanded_count_event).copy(),
+            "useful_carry": np.asarray(self.root_carried_event).copy() & (
+                np.asarray(self.carried_descendant_visit_count_event) > 0),
+            "stage_end": np.asarray(self.stage_end_event).copy(),
+            "forced_stop": np.asarray(self.forced_stop_event).copy(),
+            "stored_action_mask": np.asarray(self.stored_action_mask_event).copy(),
+            "barrier_released": np.asarray(self.barrier_released_event).copy(),
+            "accepted_primary_action": np.asarray(
+                self.accepted_primary_action_event).copy(),
+            "accepted_control": np.asarray(self.accepted_control_event).copy(),
+            "executed_primary_action": np.asarray(
+                self.executed_primary_action_event).copy(),
+            "phase": np.asarray(self.phase).copy(),
+            "search_steps": np.asarray(self.search_steps).copy(),
+            "rollout_depth": np.asarray(self.rollout_depth).copy(),
+        }
 
     cdef float[:, :] compute_tree_reps_dynamic(self):
         cdef int i
@@ -1413,6 +1576,7 @@ cdef class cModelWrapper(cWrapper):
                     self.phase[i] = 1
                     self.stage_end_event[i] = True
                     self.status[i] = 6
+                    self.internal_status_event[i] = 6
                     self.step_status[i] = 2
                     continue
 
@@ -1441,6 +1605,7 @@ cdef class cModelWrapper(cWrapper):
                     pass_model_states.append(tuple(encoded["model_states"]))
                     pass_model_action.push_back(primary[i])
                     self.status[i] = 4
+                self.internal_status_event[i] = self.status[i]
                 if (self.max_search_steps > 0 and
                         self.search_steps[i] >= self.max_search_steps):
                     # The Nth computation ends the stage immediately.  There
@@ -1459,10 +1624,12 @@ cdef class cModelWrapper(cWrapper):
                 self.stored_action_mask_event[i] = True
                 self.accepted_primary_action_event[i] = primary[i]
                 self.status[i] = 7
+                self.internal_status_event[i] = 7
                 self.step_status[i] = 4
 
             else:  # WAIT
                 self.status[i] = 8
+                self.internal_status_event[i] = 8
                 self.step_status[i] = 4
 
         # The call that stores the last missing action also performs the real
@@ -1551,6 +1718,7 @@ cdef class cModelWrapper(cWrapper):
                 cur_nodes_.push_back(root_node)
 
                 self.status[i] = 1
+                self.internal_status_event[i] = 1
                 self.phase[i] = 0
                 self.search_steps[i] = 0
                 self.cur_t[i] = 0
@@ -2128,6 +2296,7 @@ cdef class cPerfectWrapper(cWrapper):
                     self.phase[i] = 1
                     self.stage_end_event[i] = True
                     self.status[i] = 6
+                    self.internal_status_event[i] = 6
                     self.step_status[i] = 2
                     continue
 
@@ -2157,6 +2326,7 @@ cdef class cPerfectWrapper(cWrapper):
                     pass_action.append(primary[i])
                     pass_restore_slots.append(int(encoded["snapshot_slot"]))
                     self.status[i] = 4
+                self.internal_status_event[i] = self.status[i]
                 if (self.max_search_steps > 0 and
                         self.search_steps[i] >= self.max_search_steps):
                     self.phase[i] = 1
@@ -2173,9 +2343,11 @@ cdef class cPerfectWrapper(cWrapper):
                 self.stored_action_mask_event[i] = True
                 self.accepted_primary_action_event[i] = primary[i]
                 self.status[i] = 7
+                self.internal_status_event[i] = 7
                 self.step_status[i] = 4
             else:
                 self.status[i] = 8
+                self.internal_status_event[i] = 8
                 self.step_status[i] = 4
 
         if self.all_real_actions_stored():
@@ -2267,6 +2439,7 @@ cdef class cPerfectWrapper(cWrapper):
                 cur_nodes_.push_back(root_node)
 
                 self.status[i] = 1
+                self.internal_status_event[i] = 1
                 self.phase[i] = 0
                 self.search_steps[i] = 0
                 self.cur_t[i] = 0

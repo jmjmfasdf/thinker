@@ -1,0 +1,103 @@
+#!/bin/bash
+#PBS -N heldout-group-0203
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=8:mem=24gb:host=bml2-slave5
+#PBS -l walltime=168:00:00
+#PBS -j oe
+
+# Complete only missing 02/03 group outputs using their original frozen sources.
+set -euo pipefail
+umask 0022
+REPO=/home/jeongmin/thinker-dynamic-imitation
+OUT=${ANALYSIS_OUTPUT:?required}
+SNAPSHOT=${ANALYSIS_SNAPSHOT:?required}
+GAME=${ANALYSIS_GAME:?required}
+case "$GAME" in 0|1) ;; *) exit 2 ;; esac
+case "$(hostname -s)" in bml2-slave[5-8]) ;; *) exit 2 ;; esac
+ENV_DIR=/home/jeongmin/vbenv-25d766c04fe7
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+SUMS=/home/jeongmin/visual-behav-assets/shared-runtime-25d766c04fe7-core.sha256
+TAG="group0203_game$GAME"
+JOB_LOCAL=$(mktemp -d "/dev/shm/group0203.${PBS_JOBID}.XXXXXX")
+cleanup() { if [[ -d "$JOB_LOCAL" && "$JOB_LOCAL" == /dev/shm/group0203.* ]]; then rm -rf -- "$JOB_LOCAL"; fi; }
+trap cleanup EXIT
+exec > >(tee -a "$OUT/dynamic_jobs/${TAG}.${PBS_JOBID}.log") 2>&1
+echo "job=$PBS_JOBID tag=$TAG host=$(hostname) started=$(date -u +%FT%TZ)"
+printf '%s  %s\n' d58b2635c170b87ed78f9710767e6ba3da1ef4ab14ada931677b64065e705975 "$SUMS" | sha256sum -c -
+(cd "$ENV_DIR" && sha256sum -c "$SUMS")
+(cd "$SNAPSHOT" && sha256sum -c SHA256SUMS)
+SCRIPTS=(02_evaluation_revision_geometry 03_actor_integration_mechanisms)
+PENDING=()
+BINDS=(--bind "$REPO:$REPO:ro" --bind "$OUT/dynamic_jobs:$OUT/dynamic_jobs:rw"
+  --bind "$SNAPSHOT:$SNAPSHOT:ro" --bind "$ENV_DIR:$ENV_DIR:ro" --bind "$JOB_LOCAL:$JOB_LOCAL:rw")
+for SCRIPT in "${SCRIPTS[@]}"; do
+  for SUBJECT in 1 2 3 4 5 6; do
+    test -s "$OUT/$SCRIPT/$(printf 'sub%03d_game%d' "$SUBJECT" "$GAME")/analysis_manifest.json"
+  done
+  GROUP="$OUT/$SCRIPT/group_game$GAME"
+  if [[ -s "$GROUP/analysis_manifest.json" ]]; then
+    echo "preserve-existing=$GROUP"
+  elif [[ -e "$GROUP" ]]; then
+    echo "Refusing to overwrite partial group output: $GROUP"; exit 3
+  else
+    mkdir "$GROUP"
+    BINDS+=(--bind "$GROUP:$GROUP:rw")
+    PENDING+=("$SCRIPT")
+  fi
+done
+RUN=(/usr/local/bin/singularity exec --cleanenv "${BINDS[@]}"
+  --env PYTHONNOUSERSITE=1 --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONHASHSEED=0
+  --env "LD_LIBRARY_PATH=$ENV_DIR/lib:$ENV_DIR/lib/python3.10/site-packages/torch/lib"
+  --env CUDA_VISIBLE_DEVICES= --env "TMPDIR=$JOB_LOCAL" --env "MPLCONFIGDIR=$JOB_LOCAL/matplotlib"
+  --env OMP_NUM_THREADS=2 --env MKL_NUM_THREADS=2 --env OPENBLAS_NUM_THREADS=2 --env NUMEXPR_NUM_THREADS=2
+  "$SIF" "$ENV_DIR/bin/python" -B -u)
+cd "$SNAPSHOT"
+for SCRIPT in "${PENDING[@]}"; do
+  if [[ "$SCRIPT" == 03_* ]]; then MODE=(--aggregate-subjects 1,2,3,4,5,6);
+  else MODE=(--aggregate-subjects 1 2 3 4 5 6); fi
+  echo "stage=$SCRIPT started=$(date -u +%FT%TZ)"
+  /usr/bin/time -v -o "$OUT/dynamic_jobs/${TAG}.${PBS_JOBID}.${SCRIPT}.time.txt" \
+    "${RUN[@]}" "research_script/$SCRIPT.py" "${MODE[@]}" --game "$GAME" \
+    --shared-cache-root "$OUT/00_dynamic_cache" --output-root "$OUT/$SCRIPT"
+done
+"${RUN[@]}" - "$OUT" "$GAME" "$SNAPSHOT" "$PBS_JOBID" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+import pandas as pd
+
+out, game, snapshot, job_id = Path(sys.argv[1]), int(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+subjects = list(range(1, 7))
+analyses = {
+    "02_evaluation_revision_geometry": ("results/subject_effects.csv", "results/group_effects.csv"),
+    "03_actor_integration_mechanisms": ("tables/subject_effects.csv", "tables/group_inference.csv"),
+}
+report = dict(status="COMPLETED", game=game, subjects=subjects, job_id=job_id,
+              completed_at=datetime.now(timezone.utc).isoformat(), analyses={})
+for name, required in analyses.items():
+    root = out / name / f"group_game{game}"
+    manifest = root / "analysis_manifest.json"
+    metadata = json.loads(manifest.read_text())
+    assert metadata["subjects"] == subjects and metadata["game"] == game
+    figures = list((root / "figures").rglob("*.png"))
+    assert len(figures) == {"02": 7, "03": 3}[name[:2]]
+    assert all(f.stat().st_size > 0 for f in figures)
+    frames = [pd.read_csv(root / p) for p in required]
+    assert all(len(frame) > 0 for frame in frames)
+    assert set(frames[0].subject.unique()) == set(subjects)
+    if "game" in frames[0].columns:
+        assert set(frames[0].game.unique()) == {game}
+    source = snapshot / "research_script" / (name + ".py")
+    report["analyses"][name] = dict(figures=len(figures), table_rows=dict(zip(required, map(len, frames))),
+        manifest=str(manifest), manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        script=str(source), script_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+path = out / "dynamic_jobs" / f"group0203_game{game}.completed.json"
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps(report, indent=2))
+temporary.replace(path)
+print(json.dumps(report, indent=2), flush=True)
+PY
+echo "completed=$(date -u +%FT%TZ)"
