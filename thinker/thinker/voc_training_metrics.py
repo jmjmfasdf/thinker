@@ -18,6 +18,7 @@ class TrainingMetrics:
         self.hist = np.zeros(self.cap + 1, dtype=np.int64)
         self.steps = self.think = self.episodes = self.controls = self.forced = 0
         self.stops = self.resets = 0
+        self.mandatory = self.optional = 0
         self.raw_reward = 0.
         self.best = None
         self.gate_logits = None
@@ -28,6 +29,8 @@ class TrainingMetrics:
                 setattr(self, k, state[k])
             self.hist = np.asarray(state['hist'], dtype=np.int64)
             self.returns.extend(state['returns'])
+            self.mandatory = state.get('mandatory', 0)
+            self.optional = state.get('optional', state['controls'])
         # Cold resume starts a new episode/planning stage. Old partial stages
         # remain in think, but are not falsely counted as completed decisions.
 
@@ -43,6 +46,11 @@ class TrainingMetrics:
         imagined = array(info['think_reward']) == -1
         accepted = array(info['accepted_control'])
         valid = array(out.control_valid).astype(bool)
+        legal = previous.legal_control_mask.detach().cpu().numpy().reshape(-1, 3)
+        choice_valid = valid & legal[:, util.STOP] & legal[:, :util.STOP].any(axis=-1)
+        mandatory = valid & ~legal[:, util.STOP]
+        self.mandatory += int(mandatory.sum())
+        self.optional += int(choice_valid.sum())
         forced = array(previous.forced_stop).astype(bool)
         phase = array(previous.phase)
         self.think += int(imagined.sum())
@@ -67,12 +75,15 @@ class TrainingMetrics:
                 online_delta_q=float(q[0]-q[1]),
                 ema_delta_q=float(self.gate_logits.reshape(-1)[0].item()*self.flags.voc_gate_q_temperature),
                 p_continue=float(p[0]+p[1]),control=int(accepted[0]),valid=bool(valid[0]),
+                gate_choice_valid=bool(choice_valid[0]),mandatory_compute=bool(mandatory[0]),
                 forced=bool(forced[0]),root_policy_margin=float(ordered[-1]-ordered[-2]),
                 root_value_token=float(tree[self.schema['root_v']][0])))
         if real.all():
             self.steps += int(real.sum())
             if np.any(self.current > self.cap):
                 raise AssertionError('Imagination budget exceeded cap')
+            if np.any(self.current < getattr(self.flags, 'min_search_steps', 0)):
+                raise AssertionError('Imagination budget below required minimum')
             self.hist += np.bincount(self.current, minlength=self.cap+1)
             self.current[:] = 0
             ep = array(info['episode_return'])
@@ -106,6 +117,7 @@ class TrainingMetrics:
 
     def state(self):
         return {**{k:getattr(self,k) for k in ('steps','think','episodes','controls','forced','stops','resets','raw_reward','best')},
+                'mandatory':self.mandatory,'optional':self.optional,
                 'hist':self.hist.tolist(),'returns':list(self.returns)}
 
     def metrics(self):
@@ -117,7 +129,8 @@ class TrainingMetrics:
             imagined_transitions=self.think,computations_per_action=self.think/max(self.steps,1),
             zero_search_fraction=float(self.hist[0]/n) if n else None,
             cap_search_fraction=float(self.hist[-1]/n) if n else None,
-            learned_stop_fraction=self.stops/max(self.controls,1),
+            learned_stop_fraction=self.stops/max(self.optional,1),
+            mandatory_compute_count=self.mandatory,optional_gate_choice_count=self.optional,
             reset_fraction=self.resets/max(self.controls,1),forced_stop_count=self.forced)
         for k, value in enumerate(self.hist):
             result[f'count_{k}_decisions'] = int(value)

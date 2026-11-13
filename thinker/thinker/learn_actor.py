@@ -3809,7 +3809,7 @@ class SActorLearner:
             parsed = tuple(int(item) for item in raw if str(item).strip())
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name} must be a comma-separated integer list") from exc
-        if not parsed:
+        if not parsed and name != "icopro_holdout_sessions":
             raise ValueError(f"{name} cannot be empty")
         return parsed
 
@@ -3849,6 +3849,8 @@ class SActorLearner:
             "tree_carry",
             "rec_t",
             "max_search_steps",
+            "min_search_steps",
+            "dynamic_search_state_reset",
             "max_depth",
             "model_unroll_len",
             "think_cost",
@@ -3864,6 +3866,10 @@ class SActorLearner:
         )
         for name in fields:
             saved = checkpoint_flags.get(name)
+            if name == "min_search_steps" and saved is None:
+                saved = 0
+            if name == "dynamic_search_state_reset" and saved is None:
+                saved = "observation"
             if name == "model_float16" and saved is None:
                 saved = checkpoint_flags.get("float16")
             if name == "model_state_projection" and saved is None:
@@ -3877,6 +3883,10 @@ class SActorLearner:
             if name == "actor_amp_max_consecutive_skips" and saved is None:
                 saved = 8
             current = getattr(self.flags, name, None)
+            if name == "min_search_steps" and current is None:
+                current = 0
+            if name == "dynamic_search_state_reset" and current is None:
+                current = "observation"
             if name == "model_state_projection" and current is None:
                 current = "none"
             if name == "model_state_range_loss_cost" and current is None:
@@ -5965,6 +5975,7 @@ class SActorLearner:
         # token from the preceding, unshifted row.  Preserve it here so
         # post-compute VoC diagnostics also cover the first optimized row.
         voc_predecision_last_control = None
+        voc_predecision_choice_legal = None
         if self.dynamic_voc_mode != "off":
             last_search_control = getattr(
                 train_actor_out, "last_search_control", None
@@ -5974,6 +5985,15 @@ class SActorLearner:
                     "VoC replay is missing EnvOut.last_search_control"
                 )
             voc_predecision_last_control = last_search_control[:-1]
+            # Use the PRE-action legal mask, before [1:] action alignment.
+            # Mandatory computation still trains the branch/primary policies,
+            # but is not a voluntary STOP-vs-CONTINUE critic/gate example.
+            legal = getattr(train_actor_out, "legal_control_mask", None)
+            if legal is not None:
+                voc_predecision_choice_legal = (
+                    legal[:-1, :, util.STOP].bool()
+                    & legal[:-1, :, :util.STOP].bool().any(dim=-1)
+                )
     
         # Move from obs[t] -> action[t] to action[t] -> obs[t].
         train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])
@@ -6277,13 +6297,16 @@ class SActorLearner:
             if control_action is None:
                 control_action = train_actor_out.reset
             actor_misc = getattr(new_actor_out, "misc", None)
+            voc_choice_valid = control_valid
+            if voc_predecision_choice_legal is not None:
+                voc_choice_valid = control_valid & voc_predecision_choice_legal
             (
                 target_control_logits,
                 voc_gate_soft_continue_probability,
             ) = resolve_dynamic_voc_learning_control_surface(
                 execution_control_logits=target_behavior_control_logits,
                 actor_misc=actor_misc,
-                control_valid=control_valid,
+                control_valid=voc_choice_valid,
                 epsilon_greedy_execution=(
                     self.voc_gate_epsilon_greedy_execution
                 ),
@@ -6341,12 +6364,12 @@ class SActorLearner:
             )
             voc_holdout_valid = dynamic_voc_holdout_mask(
                 voc_actor_id,
-                control_valid,
+                voc_choice_valid,
                 total_actor_streams=(
                     int(self.flags.self_play_n) * int(self.flags.env_n)
                 ),
             )
-            voc_q_train_valid = control_valid & ~voc_holdout_valid
+            voc_q_train_valid = voc_choice_valid & ~voc_holdout_valid
             voc_result = compute_dynamic_voc_loss(
                 voc_q=voc_q,
                 target_control_logits=target_control_logits,
@@ -6355,7 +6378,7 @@ class SActorLearner:
                 ),
                 behavior_control_logits=behavior_control_logits,
                 control_action=control_action,
-                control_valid=control_valid,
+                control_valid=voc_choice_valid,
                 voc_target=voc_target_parts.net,
                 # Online Q is regression/calibration only.  The gate objective
                 # below is driven exclusively by the frozen EMA head.
@@ -6468,6 +6491,10 @@ class SActorLearner:
                 search_steps=train_actor_out.search_steps,
             )
             valid_count = int(voc_result.valid.sum().detach().cpu())
+            losses["voc_optional_choice_count"] = voc_choice_valid.sum().detach().float()
+            losses["voc_mandatory_excluded_count"] = (
+                control_valid & ~voc_choice_valid
+            ).sum().detach().float()
             continue_mask = train_valid & (voc_result.gate_action == 0)
             stop_mask = train_valid & (voc_result.gate_action == 1)
             continue_count = int(continue_mask.sum().detach().cpu())

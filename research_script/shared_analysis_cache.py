@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pandas as pd
 
-DEFAULT_SHARED_CACHE_ROOT = Path(__file__).resolve().parent / "outputs" / "00_cache"
+DEFAULT_SHARED_CACHE_ROOT = Path(__file__).resolve().parent / "outputs" / "00" / "native_cache"
 SHARED_CACHE_VERSION = 3
 KEYS = ["run_label", "real_step", "real_step_id"]
 

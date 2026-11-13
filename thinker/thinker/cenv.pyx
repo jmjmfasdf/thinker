@@ -373,6 +373,7 @@ cdef class cWrapper():
     cdef int reset_mode
     cdef bool dynamic_search
     cdef int max_search_steps
+    cdef int min_search_steps
 
     cdef int enc_type
     cdef int enc_f_type
@@ -486,6 +487,10 @@ cdef class cWrapper():
         self.reset_mode = flags.reset_mode
         self.dynamic_search = getattr(flags, "dynamic_search", False)
         self.max_search_steps = int(getattr(flags, "max_search_steps", -1))
+        self.min_search_steps = int(getattr(flags, "min_search_steps", 0))
+        if self.min_search_steps < 0 or (self.max_search_steps > 0 and
+                                       self.min_search_steps > self.max_search_steps):
+            raise ValueError("min_search_steps must be nonnegative and within the search cap")
         self.has_action_seq = flags.has_action_seq
 
         self.has_action_seq = flags.has_action_seq
@@ -973,7 +978,7 @@ cdef class cWrapper():
                         self.rollout_depth[i] >= self.max_depth - 1):
                     legal_control_mask[i, 0] = True
                 legal_control_mask[i, 1] = True
-                legal_control_mask[i, 2] = True
+                legal_control_mask[i, 2] = self.search_steps[i] >= self.min_search_steps
 
         if info is None:
             return_info = util.dict_map(self.default_info, lambda x: x.clone())
@@ -1566,6 +1571,8 @@ cdef class cModelWrapper(cWrapper):
             self.max_rollout_depth_[i] = self.max_rollout_depth[i]
             if self.phase[i] == 0:  # SEARCH
                 control_i = control[i]
+                assert not (control_i == 2 and self.search_steps[i] < self.min_search_steps), \
+                    "STOP is illegal before min_search_steps"
                 assert not (
                     control_i == 0 and self.max_depth > 0 and
                     self.rollout_depth[i] >= self.max_depth - 1), \
@@ -2286,6 +2293,8 @@ cdef class cPerfectWrapper(cWrapper):
             self.max_rollout_depth_[i] = self.max_rollout_depth[i]
             if self.phase[i] == 0:  # SEARCH
                 control_i = control[i]
+                assert not (control_i == 2 and self.search_steps[i] < self.min_search_steps), \
+                    "STOP is illegal before min_search_steps"
                 assert not (
                     control_i == 0 and self.max_depth > 0 and
                     self.rollout_depth[i] >= self.max_depth - 1), \

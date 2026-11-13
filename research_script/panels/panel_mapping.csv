@@ -1,0 +1,21 @@
+source_panel,theme,output_stem,definition,adaptation
+COSYNE Figure 1 framework,00,reference_only,Conceptual framework,Retained original schematic; not a game-specific statistical result
+COSYNE Figure 2A,01,cosyne_fig2A_action_persistence,Censoring-aware action persistence and active exit routes,All original human observations and timestamps; Enduro added; no replay-grid downsampling
+COSYNE Figure 2B,01,cosyne_fig2B_duration_prediction,Previous action versus duration prediction,Original human records; leave-session-out evaluation separately for both transition directions and all switches
+COSYNE Figure 2C,01,cosyne_fig2C_duration_switch_probability,Duration-dependent switch probability,Original human records; common physical-duration bins; participant curves and equal-run means
+COSYNE Figure 2D,02,cosyne_fig2D_matched_MU,Matched persistence and switching M/U,Same context matching as theme02; U_all includes B=0
+COSYNE Figure 2E,02,cosyne_fig2E_MU_switch_surface,Switch probability across M and U,Variable-budget cohort; supported equal-participant surfaces for each direction
+COSYNE Figure 3A,04,cosyne_fig3A_search_update_composition,Update difference by search index and branch,Both pair members must reach index; no padding of unobserved imagination
+COSYNE Figure 3B,04,cosyne_fig3B_policy_change_sensitivity,Unrestricted local U slope of same-head endpoint policy change,Only native root SEARCH-head choices; raw M/U; minimum support retained
+COSYNE Figure 3C,02,cosyne_fig3C_K_transition,Adjusted bidirectional transition curves and matched K,Natural cubic percentile curves; K separate from learned VOC
+COSYNE Figure 3D,07,not_rerun,Model and BOLD dissimilarity matrices,Neural excluded from this run
+COSYNE Figure 3E,07,not_rerun,ROI RSA distributions and heatmaps,Neural excluded from this run
+Dynamic extension,03,gate_probability_execution,Gate probability versus actual continuation,Start versus later continuation; forced-stop censoring
+Dynamic extension,03,planning_budget_distribution,Variable planning-budget distribution,Includes zero computations
+Dynamic extension,04,actor_readout_comparison,Search-content contribution to actor readouts,Verified existing held-out readout results
+Dynamic extension,05,heldout_prediction_comparison,Incremental human action prediction,Verified held-out exact action and bidirectional scores
+Dynamic extension,09,state_dependent_computation,Observed state versus planning budget,Descriptive curves accompany adjusted regressions
+Dynamic extension,10,paired_environment_utility,Observed paired reward benefit and net utility,Existing sub001 pilot only; protocols kept separate; no new score evaluation
+Dynamic extension,12,bidirectional_transition_trajectories,Transition-aligned M/U/K/VOC/budget trajectories,Episode boundaries preserved; descriptive overlapping windows
+Dynamic extension,12,heldout_prediction_comparison,Incremental temporal context prediction,Verified existing held-out results
+Retained follow-up,13,existing_game_specific_HSMM,Exploratory behavioral modes,Existing campaign retained; Enduro unsupported by prespecified feature contract

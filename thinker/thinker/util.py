@@ -10440,8 +10440,20 @@ def process_flags(flags):
         flags.think_cost_anneal = False
     if not hasattr(flags, "dynamic_search_hidden_dim"):
         flags.dynamic_search_hidden_dim = 100
+    if hasattr(flags, "dynamic_search_state_reset"):
+        if flags.dynamic_search_state_reset not in {"observation", "episode"}:
+            raise ValueError(
+                "dynamic_search_state_reset must be 'observation' or 'episode'"
+            )
 
     if flags.dynamic_search:
+        minimum = getattr(flags, "min_search_steps", 0)
+        if type(minimum) is not int or minimum < 0:
+            raise ValueError("min_search_steps must be a nonnegative integer")
+        if flags.max_search_steps > 0 and minimum > flags.max_search_steps:
+            raise ValueError("min_search_steps cannot exceed max_search_steps")
+        if minimum and flags.voc_actor_policy_version_barrier:
+            raise ValueError("min_search_steps is outside the frozen atomic VOC protocol")
         if flags.wrapper_type not in [0, 2]:
             raise ValueError(
                 "dynamic_search supports wrapper_type 0 (learned) and "
@@ -10459,9 +10471,11 @@ def process_flags(flags):
         flags.has_action_seq = False
 
     if flags.dynamic_voc_mode != "off":
-        if not np.isclose(float(flags.think_cost), 0.0005, rtol=0.0, atol=1e-12):
+        if not np.isfinite(float(flags.think_cost)) or float(flags.think_cost) < 0:
+            raise ValueError("think_cost must be finite and nonnegative")
+        if flags.voc_actor_policy_version_barrier and not np.isclose(float(flags.think_cost), 0.0005, rtol=0.0, atol=1e-12):
             raise ValueError(
-                "dynamic_voc_mode shadow/control requires fixed "
+                "frozen atomic VOC protocol requires fixed "
                 f"think_cost=0.0005; got {flags.think_cost!r}"
             )
         if bool(flags.think_cost_anneal):
@@ -10695,6 +10709,14 @@ def add_parse(filename, parser=None, prefix=''):
     option = f'--{prefix}model_sr_dynamics_norm'
     if option not in parser._option_string_actions:
         parser.add_argument(option, choices=('batch', 'group'), default=None)
+    # Do not add fields to frozen historical VOC protocol keysets. New dynamic
+    # training resolves its episode-memory default after checkpoint loading.
+    option = f'--{prefix}dynamic_search_state_reset'
+    if option not in parser._option_string_actions:
+        parser.add_argument(option, choices=('observation', 'episode'), default=None)
+    option = f'--{prefix}min_search_steps'
+    if option not in parser._option_string_actions:
+        parser.add_argument(option, type=int, default=None)
     return parser
 
 def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
@@ -10733,6 +10755,12 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
     if kwargs.get("model_sr_dynamics_norm") is not None:
         config["model_sr_dynamics_norm"] = kwargs["model_sr_dynamics_norm"]
         explicit_config_keys.add("model_sr_dynamics_norm")
+    if kwargs.get("dynamic_search_state_reset") is not None:
+        config["dynamic_search_state_reset"] = kwargs["dynamic_search_state_reset"]
+        explicit_config_keys.add("dynamic_search_state_reset")
+    if kwargs.get("min_search_steps") is not None:
+        config["min_search_steps"] = kwargs["min_search_steps"]
+        explicit_config_keys.add("min_search_steps")
     # The schema discriminator is derived for canonical atomic CLIs and is
     # therefore intentionally absent from the global YAML/parser surface.
     # A caller can nevertheless supply it directly.  Preserve that explicit
@@ -11092,6 +11120,21 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
                 not (key in kwargs and kwargs[key] is not None)):
                 setattr(flags, key, value)
         print("Loaded config from %s" % config_path)
+
+    # Only fresh dynamic training changes default. Saved flags with an explicit
+    # policy retain it on resume; old evaluation/resume/preload configurations
+    # without a policy retain the actor's historical observation-reset fallback.
+    # Frozen atomic VOC protocols keep their original exact configuration.
+    if (
+        not hasattr(flags, "dynamic_search_state_reset")
+        and getattr(flags, "dynamic_search", False)
+        and getattr(flags, "train_actor", False)
+        and not flags.ckp
+        and not any(getattr(flags, name, "") for name in
+                    ("preload", "preload_actor", "voc_parent_checkpoint"))
+        and not getattr(flags, "voc_actor_policy_version_barrier", False)
+    ):
+        flags.dynamic_search_state_reset = "episode"
 
     if not flags.xpid:        
         flags.xpid = "%s-%s" % (flags.project, time.strftime("%Y%m%d-%H%M%S"))

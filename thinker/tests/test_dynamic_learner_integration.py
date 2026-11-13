@@ -281,6 +281,9 @@ def _rollout(flags):
         ([0, 0, 2], [util.PROCEED, util.PROCEED, util.PROCEED]),
         ([1, 1, 1], [util.STOP, util.STOP, util.STOP]),
     ]
+    if getattr(flags, "min_search_steps", 0):
+        # The final row starts a new real decision: its first query is required.
+        actions[-1] = ([1, 1, 1], [util.PROCEED] * 3)
 
     rows = []
     initial_actor_state = None

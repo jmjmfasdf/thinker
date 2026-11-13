@@ -6929,6 +6929,39 @@ def test_schema11_and_schema12_consume_transaction_keep_inherited_step_order(
     assert learner._last_voc_gradient_step.optimizer_stepped is True
 
 
+def _capture_stable_actor_reductions(monkeypatch, actor_parameter_ids, events, clip_counts):
+    """Observe the FP64 actor path as well as the Q path's torch reductions."""
+    from thinker import numeric_stability
+
+    original_norm = numeric_stability.stable_grad_norm
+    original_clip = numeric_stability.stable_clip_grad_norm_
+    clipping = False
+
+    def capture_norm(parameters, norm_type=2.0):
+        parameters = list(parameters)
+        assert {id(p) for p in parameters} == actor_parameter_ids
+        # Clipping computes its own norm; expose the same two high-level
+        # operations as the original transaction test, not its internals.
+        if not clipping:
+            events.append("norm_actor")
+        return original_norm(parameters, norm_type)
+
+    def capture_clip(parameters, max_norm, norm_type=2.0):
+        nonlocal clipping
+        parameters = list(parameters)
+        assert {id(p) for p in parameters} == actor_parameter_ids
+        events.append("clip_actor")
+        clip_counts["actor"] += 1
+        clipping = True
+        try:
+            return original_clip(parameters, max_norm, norm_type)
+        finally:
+            clipping = False
+
+    monkeypatch.setattr(numeric_stability, "stable_grad_norm", capture_norm)
+    monkeypatch.setattr(numeric_stability, "stable_clip_grad_norm_", capture_clip)
+
+
 class _Schema11TransactionScaler:
     """CPU test double that exposes the inherited GradScaler transaction."""
 
@@ -7109,6 +7142,9 @@ def test_schema11_and_schema12_amp_success_bind_full_transaction_order(
         return result
 
     monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", capture_clip)
+    _capture_stable_actor_reductions(
+        monkeypatch, actor_parameter_ids, events, clip_counts
+    )
 
     original_actor_step = learner.optimizer.step
 
@@ -7344,6 +7380,9 @@ def test_schema11_and_schema12_amp_found_inf_suppress_q_downstream(
         return original_clip(parameters, max_norm)
 
     monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", capture_clip)
+    _capture_stable_actor_reductions(
+        monkeypatch, actor_parameter_ids, events, clip_counts
+    )
     original_actor_step = learner.optimizer.step
 
     def capture_actor_step(*args, **kwargs):

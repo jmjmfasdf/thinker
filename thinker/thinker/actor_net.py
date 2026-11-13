@@ -1155,6 +1155,16 @@ class ActorNetSingle(ActorBaseNet):
         self.tran_dim = flags.tran_dim 
         self.tran_reset_mode = flags.tran_reset_mode
         self.dynamic_tree_rep = self.dynamic_search and self.see_tree_rep
+        # Configs saved before episode-persistent search memory used a fresh
+        # GRU at every real observation. Keep that behavior for old checkpoints
+        # without this field; fresh training resolves the default in util.
+        self.dynamic_search_state_reset = getattr(
+            flags, "dynamic_search_state_reset", "observation"
+        )
+        if self.dynamic_search_state_reset not in {"observation", "episode"}:
+            raise ValueError(
+                "dynamic_search_state_reset must be 'observation' or 'episode'"
+            )
         self.tree_rep_rnn = (
             flags.tree_rep_rnn and flags.see_tree_rep and not self.dynamic_tree_rep
         )
@@ -1562,6 +1572,28 @@ class ActorNetSingle(ActorBaseNet):
                     )
                     if search_state_reset.ndim == 3 and search_state_reset.shape[-1] == 1:
                         search_state_reset = search_state_reset.squeeze(-1)
+                if self.dynamic_search_state_reset == "episode":
+                    # search_state_reset marks a new real root, not necessarily
+                    # a new episode. Preserve memory across ordinary roots and
+                    # carried/rebuilt trees. Model-predicted terminals and the
+                    # imagined RESET control must not erase real-time memory.
+                    real_done = getattr(env_out, "real_done", None)
+                    if real_done is None:
+                        real_done = env_out.done
+                    episode_end = real_done.to(
+                        device=tree_rep.device, dtype=torch.bool
+                    ) | env_out.truncated_done.to(
+                        device=tree_rep.device, dtype=torch.bool
+                    )
+                    real_transition = getattr(env_out, "real_transition", None)
+                    if real_transition is not None:
+                        # env.reset emits a root without an environment step.
+                        # This also clears a caller-provided stale state when
+                        # explicitly starting a new run/episode.
+                        episode_end = episode_end | ~real_transition.to(
+                            device=tree_rep.device, dtype=torch.bool
+                        )
+                    search_state_reset = search_state_reset & episode_end
                 core_state_ = core_state[self.state_idx['tree_rep']]
                 encoded_tree_rep, core_state_ = self.tree_rep_encoder(
                     tree_rep,

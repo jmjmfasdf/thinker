@@ -12,14 +12,18 @@ earlier actor-only geometries:
    terminal real-head minus initial imaginary-head margin, retained as a
    diagnostic readout rather than a within-head policy update.
 
-The same evaluation--revision variables are also related to three allocation
-properties of the fixed search budget: root-branch diversity, mean terminal
-depth of search bouts, and the fraction of deep expansion events.  A separate
+The allocation analyses deliberately use a different revision summary:
+signed Q revision (Q_signed), the arithmetic mean sampled-branch root-Q update
+across valid status-2 events.  It asks whether net upward versus downward value
+revision covaries with root-branch diversity, mean terminal depth, and the
+fraction of deep expansion events under the observed search budget. A separate
 completed-bout analysis asks whether longer, known-onset action bouts are
-associated with a deeper and narrower allocation profile.  The window-level
-allocation analysis uses every eligible real step and is not conditioned on a
-future action transition; the duration endpoint-change analysis is explicitly
-restricted to completed, known-onset transition bouts.
+associated with a deeper and narrower allocation profile after controlling
+start Q_signed, margin, current/origin action, destination action, and prior
+reward.  The window-level allocation analysis uses every eligible real step
+and is not conditioned on a future action transition; the duration
+endpoint-change analysis is explicitly restricted to completed, known-onset
+transition bouts.
 
 The first two quantities define a two-dimensional evaluation--revision plane.
 Actor-margin shift and the subsequent human stay/switch are outcomes overlaid
@@ -38,6 +42,7 @@ python research_script/02_evaluation_revision_geometry.py --game 1 \
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import math
@@ -55,6 +60,7 @@ import pandas as pd
 import statsmodels.api as sm
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.font_manager import FontProperties, fontManager
+from matplotlib.lines import Line2D
 from scipy import stats
 from scipy.ndimage import gaussian_filter
 
@@ -70,11 +76,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs" / "02_evaluation_revision_geometry"
 KEYS = ["run_label", "real_step", "real_step_id"]
 EPS = 1e-12
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
+FIGURE6_RENDER_VERSION = 2
+FIGURE7_RENDER_VERSION = 1
 N_ACTIONS = 6
 
 PRE_SEARCH_MARGIN_LABEL = "Pre-search action margin (M)"
 Q_REVISION_LABEL = "Q revision magnitude (Q_rev)"
+SIGNED_Q_REVISION_LABEL = "Signed Q revision (Q_signed)"
 TRANSITION_MARGIN_LABEL = "Transition margin"
 
 ALLOCATION_METRICS: Tuple[Tuple[str, str, str], ...] = (
@@ -147,6 +156,15 @@ def atomic_json(path: Path, payload: Mapping[str, object]) -> None:
         json.dumps(dict(payload), indent=2, default=str), encoding="utf-8"
     )
     temporary.replace(path)
+
+
+def file_sha256(path: Path) -> str:
+    """Return a stable content digest for a rendered artifact or input."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def save_figure(fig: plt.Figure, path: Path) -> None:
@@ -378,11 +396,13 @@ def aggregate_revision_events(
         )
         selected = chunk.loc[valid, KEYS].copy()
         selected["revision_abs"] = revision.loc[valid].abs().to_numpy()
+        selected["revision_signed"] = revision.loc[valid].to_numpy()
         selected["revision_directed"] = directed.loc[valid].to_numpy()
         grouped = (
             selected.groupby(KEYS, as_index=False, sort=False)
             .agg(
                 revision_abs_sum=("revision_abs", "sum"),
+                revision_signed_sum=("revision_signed", "sum"),
                 revision_event_count=("revision_abs", "size"),
                 revision_directed_sum=("revision_directed", "sum"),
             )
@@ -397,12 +417,17 @@ def aggregate_revision_events(
         combined.groupby(KEYS, as_index=False, sort=False)
         .agg(
             revision_abs_sum=("revision_abs_sum", "sum"),
+            revision_signed_sum=("revision_signed_sum", "sum"),
             revision_event_count=("revision_event_count", "sum"),
             revision_directed_sum=("revision_directed_sum", "sum"),
         )
     )
     summary["value_revision_magnitude"] = (
         summary["revision_abs_sum"]
+        / summary["revision_event_count"].clip(lower=1)
+    )
+    summary["value_revision_signed_mean"] = (
+        summary["revision_signed_sum"]
         / summary["revision_event_count"].clip(lower=1)
     )
     summary["directional_revision_balance"] = (
@@ -420,8 +445,10 @@ def load_subject_metrics(
     *,
     force_revision_summary: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    global N_ACTIONS
     paths = cache_paths(cache_root, subject, game)
     manifest = validate_manifest(paths, subject=subject, game=game)
+    N_ACTIONS = int(manifest.get("num_actions", manifest.get("n_actions", 6)))
     model_columns = KEYS + [
         "subject",
         "session",
@@ -461,7 +488,11 @@ def load_subject_metrics(
     derivative_path = derivative_dir / "revision_window_summary.csv.gz"
     if derivative_path.exists() and not force_revision_summary:
         revision = pd.read_csv(derivative_path, low_memory=False)
-        if not set(KEYS + ["value_revision_magnitude"]).issubset(revision.columns):
+        required_revision_columns = KEYS + [
+            "value_revision_magnitude",
+            "value_revision_signed_mean",
+        ]
+        if not set(required_revision_columns).issubset(revision.columns):
             revision = aggregate_revision_events(paths.persistence_events)
     else:
         revision = aggregate_revision_events(paths.persistence_events)
@@ -519,6 +550,9 @@ def load_subject_metrics(
     merged["value_revision_robust_z"] = merged.groupby(
         "run_label", sort=False
     )["value_revision_log"].transform(robust_z)
+    merged["value_revision_signed_robust_z"] = merged.groupby(
+        "run_label", sort=False
+    )["value_revision_signed_mean"].transform(robust_z)
     merged["revision_event_fraction"] = (
         pd.to_numeric(merged["revision_event_count"], errors="coerce")
         / pd.to_numeric(merged["n_status2"], errors="coerce").clip(lower=1)
@@ -823,7 +857,7 @@ def plot_subject_geometry(
     )
     fig.delaxes(axes[1, 2])
     fig.suptitle(
-        f"Pre-search action margin–Q revision geometry · sub{subject:03d}, game {game}",
+        f"M–Q_rev geometry · sub{subject:03d}, game {game}",
         fontsize=17,
         x=0.5,
         y=0.995,
@@ -1097,7 +1131,7 @@ def plot_transition_trajectories(
     handles, labels = axes_flat[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=10.5)
     fig.suptitle(
-        f"Pre-search action margin–Q revision trajectories across same-action bouts · {title_suffix}",
+        f"M–Q_rev trajectories across same-action bouts · {title_suffix}",
         fontsize=16,
         x=0.5,
         y=0.99,
@@ -1836,7 +1870,7 @@ def plot_transition_specific_subject(
             ),
         )
     fig.suptitle(
-        f"Transition margin–Q revision geometry · sub{subject:03d}, game {game}",
+        f"Transition margin–Q_rev geometry · sub{subject:03d}, game {game}",
         fontsize=16.5, x=0.5, y=1.035,
     )
     save_figure(fig, output_path)
@@ -1904,7 +1938,7 @@ def plot_transition_specific_group(
             lambda value: f"sub{int(value):03d}", group_summary=group_summary,
         )
     fig.suptitle(
-        f"Cross-subject transition margin–Q revision geometry · game {game}",
+        f"Cross-subject transition margin–Q_rev geometry · game {game}",
         fontsize=16.5, x=0.5, y=1.035,
     )
     save_figure(fig, output_path)
@@ -1914,10 +1948,11 @@ def fit_allocation_run_effects(frame: pd.DataFrame) -> pd.DataFrame:
     """Fit marginal standardized allocation slopes in two source-state risks.
 
     Each run/outcome is fit twice: outcome z ~ margin z and outcome z ~
-    revision z.  These are deliberately univariate, unadjusted associations:
-    there is no mutual adjustment, action demeaning, interaction, or control
-    set.  The transition labels describe current-action risk strata rather
-    than selection on the future action.
+    signed revision z, where signed revision is mean_j(delta Q_j) over valid
+    status-2 events in the same search window.  These are deliberately
+    univariate, unadjusted associations: there is no mutual adjustment, action
+    demeaning, interaction, or control set.  The transition labels describe
+    current-action risk strata rather than selection on the future action.
     """
     records: List[Dict[str, object]] = []
     working = frame.copy()
@@ -1938,22 +1973,25 @@ def fit_allocation_run_effects(frame: pd.DataFrame) -> pd.DataFrame:
     ):
         run = run.copy()
         run["M"] = zscore(run["allocation_margin"])
-        run["V"] = zscore(run["value_revision_log"])
+        run["Q_signed"] = zscore(run["value_revision_signed_mean"])
         for outcome, _, _ in ALLOCATION_METRICS:
-            clean = run[["M", "V", outcome]].replace(
+            clean = run[["M", "Q_signed", outcome]].replace(
                 [np.inf, -np.inf], np.nan
             ).dropna().copy()
             if len(clean) < 100:
                 continue
             clean["Y"] = zscore(clean[outcome])
-            clean = clean.dropna(subset=["M", "V", "Y"])
+            clean = clean.dropna(subset=["M", "Q_signed", "Y"])
             if len(clean) < 100:
                 continue
             design_m = np.column_stack(
                 [np.ones(len(clean)), clean["M"].to_numpy(dtype=float)]
             )
             design_v = np.column_stack(
-                [np.ones(len(clean)), clean["V"].to_numpy(dtype=float)]
+                [
+                    np.ones(len(clean)),
+                    clean["Q_signed"].to_numpy(dtype=float),
+                ]
             )
             y = clean["Y"].to_numpy(dtype=float)
             beta_m = float(np.linalg.lstsq(design_m, y, rcond=None)[0][1])
@@ -1966,7 +2004,7 @@ def fit_allocation_run_effects(frame: pd.DataFrame) -> pd.DataFrame:
                 "outcome": outcome,
                 "n_rows": int(len(clean)),
                 "beta_M": beta_m,
-                "beta_V": beta_v,
+                "beta_Q_signed": beta_v,
             }
             records.append(record)
     return pd.DataFrame(records)
@@ -1988,7 +2026,7 @@ def build_completed_bout_allocation(bout_rows: pd.DataFrame) -> pd.DataFrame:
         )
         comparable_columns = [
             margin_column,
-            "value_revision_log",
+            "value_revision_signed_mean",
             *[metric for metric, _, _ in ALLOCATION_METRICS],
         ]
         comparable = bout[comparable_columns].apply(
@@ -2022,8 +2060,10 @@ def build_completed_bout_allocation(bout_rows: pd.DataFrame) -> pd.DataFrame:
             "start_transition_margin": float(
                 pd.to_numeric(first[margin_column], errors="coerce")
             ),
-            "start_value_revision_log": float(
-                pd.to_numeric(first["value_revision_log"], errors="coerce")
+            "start_value_revision_signed_mean": float(
+                pd.to_numeric(
+                    first["value_revision_signed_mean"], errors="coerce"
+                )
             ),
         }
         for metric, _, _ in ALLOCATION_METRICS:
@@ -2061,7 +2101,7 @@ def fit_duration_run_effects(
                 "destination_action",
                 "previous_reward",
                 "start_transition_margin",
-                "start_value_revision_log",
+                "start_value_revision_signed_mean",
                 start_column,
                 terminal_column,
             ]
@@ -2082,7 +2122,7 @@ def fit_duration_run_effects(
             y = (terminal - start) / endpoint_scale
             d = zscore(clean["log_bout_duration"])
             m = nuisance_zscore(clean["start_transition_margin"])
-            v = nuisance_zscore(clean["start_value_revision_log"])
+            v = nuisance_zscore(clean["start_value_revision_signed_mean"])
             reward = nuisance_zscore(clean["previous_reward"])
             origin_dummies = pd.get_dummies(
                 clean["origin_action"].astype(int),
@@ -2100,7 +2140,7 @@ def fit_duration_run_effects(
                 {
                     "previous_reward": reward,
                     "start_transition_margin": m,
-                    "start_value_revision": v,
+                    "start_signed_q_revision": v,
                 },
                 index=clean.index,
             )
@@ -2166,8 +2206,8 @@ def fit_duration_run_effects(
                 "beta_start_transition_margin": float(
                     coefficients.get("start_transition_margin", 0.0)
                 ),
-                "beta_start_value_revision": float(
-                    coefficients.get("start_value_revision", 0.0)
+                "beta_start_signed_q_revision": float(
+                    coefficients.get("start_signed_q_revision", 0.0)
                 ),
                 "n_origin_dummy_columns": int(origin_dummies.shape[1]),
                 "n_destination_dummy_columns": int(destination_dummies.shape[1]),
@@ -2201,7 +2241,7 @@ def fit_duration_run_effects(
 def summarize_allocation_group_effects(
     effects: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    columns = ["beta_M", "beta_V"]
+    columns = ["beta_M", "beta_Q_signed"]
     subject_effects = effects.groupby(
         ["subject", "transition_type", "outcome"], as_index=False
     )[columns].mean()
@@ -2234,7 +2274,7 @@ def summarize_allocation_run_effects(effects: pd.DataFrame) -> pd.DataFrame:
     for (transition_type, outcome), data in effects.groupby(
         ["transition_type", "outcome"], sort=False
     ):
-        for metric in ("beta_M", "beta_V"):
+        for metric in ("beta_M", "beta_Q_signed"):
             values = pd.to_numeric(data[metric], errors="coerce").dropna()
             mean, p = exact_sign_flip(values)
             records.append(
@@ -2310,8 +2350,8 @@ def plot_allocation_effects(
     unit: str = "run_label",
     group_summary: Optional[pd.DataFrame] = None,
 ) -> None:
-    coefficient_columns = ["beta_M", "beta_V"]
-    labels = [TRANSITION_MARGIN_LABEL, Q_REVISION_LABEL]
+    coefficient_columns = ["beta_M", "beta_Q_signed"]
+    labels = [TRANSITION_MARGIN_LABEL, SIGNED_Q_REVISION_LABEL]
     colors = [BLUE, ORANGE]
     markers = ["o", "^"]
     transition_order = ("noop_to_active", "active_to_noop")
@@ -2367,7 +2407,7 @@ def plot_allocation_effects(
                 ]
                 text_bits = []
                 for column, short in zip(
-                    coefficient_columns, ["Transition margin", "Q_rev"]
+                    coefficient_columns, ["Transition margin", "Q_signed"]
                 ):
                     one = rows.loc[rows["metric"].eq(column)]
                     if not one.empty:
@@ -2378,6 +2418,7 @@ def plot_allocation_effects(
                 axis.text(
                     0.02, 0.98, "\n".join(text_bits), transform=axis.transAxes,
                     va="top", fontsize=8.1,
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.78},
                 )
     handles, legend_labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(
@@ -2385,21 +2426,665 @@ def plot_allocation_effects(
         bbox_to_anchor=(0.5, 0.055), frameon=False,
     )
     fig.suptitle(
-        f"Transition margin/Q revision and search allocation - {title_suffix}",
+        f"Transition margin/Q_signed and search allocation - {title_suffix}",
         fontsize=16, y=0.995,
     )
     fig.text(0.055, 0.905, row_subtitles["noop_to_active"], fontsize=11.5, weight="bold")
     fig.text(0.055, 0.495, row_subtitles["active_to_noop"], fontsize=11.5, weight="bold")
     fig.text(
         0.5, 0.018,
-        "Marginal standardized slopes from separate univariate models "
-        "Y~transition margin and Y~Q_rev; no mutual adjustment, action control, "
-        "interaction, or covariates. Q_rev/allocation are same-window.",
+        "Each point is one run (individual) or one subject mean (group); lines "
+        "only guide sign-consistency reading. Separate standardized models are "
+        "Y~transition margin and Y~Q_signed, with no mutual adjustment or "
+        "covariates. Q_signed/allocation are same-window.",
         ha="center", fontsize=9.3,
     )
     fig.subplots_adjust(
         left=0.055, right=0.99, bottom=0.20, top=0.85,
         hspace=0.50, wspace=0.28,
+    )
+    save_figure(fig, output_path)
+
+
+def build_allocation_scatter_points(
+    frame: pd.DataFrame,
+    *,
+    unit: str,
+) -> pd.DataFrame:
+    """Build equal-unit Figure-6 scatter points from window-level metrics.
+
+    Individual figures use one point per run.  Group figures first average
+    windows within run and then average runs within subject, so every subject
+    contributes one equally weighted point regardless of window count.
+    """
+    if unit not in {"run_label", "subject"}:
+        raise ValueError(f"Unsupported Figure-6 scatter unit: {unit}")
+    working = frame.copy()
+    incumbent = pd.to_numeric(working["incumbent_action"], errors="coerce")
+    working = working.loc[incumbent.between(0, N_ACTIONS - 1)].copy()
+    working["transition_type"] = np.where(
+        pd.to_numeric(working["incumbent_action"], errors="coerce").eq(0),
+        "noop_to_active",
+        "active_to_noop",
+    )
+    working["allocation_margin"] = np.where(
+        pd.to_numeric(working["incumbent_action"], errors="coerce").eq(0),
+        pd.to_numeric(working["model_current_action_margin"], errors="coerce"),
+        pd.to_numeric(working["model_current_vs_noop_margin"], errors="coerce"),
+    )
+    aggregation: Dict[str, Tuple[str, str]] = {
+        "n_windows": ("allocation_margin", "size"),
+        "M_raw": ("allocation_margin", "mean"),
+        "Q_signed_raw": ("value_revision_signed_mean", "mean"),
+    }
+    for outcome, _, _ in ALLOCATION_METRICS:
+        aggregation[f"{outcome}_raw"] = (outcome, "mean")
+    run_points = (
+        working.groupby(
+            ["subject", "game", "run_label", "transition_type"],
+            as_index=False,
+            sort=False,
+        )
+        .agg(**aggregation)
+    )
+    if unit == "subject":
+        value_columns = [
+            "M_raw",
+            "Q_signed_raw",
+            *[f"{outcome}_raw" for outcome, _, _ in ALLOCATION_METRICS],
+        ]
+        subject_values = run_points.groupby(
+            ["subject", "game", "transition_type"],
+            as_index=False,
+            sort=False,
+        )[value_columns].mean()
+        subject_counts = run_points.groupby(
+            ["subject", "game", "transition_type"],
+            as_index=False,
+            sort=False,
+        ).agg(
+            n_runs=("run_label", "nunique"),
+            n_windows=("n_windows", "sum"),
+        )
+        unit_points = subject_values.merge(
+            subject_counts,
+            on=["subject", "game", "transition_type"],
+            how="left",
+            validate="one_to_one",
+        )
+        unit_points["unit_value"] = unit_points["subject"]
+    else:
+        unit_points = run_points.copy()
+        unit_points["n_runs"] = 1
+        unit_points["unit_value"] = unit_points["run_label"]
+
+    records: List[Dict[str, object]] = []
+    predictors = (
+        ("M", "M_raw", TRANSITION_MARGIN_LABEL),
+        ("Q_signed", "Q_signed_raw", SIGNED_Q_REVISION_LABEL),
+    )
+    for row in unit_points.itertuples(index=False):
+        for outcome, outcome_title, outcome_subtitle in ALLOCATION_METRICS:
+            y_raw = float(getattr(row, f"{outcome}_raw"))
+            for predictor, predictor_column, predictor_label in predictors:
+                records.append(
+                    {
+                        "subject": int(row.subject),
+                        "game": int(row.game),
+                        "unit": unit,
+                        "unit_value": getattr(row, "unit_value"),
+                        "transition_type": str(row.transition_type),
+                        "predictor": predictor,
+                        "predictor_label": predictor_label,
+                        "outcome": outcome,
+                        "outcome_title": outcome_title,
+                        "outcome_subtitle": outcome_subtitle,
+                        "x_raw": float(getattr(row, predictor_column)),
+                        "y_raw": y_raw,
+                        "n_runs": int(row.n_runs),
+                        "n_windows": int(row.n_windows),
+                    }
+                )
+    points = pd.DataFrame(records)
+    panel_keys = ["transition_type", "predictor", "outcome"]
+    points["x_z_across_units"] = points.groupby(
+        panel_keys, sort=False
+    )["x_raw"].transform(zscore)
+    points["y_z_across_units"] = points.groupby(
+        panel_keys, sort=False
+    )["y_raw"].transform(zscore)
+    return points
+
+
+def summarize_allocation_scatter_trends(points: pd.DataFrame) -> pd.DataFrame:
+    """Fit descriptive across-unit trend lines shown in Figure 6."""
+    records: List[Dict[str, object]] = []
+    for (transition_type, predictor, outcome), data in points.groupby(
+        ["transition_type", "predictor", "outcome"], sort=False
+    ):
+        clean = data[["x_z_across_units", "y_z_across_units"]].replace(
+            [np.inf, -np.inf], np.nan
+        ).dropna()
+        if len(clean) < 3:
+            continue
+        result = stats.linregress(
+            clean["x_z_across_units"].to_numpy(dtype=float),
+            clean["y_z_across_units"].to_numpy(dtype=float),
+        )
+        critical = float(stats.t.ppf(0.975, len(clean) - 2))
+        records.append(
+            {
+                "unit": str(data["unit"].iloc[0]),
+                "transition_type": str(transition_type),
+                "predictor": str(predictor),
+                "outcome": str(outcome),
+                "n_units": int(len(clean)),
+                "slope_standardized": float(result.slope),
+                "intercept_standardized": float(result.intercept),
+                "pearson_r": float(result.rvalue),
+                "ols_two_sided_p_descriptive": float(result.pvalue),
+                "slope_ci_low": float(result.slope - critical * result.stderr),
+                "slope_ci_high": float(result.slope + critical * result.stderr),
+            }
+        )
+    summary = pd.DataFrame(records)
+    if not summary.empty:
+        summary["bh_fdr_q_descriptive"] = bh_fdr(
+            summary["ols_two_sided_p_descriptive"]
+        )
+    return summary
+
+
+def plot_allocation_scatter_trends(
+    points: pd.DataFrame,
+    trends: pd.DataFrame,
+    output_path: Path,
+    title_suffix: str,
+    *,
+    unit: str,
+) -> None:
+    """Plot Figure 6 as x-y scatter panels with one point per analysis unit."""
+    transition_order = ("noop_to_active", "active_to_noop")
+    predictor_order = ("M", "Q_signed")
+    predictor_colors = {"M": BLUE, "Q_signed": ORANGE}
+    predictor_markers = {"M": "o", "Q_signed": "^"}
+    row_subtitles = {
+        "noop_to_active": "A. NOOP → Active risk windows · current action = NOOP",
+        "active_to_noop": "B. Active → NOOP risk windows · current action = active",
+    }
+    grain = "run" if unit == "run_label" else "subject"
+    fig, axes = plt.subplots(
+        2,
+        6,
+        figsize=(22.0, 9.6),
+        facecolor="white",
+        sharex=True,
+        sharey=True,
+    )
+    panels = [
+        (outcome, title, subtitle, predictor)
+        for outcome, title, subtitle in ALLOCATION_METRICS
+        for predictor in predictor_order
+    ]
+    for row_index, transition_type in enumerate(transition_order):
+        for column_index, (outcome, title, subtitle, predictor) in enumerate(panels):
+            axis = axes[row_index, column_index]
+            selected = points.loc[
+                points["transition_type"].eq(transition_type)
+                & points["outcome"].eq(outcome)
+                & points["predictor"].eq(predictor)
+            ].copy()
+            color = predictor_colors[predictor]
+            marker = predictor_markers[predictor]
+            axis.scatter(
+                selected["x_z_across_units"],
+                selected["y_z_across_units"],
+                s=38 if unit == "run_label" else 52,
+                marker=marker,
+                facecolor=color,
+                edgecolor="white",
+                linewidth=0.7,
+                alpha=0.9,
+                zorder=3,
+            )
+            one_trend = trends.loc[
+                trends["transition_type"].eq(transition_type)
+                & trends["outcome"].eq(outcome)
+                & trends["predictor"].eq(predictor)
+            ]
+            if not one_trend.empty:
+                trend = one_trend.iloc[0]
+                x_values = selected["x_z_across_units"].to_numpy(dtype=float)
+                x_grid = np.linspace(float(np.nanmin(x_values)), float(np.nanmax(x_values)), 100)
+                y_grid = (
+                    float(trend["intercept_standardized"])
+                    + float(trend["slope_standardized"]) * x_grid
+                )
+                axis.plot(x_grid, y_grid, color=color, lw=2.0, zorder=2)
+                axis.text(
+                    0.04,
+                    0.96,
+                    f"trend r={trend['pearson_r']:+.2f}\nn={int(trend['n_units'])} {grain}s",
+                    transform=axis.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8.0,
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82},
+                )
+            if unit == "subject":
+                for point in selected.itertuples(index=False):
+                    axis.annotate(
+                        str(int(point.subject)),
+                        (point.x_z_across_units, point.y_z_across_units),
+                        xytext=(3, 3),
+                        textcoords="offset points",
+                        fontsize=7.3,
+                        color=INK,
+                    )
+            axis.axhline(0, color=GRID, lw=0.8, zorder=0)
+            axis.axvline(0, color=GRID, lw=0.8, zorder=0)
+            if row_index == 0:
+                predictor_title = "M" if predictor == "M" else "Q_signed"
+                axis.set_title(f"{title}\n{predictor_title} → allocation", fontsize=9.4)
+            if row_index == 1:
+                axis.set_xlabel(
+                    f"{grain.capitalize()}-mean "
+                    f"{'M' if predictor == 'M' else 'Q_signed'}\n(z across {grain}s)",
+                    fontsize=8.5,
+                )
+            if column_index == 0:
+                axis.set_ylabel(
+                    f"{grain.capitalize()}-mean allocation\n(z across {grain}s)",
+                    fontsize=9.0,
+                )
+    fig.suptitle(
+        f"Evaluation/revision and search allocation scatter · {title_suffix}",
+        fontsize=16,
+        y=0.995,
+    )
+    fig.text(0.04, 0.905, row_subtitles["noop_to_active"], fontsize=11.5, weight="bold")
+    fig.text(0.04, 0.495, row_subtitles["active_to_noop"], fontsize=11.5, weight="bold")
+    fig.text(
+        0.5,
+        0.018,
+        f"Each point is one {grain}; predictor and allocation are means of the same risk-window rows, then z-scored across displayed {grain}s. Lines are descriptive across-{grain} OLS trends, not the within-run slope/FDR inference saved separately.",
+        ha="center",
+        fontsize=9.2,
+    )
+    fig.subplots_adjust(
+        left=0.045,
+        right=0.995,
+        bottom=0.19,
+        top=0.85,
+        hspace=0.48,
+        wspace=0.24,
+    )
+    save_figure(fig, output_path)
+
+
+def build_allocation_within_run_bins(
+    frame: pd.DataFrame,
+    *,
+    n_bins: int = 9,
+) -> pd.DataFrame:
+    """Return run-balanced binned points for the Figure-6 within-run display.
+
+    The standardization and complete-case rows exactly mirror
+    ``fit_allocation_run_effects``. Quantile bins are formed independently in
+    each run so dense runs do not dominate the displayed mean curve.
+    """
+    if n_bins < 3:
+        raise ValueError("Figure-6 display requires at least three bins")
+    working = frame.copy()
+    incumbent = pd.to_numeric(working["incumbent_action"], errors="coerce")
+    working = working.loc[incumbent.between(0, N_ACTIONS - 1)].copy()
+    working["transition_type"] = np.where(
+        pd.to_numeric(working["incumbent_action"], errors="coerce").eq(0),
+        "noop_to_active",
+        "active_to_noop",
+    )
+    working["allocation_margin"] = np.where(
+        pd.to_numeric(working["incumbent_action"], errors="coerce").eq(0),
+        pd.to_numeric(working["model_current_action_margin"], errors="coerce"),
+        pd.to_numeric(working["model_current_vs_noop_margin"], errors="coerce"),
+    )
+    records: List[Dict[str, object]] = []
+    for (transition_type, run_label), run in working.groupby(
+        ["transition_type", "run_label"], sort=False
+    ):
+        run = run.copy()
+        run["M"] = zscore(run["allocation_margin"])
+        run["Q_signed"] = zscore(run["value_revision_signed_mean"])
+        for outcome, _, _ in ALLOCATION_METRICS:
+            clean = run[["M", "Q_signed", outcome]].replace(
+                [np.inf, -np.inf], np.nan
+            ).dropna().copy()
+            if len(clean) < 100:
+                continue
+            clean["Y"] = zscore(clean[outcome])
+            clean = clean.dropna(subset=["M", "Q_signed", "Y"])
+            if len(clean) < 100:
+                continue
+            for predictor in ("M", "Q_signed"):
+                percentile = clean[predictor].rank(
+                    method="first", pct=True
+                ).to_numpy(dtype=float)
+                bin_index = np.minimum(
+                    (percentile * n_bins).astype(int), n_bins - 1
+                )
+                binned = (
+                    clean.assign(bin_index=bin_index)
+                    .groupby("bin_index", as_index=False, sort=True)
+                    .agg(
+                        predictor_z=(predictor, "mean"),
+                        allocation_z=("Y", "mean"),
+                        n_windows=("Y", "size"),
+                    )
+                )
+                for point in binned.itertuples(index=False):
+                    records.append(
+                        {
+                            "subject": int(run["subject"].iloc[0]),
+                            "game": int(run["game"].iloc[0]),
+                            "run_label": str(run_label),
+                            "transition_type": str(transition_type),
+                            "outcome": str(outcome),
+                            "predictor": predictor,
+                            "bin_index": int(point.bin_index),
+                            "predictor_z": float(point.predictor_z),
+                            "allocation_z": float(point.allocation_z),
+                            "n_windows": int(point.n_windows),
+                        }
+                    )
+    return pd.DataFrame(records)
+
+
+def allocation_unit_effects(
+    effects: pd.DataFrame,
+    *,
+    unit: str,
+) -> pd.DataFrame:
+    """Put the existing within-run coefficients at the displayed unit grain."""
+    if unit == "subject":
+        base = effects.groupby(
+            ["subject", "transition_type", "outcome"],
+            as_index=False,
+            sort=False,
+        )[["beta_M", "beta_Q_signed"]].mean()
+        base["unit_value"] = base["subject"]
+    elif unit == "run_label":
+        base = effects.copy()
+        base["unit_value"] = base["run_label"]
+    else:
+        raise ValueError(f"Unsupported Figure-6 coefficient unit: {unit}")
+    long = base.melt(
+        id_vars=["subject", "transition_type", "outcome", "unit_value"],
+        value_vars=["beta_M", "beta_Q_signed"],
+        var_name="metric",
+        value_name="beta",
+    )
+    long["predictor"] = long["metric"].map(
+        {"beta_M": "M", "beta_Q_signed": "Q_signed"}
+    )
+    return long
+
+
+def plot_allocation_within_run_consistency(
+    frame: pd.DataFrame,
+    effects: pd.DataFrame,
+    summary: pd.DataFrame,
+    output_path: Path,
+    title_suffix: str,
+    *,
+    unit: str,
+) -> None:
+    """Plot six panels that preserve the original within-run estimand.
+
+    M and signed Q share each panel. Thin lines are run slopes in a subject
+    figure and subject slopes in a group figure. Thick lines and bands are the
+    equal-unit mean and its 95% t interval. Insets show every unit coefficient.
+    """
+    transition_order = ("noop_to_active", "active_to_noop")
+    row_subtitles = {
+        "noop_to_active": "A. NOOP → Active risk windows · current action = NOOP",
+        "active_to_noop": "B. Active → NOOP risk windows · current action = active",
+    }
+    colors = {"M": BLUE, "Q_signed": ORANGE}
+    light_colors = {"M": BLUE_LIGHT, "Q_signed": ORANGE_LIGHT}
+    markers = {"M": "o", "Q_signed": "^"}
+    linestyles = {"M": "-", "Q_signed": "--"}
+    grain = "run" if unit == "run_label" else "subject"
+    binned = build_allocation_within_run_bins(frame)
+    unit_effect = allocation_unit_effects(effects, unit=unit)
+    if unit == "subject":
+        unit_bins = (
+            binned.groupby(
+                [
+                    "subject",
+                    "transition_type",
+                    "outcome",
+                    "predictor",
+                    "bin_index",
+                ],
+                as_index=False,
+                sort=False,
+            )[["predictor_z", "allocation_z"]]
+            .mean()
+        )
+        unit_bins["unit_value"] = unit_bins["subject"]
+    else:
+        unit_bins = binned.copy()
+        unit_bins["unit_value"] = unit_bins["run_label"]
+
+    finite_beta = pd.to_numeric(unit_effect["beta"], errors="coerce")
+    finite_y = pd.to_numeric(unit_bins["allocation_z"], errors="coerce")
+    candidates = np.r_[
+        np.abs(finite_beta[np.isfinite(finite_beta)].to_numpy()) * 2.2,
+        np.abs(finite_y[np.isfinite(finite_y)].to_numpy()),
+    ]
+    y_bound = 0.7
+    if candidates.size:
+        y_bound = float(np.clip(np.nanquantile(candidates, 0.995) * 1.18, 0.7, 2.4))
+
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(16.8, 10.0),
+        facecolor="white",
+        sharex=True,
+        sharey=True,
+    )
+    x_grid = np.linspace(-2.25, 2.25, 121)
+    for row_index, transition_type in enumerate(transition_order):
+        for column_index, (outcome, title, subtitle) in enumerate(ALLOCATION_METRICS):
+            axis = axes[row_index, column_index]
+            axis.axhline(0, color=GRID, lw=0.8, zorder=0)
+            axis.axvline(0, color=GRID, lw=0.8, zorder=0)
+            for predictor in ("M", "Q_signed"):
+                selected_effect = unit_effect.loc[
+                    unit_effect["transition_type"].eq(transition_type)
+                    & unit_effect["outcome"].eq(outcome)
+                    & unit_effect["predictor"].eq(predictor)
+                ].copy()
+                betas = pd.to_numeric(
+                    selected_effect["beta"], errors="coerce"
+                ).dropna().to_numpy(dtype=float)
+                if not len(betas):
+                    continue
+                color = colors[predictor]
+                for beta in betas:
+                    axis.plot(
+                        x_grid,
+                        beta * x_grid,
+                        color=color,
+                        lw=0.7,
+                        alpha=0.16 if unit == "run_label" else 0.22,
+                        linestyle=linestyles[predictor],
+                        zorder=1,
+                    )
+                predictions = np.outer(betas, x_grid)
+                mean_prediction = predictions.mean(axis=0)
+                if len(betas) >= 2:
+                    critical = float(stats.t.ppf(0.975, len(betas) - 1))
+                    half_width = critical * stats.sem(predictions, axis=0)
+                    axis.fill_between(
+                        x_grid,
+                        mean_prediction - half_width,
+                        mean_prediction + half_width,
+                        color=light_colors[predictor],
+                        alpha=0.22,
+                        linewidth=0,
+                        zorder=1,
+                    )
+                axis.plot(
+                    x_grid,
+                    mean_prediction,
+                    color=color,
+                    lw=2.5,
+                    linestyle=linestyles[predictor],
+                    zorder=3,
+                )
+                selected_bins = unit_bins.loc[
+                    unit_bins["transition_type"].eq(transition_type)
+                    & unit_bins["outcome"].eq(outcome)
+                    & unit_bins["predictor"].eq(predictor)
+                ].copy()
+                bin_summary = selected_bins.groupby(
+                    "bin_index", as_index=False, sort=True
+                ).agg(
+                    predictor_z=("predictor_z", "mean"),
+                    allocation_z=("allocation_z", "mean"),
+                )
+                axis.scatter(
+                    bin_summary["predictor_z"],
+                    bin_summary["allocation_z"],
+                    s=30,
+                    marker=markers[predictor],
+                    facecolor=color,
+                    edgecolor="white",
+                    linewidth=0.65,
+                    alpha=0.95,
+                    zorder=4,
+                )
+
+                metric = "beta_M" if predictor == "M" else "beta_Q_signed"
+                one_summary = summary.loc[
+                    summary["transition_type"].eq(transition_type)
+                    & summary["outcome"].eq(outcome)
+                    & summary["metric"].eq(metric)
+                ]
+                if not one_summary.empty:
+                    row = one_summary.iloc[0]
+                    q = float(row.get("bh_fdr_q", np.nan))
+                    n_positive = int(row.get("n_positive", np.sum(betas > 0)))
+                    axis.text(
+                        0.03,
+                        0.96 if predictor == "M" else 0.885,
+                        f"{'M' if predictor == 'M' else 'Q_signed'}: "
+                        f"β={np.mean(betas):+.3f}, +{n_positive}/{len(betas)}, "
+                        f"q={q:.3f}",
+                        transform=axis.transAxes,
+                        ha="left",
+                        va="top",
+                        fontsize=8.2,
+                        color=color,
+                        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.78},
+                        zorder=6,
+                    )
+
+            inset = axis.inset_axes([0.72, 0.61, 0.25, 0.32])
+            inset.set_facecolor((1, 1, 1, 0.90))
+            for predictor_index, predictor in enumerate(("M", "Q_signed")):
+                selected = unit_effect.loc[
+                    unit_effect["transition_type"].eq(transition_type)
+                    & unit_effect["outcome"].eq(outcome)
+                    & unit_effect["predictor"].eq(predictor)
+                ]
+                values = pd.to_numeric(selected["beta"], errors="coerce").dropna().to_numpy(dtype=float)
+                if not len(values):
+                    continue
+                offsets = np.linspace(-0.10, 0.10, len(values))
+                inset.scatter(
+                    predictor_index + offsets,
+                    values,
+                    s=13 if unit == "run_label" else 18,
+                    marker=markers[predictor],
+                    color=colors[predictor],
+                    alpha=0.72,
+                    edgecolor="white",
+                    linewidth=0.35,
+                    zorder=2,
+                )
+                mean = float(np.mean(values))
+                half = 0.0
+                if len(values) >= 2:
+                    half = float(
+                        stats.t.ppf(0.975, len(values) - 1) * stats.sem(values)
+                    )
+                inset.errorbar(
+                    predictor_index,
+                    mean,
+                    yerr=half,
+                    fmt=markers[predictor],
+                    ms=6.0,
+                    mfc=colors[predictor],
+                    mec=INK,
+                    mew=0.7,
+                    ecolor=INK,
+                    elinewidth=1.0,
+                    capsize=2.2,
+                    zorder=3,
+                )
+            inset.axhline(0, color=INK, lw=0.7, alpha=0.7)
+            inset.set_xticks([0, 1], ["M", "Q"], fontsize=6.5)
+            inset.tick_params(axis="y", labelsize=6.2, length=2)
+            inset.set_title(f"{grain} β", fontsize=6.8, pad=1.5)
+            inset.grid(False)
+            for spine in inset.spines.values():
+                spine.set_color(GRID)
+                spine.set_linewidth(0.65)
+
+            axis.set_xlim(-2.3, 2.3)
+            axis.set_ylim(-y_bound, y_bound)
+            axis.set_title(f"{title}\n{subtitle}", fontsize=10.5)
+            if row_index == 1:
+                axis.set_xlabel("Within-run standardized predictor", fontsize=9.5)
+            if column_index == 0:
+                axis.set_ylabel("Within-run standardized allocation", fontsize=9.5)
+
+    handles = [
+        Line2D([0], [0], color=BLUE, marker="o", lw=2.5, label="M"),
+        Line2D([0], [0], color=ORANGE, marker="^", lw=2.5, linestyle="--", label="Signed Q revision"),
+        Line2D([0], [0], color=INK, lw=0.8, alpha=0.35, label=f"Thin = one {grain}"),
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.94),
+        ncol=3,
+        fontsize=9.5,
+    )
+    fig.suptitle(
+        f"Within-run evaluation/revision → search allocation · {title_suffix}",
+        fontsize=16,
+        y=0.995,
+    )
+    fig.text(0.055, 0.90, row_subtitles["noop_to_active"], fontsize=11.5, weight="bold")
+    fig.text(0.055, 0.485, row_subtitles["active_to_noop"], fontsize=11.5, weight="bold")
+    fig.text(
+        0.5,
+        0.018,
+        f"Points are equal-{grain} means of nine within-run quantile bins; thin lines and inset points are the original marginal within-run β estimates. Thick lines and ribbons are the equal-{grain} mean and 95% t interval. q is BH-FDR across the 12 Figure-6 effects.",
+        ha="center",
+        fontsize=8.9,
+    )
+    fig.subplots_adjust(
+        left=0.065,
+        right=0.985,
+        bottom=0.10,
+        top=0.845,
+        hspace=0.48,
+        wspace=0.22,
     )
     save_figure(fig, output_path)
 
@@ -2436,7 +3121,8 @@ def build_duration_component_curves(
 
 
 def plot_completed_bout_duration(
-    curves: pd.DataFrame,
+    bouts: pd.DataFrame,
+    effects: pd.DataFrame,
     summary: pd.DataFrame,
     output_path: Path,
     title_suffix: str,
@@ -2448,97 +3134,271 @@ def plot_completed_bout_duration(
         "noop_to_active": "A. Completed NOOP → Active bouts",
         "active_to_noop": "B. Completed Active → NOOP bouts",
     }
-    data = curves.loc[curves["transition_type"].isin(transition_order)].copy()
+    data = effects.loc[
+        effects["transition_type"].isin(transition_order)
+    ].copy()
+    data = data.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=[
+            "beta_log_bout_duration",
+            "duration_log_mean",
+            "duration_log_sd",
+            "duration_min",
+            "duration_max",
+        ]
+    )
+    data["support_low"] = (
+        np.log(data["duration_min"].clip(lower=1))
+        - data["duration_log_mean"]
+    ) / data["duration_log_sd"]
+    data["support_high"] = (
+        np.log(data["duration_max"].clip(lower=1))
+        - data["duration_log_mean"]
+    ) / data["duration_log_sd"]
     if unit == "subject":
-        display_curves = data.groupby(
-            ["subject", "transition_type", "outcome", "bout_duration_real_steps"],
-            as_index=False,
-        )["adjusted_duration_contribution"].mean()
+        display_effects = data.groupby(
+            ["subject", "transition_type", "outcome"], as_index=False
+        ).agg(
+            beta_log_bout_duration=("beta_log_bout_duration", "mean"),
+            support_low=("support_low", "max"),
+            support_high=("support_high", "min"),
+        )
         display_unit = "subject"
+        unit_label = "subject"
     else:
-        display_curves = data.copy()
+        display_effects = data.copy()
         display_unit = "run_label"
+        unit_label = "run"
 
     fig, axes = plt.subplots(
-        2, 3, figsize=(15.4, 9.7), facecolor="white", sharex="row", sharey="col"
+        2, 4, figsize=(18.0, 9.7), facecolor="white",
+        sharex=False, sharey=False,
     )
     for row_index, transition_type in enumerate(transition_order):
-        for column_index, (outcome, title, subtitle) in enumerate(ALLOCATION_METRICS):
-            axis = axes[row_index, column_index]
-            selected = display_curves.loc[
-                display_curves["transition_type"].eq(transition_type)
-                & display_curves["outcome"].eq(outcome)
-            ].copy()
-            for _, one_unit in selected.groupby(display_unit, sort=False):
-                ordered = one_unit.sort_values("bout_duration_real_steps")
-                axis.plot(
-                    ordered["bout_duration_real_steps"],
-                    ordered["adjusted_duration_contribution"],
-                    color=BLUE,
-                    alpha=0.18,
-                    lw=0.8,
+        distribution_axis = axes[row_index, 0]
+        row_bouts = bouts.loc[
+            bouts["transition_class"].eq(transition_type)
+        ].copy()
+        duration = pd.to_numeric(
+            row_bouts["bout_duration_real_steps"], errors="coerce"
+        )
+        row_bouts = row_bouts.loc[duration.ge(1)].copy()
+        row_bouts["bout_duration_real_steps"] = duration.loc[
+            duration.ge(1)
+        ].to_numpy(dtype=float)
+        if not row_bouts.empty:
+            maximum = int(row_bouts["bout_duration_real_steps"].max())
+            lower_edges = [1, 2, 3, 5, 9, 17, 33, 65, 129, 257, 513, 1025]
+            lower_edges = [value for value in lower_edges if value <= maximum]
+            labels: List[str] = []
+            masks: List[np.ndarray] = []
+            values = row_bouts["bout_duration_real_steps"].to_numpy(dtype=float)
+            for index, lower in enumerate(lower_edges):
+                upper = (
+                    lower_edges[index + 1]
+                    if index + 1 < len(lower_edges)
+                    else None
                 )
-            aggregate = selected.groupby(
-                "bout_duration_real_steps", as_index=False
-            )["adjusted_duration_contribution"].agg(["mean", "sem", "count"]).reset_index()
-            aggregate = aggregate.loc[aggregate["count"].ge(3)].copy()
-            if not aggregate.empty:
-                x = aggregate["bout_duration_real_steps"].to_numpy(dtype=float)
-                mean = aggregate["mean"].to_numpy(dtype=float)
-                sem = aggregate["sem"].to_numpy(dtype=float)
-                count = aggregate["count"].to_numpy(dtype=int)
-                critical = stats.t.ppf(0.975, np.maximum(count - 1, 1))
+                if upper is None:
+                    masks.append(values >= lower)
+                    labels.append(f"{lower}+")
+                else:
+                    masks.append((values >= lower) & (values < upper))
+                    labels.append(
+                        str(lower) if upper == lower + 1 else f"{lower}–{upper - 1}"
+                    )
+            positions = np.arange(len(labels))
+            if unit == "subject":
+                proportions: List[np.ndarray] = []
+                for _, one_subject in row_bouts.groupby("subject", sort=True):
+                    subject_values = one_subject[
+                        "bout_duration_real_steps"
+                    ].to_numpy(dtype=float)
+                    subject_counts = []
+                    for index, lower in enumerate(lower_edges):
+                        upper = (
+                            lower_edges[index + 1]
+                            if index + 1 < len(lower_edges)
+                            else None
+                        )
+                        if upper is None:
+                            mask = subject_values >= lower
+                        else:
+                            mask = (subject_values >= lower) & (subject_values < upper)
+                        subject_counts.append(float(np.sum(mask)))
+                    total = float(np.sum(subject_counts))
+                    if total > 0:
+                        proportions.append(np.asarray(subject_counts) / total * 100.0)
+                matrix = np.vstack(proportions)
+                mean = np.mean(matrix, axis=0)
+                if len(matrix) >= 2:
+                    critical = float(stats.t.ppf(0.975, len(matrix) - 1))
+                    interval = critical * stats.sem(matrix, axis=0)
+                else:
+                    interval = np.zeros_like(mean)
+                distribution_axis.bar(
+                    positions, mean, color=BLUE, edgecolor="white", linewidth=0.55
+                )
+                distribution_axis.errorbar(
+                    positions, mean, yerr=interval, fmt="none",
+                    ecolor=INK, elinewidth=0.8, capsize=2.2,
+                )
+                distribution_axis.set_ylabel("Within-subject bout share (%)")
+            else:
+                counts = np.asarray([int(np.sum(mask)) for mask in masks])
+                distribution_axis.bar(
+                    positions, counts, color=BLUE,
+                    edgecolor="white", linewidth=0.55,
+                )
+                if counts.max(initial=0) >= 100:
+                    distribution_axis.set_yscale("log")
+                distribution_axis.set_ylabel("Completed bouts")
+            distribution_axis.set_xticks(
+                positions, labels, rotation=32, ha="right"
+            )
+        else:
+            distribution_axis.text(
+                0.5, 0.5, "No completed bouts",
+                transform=distribution_axis.transAxes,
+                ha="center", va="center",
+            )
+        distribution_axis.set_title("Bout-duration distribution")
+        distribution_axis.set_xlabel("Completed duration (real steps)")
+        distribution_axis.grid(axis="y", color="#E5E7EB", lw=0.55)
+        for spine in ("top", "right"):
+            distribution_axis.spines[spine].set_visible(False)
+
+        for column_index, (outcome, title, subtitle) in enumerate(
+            ALLOCATION_METRICS, start=1
+        ):
+            axis = axes[row_index, column_index]
+            selected = display_effects.loc[
+                display_effects["transition_type"].eq(transition_type)
+                & display_effects["outcome"].eq(outcome)
+            ].copy()
+            if selected.empty:
+                axis.text(
+                    0.5, 0.5, "Not estimable",
+                    transform=axis.transAxes, ha="center", va="center",
+                )
+                axis.set_axis_off()
+                continue
+            unit_values = sorted(selected[display_unit].unique())
+            if unit == "subject":
+                unit_colors = plt.cm.Blues(
+                    np.linspace(0.38, 0.82, len(unit_values))
+                )
+                line_styles: List[object] = [
+                    "-", "--", "-.", ":", (0, (5, 1)), (0, (3, 1, 1, 1))
+                ]
+            else:
+                unit_colors = ["#8C98A4"] * len(unit_values)
+                line_styles = ["-"] * len(unit_values)
+            for unit_index, unit_value in enumerate(unit_values):
+                one_unit = selected.loc[selected[display_unit].eq(unit_value)].iloc[0]
+                low = max(float(one_unit["support_low"]), -3.0)
+                high = min(float(one_unit["support_high"]), 3.0)
+                if high <= low:
+                    continue
+                x_unit = np.linspace(low, high, 100)
+                axis.plot(
+                    x_unit,
+                    float(one_unit["beta_log_bout_duration"]) * x_unit,
+                    color=unit_colors[unit_index],
+                    alpha=0.62 if unit == "subject" else 0.28,
+                    lw=1.0 if unit == "subject" else 0.85,
+                    ls=line_styles[unit_index % len(line_styles)],
+                    label=(
+                        f"sub{int(unit_value):03d}"
+                        if unit == "subject" and row_index == 0 and column_index == 1
+                        else None
+                    ),
+                )
+            common_low = float(selected["support_low"].max())
+            common_high = float(selected["support_high"].min())
+            display_low = max(common_low, -2.0)
+            display_high = min(common_high, 2.0)
+            if display_high <= display_low:
+                display_low, display_high = common_low, common_high
+            if display_high > display_low:
+                x = np.linspace(display_low, display_high, 180)
+                beta = selected["beta_log_bout_duration"].to_numpy(dtype=float)
+                predictions = beta[:, None] * x[None, :]
+                mean = np.mean(predictions, axis=0)
+                sem = stats.sem(predictions, axis=0) if len(beta) >= 2 else np.zeros_like(mean)
+                critical = (
+                    float(stats.t.ppf(0.975, len(beta) - 1))
+                    if len(beta) >= 2 else 0.0
+                )
                 interval = critical * sem
                 axis.fill_between(
                     x, mean - interval, mean + interval,
-                    color=BLUE_LIGHT, alpha=0.7, linewidth=0,
+                    color=BLUE_LIGHT, alpha=0.58, linewidth=0,
                 )
-                axis.plot(x, mean, color=BLUE, lw=2.0)
+                one = summary.loc[
+                    summary["transition_type"].eq(transition_type)
+                    & summary["outcome"].eq(outcome)
+                ]
+                q_value = float(one.iloc[0]["bh_fdr_q"]) if not one.empty else np.nan
+                significant = np.isfinite(q_value) and q_value < 0.05
+                axis.plot(
+                    x, mean,
+                    color=BLUE if significant else INK,
+                    lw=2.3,
+                    ls="-" if significant else "--",
+                    label=(
+                        f"equal-{unit_label} mean"
+                        if unit == "subject" and row_index == 0 and column_index == 1
+                        else None
+                    ),
+                )
             axis.axhline(0, color=INK, lw=0.9, ls="--")
-            if row_index == 0:
-                axis.set_title(f"{title}\n{subtitle}")
-            axis.set_xlabel("Completed bout duration (real steps; linear axis)")
-            if column_index == 0:
+            axis.axvline(0, color="#B8BEC5", lw=0.7, ls=":")
+            axis.set_title(f"{title}\n{subtitle}")
+            axis.set_xlabel(
+                r"Within-run standardized log duration  $z_{run}(\log D)$"
+            )
+            if column_index == 1:
                 axis.set_ylabel(
-                    "Adjusted duration contribution to endpoint change "
-                    "(pooled endpoint SD)"
+                    "Duration-attributable endpoint change\n(pooled endpoint SD)"
                 )
-            axis.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=7, integer=True))
             one = summary.loc[
                 summary["transition_type"].eq(transition_type)
                 & summary["outcome"].eq(outcome)
             ]
             if not one.empty:
                 row = one.iloc[0]
+                q_value = float(row["bh_fdr_q"])
+                q_label = "FDR n.s." if q_value >= 0.05 else "FDR significant"
                 axis.text(
                     0.02, 0.98,
-                    f"adjusted β={row['mean_unit_effect']:+.3f}\n"
-                    f"p={row['exact_sign_flip_p']:.3f}, q={row['bh_fdr_q']:.3f}",
-                    transform=axis.transAxes, va="top", fontsize=8.5,
+                    f"mean β={row['mean_unit_effect']:+.3f}\n"
+                    f"95% CI [{row['ci_low']:+.3f}, {row['ci_high']:+.3f}]\n"
+                    f"{int(row['n_positive'])}/{int(row['n_units'])} positive {unit_label}s\n"
+                    f"p={row['exact_sign_flip_p']:.3f}, q={q_value:.3f} ({q_label})",
+                    transform=axis.transAxes, va="top", fontsize=8.1,
                 )
-    for row_index, transition_type in enumerate(transition_order):
-        row_data = data.loc[data["transition_type"].eq(transition_type)]
-        if row_data.empty:
-            continue
-        lower = float(row_data["bout_duration_real_steps"].min())
-        upper = float(row_data["bout_duration_real_steps"].max())
-        padding = max((upper - lower) * 0.025, 0.5)
-        for axis in axes[row_index, :]:
-            axis.set_xlim(max(0.5, lower - padding), upper + padding)
+            axis.grid(color="#E5E7EB", lw=0.55)
+            for spine in ("top", "right"):
+                axis.spines[spine].set_visible(False)
+            if unit == "subject" and row_index == 0 and column_index == 1:
+                axis.legend(
+                    loc="lower left", fontsize=7.2, ncol=2,
+                    frameon=False, handlelength=2.3,
+                )
     fig.suptitle(
-        f"Bout duration and breadth/depth allocation - {title_suffix}",
+        f"Completed-bout duration and endpoint search geometry · {title_suffix}",
         fontsize=16, y=0.995,
     )
-    fig.text(0.055, 0.905, row_subtitles["noop_to_active"], fontsize=11.5, weight="bold")
-    fig.text(0.055, 0.495, row_subtitles["active_to_noop"], fontsize=11.5, weight="bold")
+    fig.text(0.048, 0.905, row_subtitles["noop_to_active"], fontsize=11.5, weight="bold")
+    fig.text(0.048, 0.465, row_subtitles["active_to_noop"], fontsize=11.5, weight="bold")
     fig.text(
-        0.5, 0.025,
-        "Curves are the fitted beta_D x z_run(log duration) contribution from the same OLS used for beta/p/q; each run is drawn only over its observed valid-duration min-max, with raw real steps on a linear axis. Controls: start transition margin, start Q_rev, previous reward, origin action, and destination action.",
-        ha="center", fontsize=9.3,
+        0.5, 0.018,
+        f"Thin lines are {unit_label}-specific fitted duration contributions over observed support. The bold line and 95% t interval are equal-{unit_label} summaries restricted to all-{unit_label} common support; a dashed mean denotes FDR q ≥ .05. Endpoint change is terminal minus the first comparable window. Controls: start transition margin, start Q_signed, prior reward, origin action, and destination action.",
+        ha="center", fontsize=8.7,
     )
     fig.subplots_adjust(
-        left=0.06, right=0.99, bottom=0.14, top=0.85,
-        hspace=0.48, wspace=0.28,
+        left=0.055, right=0.99, bottom=0.105, top=0.845,
+        hspace=0.70, wspace=0.28,
     )
     save_figure(fig, output_path)
 
@@ -2575,6 +3435,8 @@ def write_subject_outputs(
         "value_revision_magnitude",
         "value_revision_log",
         "value_revision_robust_z",
+        "value_revision_signed_mean",
+        "value_revision_signed_robust_z",
         "revision_event_count",
         "revision_event_fraction",
         "directional_revision_balance",
@@ -2609,6 +3471,18 @@ def write_subject_outputs(
     )
     allocation_run_summary.to_csv(
         result_dir / "allocation_marginal_run_summary.csv", index=False
+    )
+    allocation_scatter_points = build_allocation_scatter_points(
+        frame, unit="run_label"
+    )
+    allocation_scatter_trends = summarize_allocation_scatter_trends(
+        allocation_scatter_points
+    )
+    allocation_scatter_points.to_csv(
+        result_dir / "allocation_scatter_run_points.csv", index=False
+    )
+    allocation_scatter_trends.to_csv(
+        result_dir / "allocation_scatter_run_trends.csv", index=False
     )
     duration_effects, duration_curves = fit_duration_run_effects(
         completed_bout_allocation
@@ -2670,15 +3544,18 @@ def write_subject_outputs(
         game,
     )
     if not allocation_effects.empty:
-        plot_allocation_effects(
+        plot_allocation_within_run_consistency(
+            frame,
             allocation_effects,
+            allocation_run_summary,
             figure_dir / "main_figure6_evaluation_revision_search_allocation.png",
             suffix,
-            group_summary=allocation_run_summary,
+            unit="run_label",
         )
-    if not duration_curves.empty and not duration_run_summary.empty:
+    if not duration_effects.empty and not duration_run_summary.empty:
         plot_completed_bout_duration(
-            duration_curves,
+            completed_bout_allocation,
+            duration_effects,
             duration_run_summary,
             figure_dir / "main_figure7_completed_bout_deep_narrow_allocation.png",
             suffix,
@@ -2705,12 +3582,15 @@ def write_subject_outputs(
         ),
         "n_run_outcome_models": int(len(allocation_effects)),
         "n_figure6_marginal_tests": int(len(allocation_run_summary)),
+        "n_figure6_scatter_points": int(len(allocation_scatter_points)),
+        "n_figure6_scatter_trends": int(len(allocation_scatter_trends)),
         "n_completed_known_onset_bouts": int(len(completed_bout_allocation)),
         "n_duration_run_outcome_models": int(len(duration_effects)),
         "n_duration_curve_rows": int(len(duration_curves)),
         "figure6_estimand": (
-            "separate within-run/transition standardized univariate slopes "
-            "allocation~M and allocation~V; no controls or interaction"
+            "display: one run-mean point per panel and descriptive across-run "
+            "trend; inference retained separately as within-run/transition "
+            "standardized univariate allocation~M and allocation~Q_signed slopes"
         ),
         "figure7_estimand": (
             "terminal transition-window minus first comparable-window allocation, "
@@ -2740,6 +3620,10 @@ def write_subject_outputs(
             "stay_switch_violin": (
                 "run-mean distributions with mean 95% t CI and paired exact two-sided run sign-flip"
             ),
+            "figure6_scatter": (
+                "one point per run; x/y are same-risk-window run means z-scored "
+                "across runs; line is a descriptive across-run OLS trend"
+            ),
         },
         "subject": int(subject),
         "game": int(game),
@@ -2768,9 +3652,9 @@ def write_subject_outputs(
         ),
         "search_allocation": {
             "outcomes": [metric for metric, _, _ in ALLOCATION_METRICS],
-            "fixed_expansion_budget": 29,
+            "planning_budget": "observed n_status2 per real-step window",
             "quantity_interpretation": (
-                "outcomes describe allocation geometry under a fixed budget, "
+                "outcomes describe allocation geometry under the observed variable budget, "
                 "not the amount of computation"
             ),
             "window_population": (
@@ -2787,13 +3671,20 @@ def write_subject_outputs(
                 "and active-to-NOOP"
             ),
             "inference_unit": "run coefficients; runs are equalized within subject for group inference",
-            "figure6_model": (
-                "separate marginal standardized Y~M and Y~V slopes; no action "
-                "control, mutual adjustment, interaction, or covariates"
+            "figure6_display": (
+                "one run-mean point per panel; x and y standardized across the "
+                "11 displayed runs; descriptive across-run OLS trend"
+            ),
+            "figure6_inference_model": (
+                "separate marginal standardized Y~transition margin and "
+                "Y~Q_signed slopes; Q_signed=mean_j(delta Q_j) over valid "
+                "status-2 events; no action control, mutual adjustment, "
+                "interaction, or covariates"
             ),
             "figure7_model": (
-                "endpoint change ~ z_run(log duration) + start M + start V + "
-                "previous reward + reference-coded origin and destination actions"
+                "endpoint change ~ z_run(log duration) + start transition margin + "
+                "start Q_signed + prior reward + reference-coded current/origin "
+                "and destination actions"
             ),
             "figure7_curve_support": (
                 "each run/outcome is drawn only within its observed fitted-sample "
@@ -2803,6 +3694,8 @@ def write_subject_outputs(
         "generated_allocation_tables": [
             "allocation_marginal_run_effects.csv",
             "allocation_marginal_run_summary.csv",
+            "allocation_scatter_run_points.csv",
+            "allocation_scatter_run_trends.csv",
             "completed_known_onset_bout_endpoint_changes.csv.gz",
             "bout_duration_endpoint_change_run_effects.csv",
             "bout_duration_endpoint_change_run_summary.csv",
@@ -2976,7 +3869,7 @@ def plot_group_geometry(
         kind="active", cmap=SIGNED_CMAP, center=0.0, colorbar_label="Subject/action-equalized terminal − initial margin"
     )
     fig.suptitle(
-        f"Cross-subject pre-search action margin–Q revision geometry · game {game}",
+        f"Cross-subject M–Q_rev geometry · game {game}",
         fontsize=17,
         x=0.5,
         y=0.995,
@@ -3194,12 +4087,25 @@ def aggregate_subjects(
     allocation_group_summary.to_csv(
         result_dir / "allocation_marginal_group_effects.csv", index=False
     )
-    plot_allocation_effects(
-        allocation_subject_effects,
+    allocation_scatter_points = build_allocation_scatter_points(
+        combined, unit="subject"
+    )
+    allocation_scatter_trends = summarize_allocation_scatter_trends(
+        allocation_scatter_points
+    )
+    allocation_scatter_points.to_csv(
+        result_dir / "allocation_scatter_subject_points.csv", index=False
+    )
+    allocation_scatter_trends.to_csv(
+        result_dir / "allocation_scatter_subject_trends.csv", index=False
+    )
+    plot_allocation_within_run_consistency(
+        combined,
+        all_allocation_effects,
+        allocation_group_summary,
         figure_dir / "main_figure6_cross_subject_evaluation_revision_search_allocation.png",
         f"game {game}, {len(subjects)} subjects",
         unit="subject",
-        group_summary=allocation_group_summary,
     )
     all_completed_bouts = pd.concat(completed_bouts, ignore_index=True)
     all_duration_effects = pd.concat(duration_effects, ignore_index=True)
@@ -3227,7 +4133,8 @@ def aggregate_subjects(
         compression="gzip",
     )
     plot_completed_bout_duration(
-        all_duration_curves,
+        all_completed_bouts,
+        all_duration_effects,
         duration_group_summary,
         figure_dir / "main_figure7_cross_subject_completed_bout_deep_narrow_allocation.png",
         f"game {game}, {len(subjects)} subjects",
@@ -3246,21 +4153,26 @@ def aggregate_subjects(
                 "per-subject run-mean violins and 95% t CI; subject stars use paired run sign-flips; "
                 "panel title uses paired exact two-sided sign-flip across six subject means"
             ),
+            "figure6_scatter": (
+                "one point per subject; windows are averaged within run and runs "
+                "equally averaged within subject before across-subject z scoring; "
+                "line is a descriptive six-subject OLS trend"
+            ),
         },
         "game": int(game),
         "subjects": [int(value) for value in subjects],
         "inference": (
             "run coefficients averaged within subject; exact two-sided subject sign-flip; "
-            "BH-FDR across M and V jointly over the two transitions; "
-            "for allocation, BH-FDR jointly over the 12 marginal M/V tests; "
+            "BH-FDR across M and Q_rev jointly over the two transitions; "
+            "for allocation, BH-FDR jointly over the 12 marginal transition-margin/Q_signed tests; "
             "duration is tested across two completed "
             "transition classes by three allocation outcomes (6 tests)"
         ),
         "search_allocation": {
             "outcomes": [metric for metric, _, _ in ALLOCATION_METRICS],
-            "fixed_expansion_budget": 29,
+            "planning_budget": "observed n_status2 per real-step window",
             "quantity_interpretation": (
-                "outcomes describe allocation geometry under a fixed budget, "
+                "outcomes describe allocation geometry under the observed variable budget, "
                 "not the amount of computation"
             ),
             "window_population": (
@@ -3275,16 +4187,25 @@ def aggregate_subjects(
                 "completed, known-onset bouts separated into NOOP-to-active "
                 "and active-to-NOOP"
             ),
-            "same_window_caveat": "Q-revision magnitude and allocation are contemporaneous associations",
-            "figure6_model": (
-                "separate marginal standardized Y~M and Y~V slopes; no action "
-                "control, mutual adjustment, interaction, or covariates"
+            "same_window_caveat": (
+                "Q_signed and allocation are contemporaneous associations; "
+                "Q_signed averages updates across sampled branch identities"
+            ),
+            "figure6_display": (
+                "one subject point per panel after equal-run subject averaging; "
+                "descriptive across-subject OLS trend"
+            ),
+            "figure6_inference_model": (
+                "separate marginal standardized Y~transition margin and "
+                "Y~Q_signed slopes; Q_signed=mean_j(delta Q_j) over valid "
+                "status-2 events; no action control, mutual adjustment, "
+                "interaction, or covariates"
             ),
             "figure7_model": (
                 "terminal minus first comparable allocation endpoint change, "
                 "pooled-start/end-SD scaled, regressed on z_run(log duration) "
-                "with start M, start V, previous reward, origin action, and "
-                "destination action controls"
+                "with start transition margin, start Q_signed, prior reward, "
+                "current/origin action, and destination action controls"
             ),
             "figure7_curve_support": (
                 "each run/outcome is evaluated only within its own observed "
@@ -3295,6 +4216,8 @@ def aggregate_subjects(
             "allocation_marginal_run_effects.csv",
             "allocation_marginal_subject_effects.csv",
             "allocation_marginal_group_effects.csv",
+            "allocation_scatter_subject_points.csv",
+            "allocation_scatter_subject_trends.csv",
             "completed_known_onset_bout_endpoint_changes.csv.gz",
             "bout_duration_endpoint_change_run_effects.csv",
             "bout_duration_endpoint_change_subject_effects.csv",
@@ -3320,12 +4243,333 @@ def aggregate_subjects(
     log(f"Group analysis complete -> {group_dir}")
 
 
+def write_figure6_render_manifest(
+    output_dir: Path,
+    *,
+    unit: str,
+    input_paths: Sequence[Path],
+    figure_path: Path,
+    subjects: Sequence[int],
+    game: int,
+) -> None:
+    """Record byte-level provenance for an image-only Figure-6 refresh."""
+    payload = {
+        "figure6_render_version": FIGURE6_RENDER_VERSION,
+        "analysis_schema_version": SCHEMA_VERSION,
+        "rendered_at_local": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "unit": unit,
+        "subjects": [int(value) for value in subjects],
+        "game": int(game),
+        "plot_contract": {
+            "panels": "2 source-state risks x 3 allocation outcomes",
+            "predictors_overlaid": {
+                "M": "blue solid circles",
+                "Q_signed": "orange dashed triangles",
+            },
+            "points": "equal-unit means of nine within-run quantile bins",
+            "thin_lines_and_inset_points": (
+                "original marginal within-run coefficients at the displayed unit grain"
+            ),
+            "thick_lines_and_ribbons": "equal-unit mean and 95% t interval",
+            "inference": "existing exact sign-flip and 12-effect BH-FDR; no refit",
+        },
+        "script": {
+            "path": str(Path(__file__).resolve()),
+            "sha256": file_sha256(Path(__file__).resolve()),
+        },
+        "inputs": [
+            {"path": str(path.resolve()), "sha256": file_sha256(path)}
+            for path in input_paths
+        ],
+        "figure": {
+            "path": str(figure_path.resolve()),
+            "sha256": file_sha256(figure_path),
+        },
+    }
+    sidecar_path = output_dir / "results" / "figure6_render_manifest.json"
+    atomic_json(sidecar_path, payload)
+    analysis_manifest_path = output_dir / "analysis_manifest.json"
+    if analysis_manifest_path.exists():
+        analysis_manifest = json.loads(
+            analysis_manifest_path.read_text(encoding="utf-8")
+        )
+        rendering = analysis_manifest.setdefault("figure_rendering", {})
+        rendering.pop("figure6_scatter", None)
+        rendering["figure6_within_run_consistency"] = (
+            "six panels (2 source-state risks x 3 allocation outcomes); M and "
+            "Q_signed are overlaid; points are equal-unit means of nine "
+            "within-run quantile bins; thin lines/inset points are original "
+            "within-run coefficients; thick lines/ribbons are equal-unit "
+            "means and 95% t intervals"
+        )
+        allocation = analysis_manifest.setdefault("search_allocation", {})
+        allocation["figure6_display"] = (
+            "visualizes the existing within-run marginal slopes; individual "
+            "figures use runs as equal display units and group figures use "
+            "equal-run subject coefficients as equal display units"
+        )
+        allocation["figure6_render_sidecar"] = str(sidecar_path.resolve())
+        atomic_json(analysis_manifest_path, analysis_manifest)
+
+
+def rerender_subject_figure6(
+    subject: int,
+    game: int,
+    output_root: Path,
+) -> None:
+    """Re-render one subject Figure 6 without recomputing any analysis."""
+    output_dir = output_root / f"sub{subject:03d}_game{game}"
+    result_dir = output_dir / "results"
+    figure_path = (
+        output_dir
+        / "figures"
+        / "main"
+        / "main_figure6_evaluation_revision_search_allocation.png"
+    )
+    metric_path = result_dir / "evaluation_revision_window_metrics.csv.gz"
+    effect_path = result_dir / "allocation_marginal_run_effects.csv"
+    summary_path = result_dir / "allocation_marginal_run_summary.csv"
+    input_paths = [metric_path, effect_path, summary_path]
+    missing = [str(path) for path in input_paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Figure-6 render inputs are missing: {missing}")
+    frame = pd.read_csv(metric_path, low_memory=False)
+    effects = pd.read_csv(effect_path, low_memory=False)
+    summary = pd.read_csv(summary_path, low_memory=False)
+    plot_allocation_within_run_consistency(
+        frame,
+        effects,
+        summary,
+        figure_path,
+        f"sub{subject:03d}, game {game}",
+        unit="run_label",
+    )
+    write_figure6_render_manifest(
+        output_dir,
+        unit="run_label",
+        input_paths=input_paths,
+        figure_path=figure_path,
+        subjects=[subject],
+        game=game,
+    )
+
+
+def rerender_group_figure6(
+    subjects: Sequence[int],
+    game: int,
+    output_root: Path,
+) -> None:
+    """Re-render a group Figure 6 from frozen subject tables only."""
+    frames: List[pd.DataFrame] = []
+    effects: List[pd.DataFrame] = []
+    input_paths: List[Path] = []
+    for subject in subjects:
+        result_dir = output_root / f"sub{subject:03d}_game{game}" / "results"
+        metric_path = result_dir / "evaluation_revision_window_metrics.csv.gz"
+        effect_path = result_dir / "allocation_marginal_run_effects.csv"
+        for path in (metric_path, effect_path):
+            if not path.exists():
+                raise FileNotFoundError(f"Figure-6 render input is missing: {path}")
+            input_paths.append(path)
+        frames.append(pd.read_csv(metric_path, low_memory=False))
+        effects.append(pd.read_csv(effect_path, low_memory=False))
+    group_dir = output_root / f"group_game{game}"
+    group_summary_path = group_dir / "results" / "allocation_marginal_group_effects.csv"
+    if not group_summary_path.exists():
+        raise FileNotFoundError(
+            f"Figure-6 group summary is missing: {group_summary_path}"
+        )
+    input_paths.append(group_summary_path)
+    summary = pd.read_csv(group_summary_path, low_memory=False)
+    figure_path = (
+        group_dir
+        / "figures"
+        / "main"
+        / "main_figure6_cross_subject_evaluation_revision_search_allocation.png"
+    )
+    plot_allocation_within_run_consistency(
+        pd.concat(frames, ignore_index=True),
+        pd.concat(effects, ignore_index=True),
+        summary,
+        figure_path,
+        f"game {game}, {len(subjects)} subjects",
+        unit="subject",
+    )
+    write_figure6_render_manifest(
+        group_dir,
+        unit="subject",
+        input_paths=input_paths,
+        figure_path=figure_path,
+        subjects=subjects,
+        game=game,
+    )
+
+
+def write_figure7_render_manifest(
+    output_dir: Path,
+    *,
+    unit: str,
+    input_paths: Sequence[Path],
+    figure_path: Path,
+    subjects: Sequence[int],
+    game: int,
+) -> None:
+    """Record provenance for an image-only Figure-7 refresh."""
+    payload = {
+        "figure7_render_version": FIGURE7_RENDER_VERSION,
+        "analysis_schema_version": SCHEMA_VERSION,
+        "rendered_at_local": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "unit": unit,
+        "subjects": [int(value) for value in subjects],
+        "game": int(game),
+        "plot_contract": {
+            "panels": (
+                "2 completed source-to-destination transitions x "
+                "(duration distribution + 3 endpoint geometry outcomes)"
+            ),
+            "x_axis": "within-run standardized log completed-bout duration",
+            "thin_lines": f"one fitted slope per {unit}, within observed support",
+            "thick_line_and_ribbon": (
+                f"equal-{unit} mean and 95% t interval, restricted to the "
+                f"all-{unit} common support"
+            ),
+            "distribution": (
+                "raw completed-bout counts"
+                if unit == "run_label"
+                else "equal-subject mean within-subject bout share and 95% t interval"
+            ),
+            "inference": (
+                "existing exact sign-flip and six-effect BH-FDR; no model refit"
+            ),
+            "nonsignificant_style": "dashed dark mean when BH-FDR q >= .05",
+        },
+        "script": {
+            "path": str(Path(__file__).resolve()),
+            "sha256": file_sha256(Path(__file__).resolve()),
+        },
+        "inputs": [
+            {"path": str(path.resolve()), "sha256": file_sha256(path)}
+            for path in input_paths
+        ],
+        "figure": {
+            "path": str(figure_path.resolve()),
+            "sha256": file_sha256(figure_path),
+        },
+    }
+    sidecar_path = output_dir / "results" / "figure7_render_manifest.json"
+    atomic_json(sidecar_path, payload)
+    analysis_manifest_path = output_dir / "analysis_manifest.json"
+    if analysis_manifest_path.exists():
+        analysis_manifest = json.loads(
+            analysis_manifest_path.read_text(encoding="utf-8")
+        )
+        rendering = analysis_manifest.setdefault("figure_rendering", {})
+        rendering["figure7_completed_bout_duration"] = (
+            f"standardized-log duration slopes at the {unit} display grain; "
+            f"thin unit fits over observed support; equal-{unit} mean and "
+            "95% t interval over common support; existing inference unchanged"
+        )
+        analysis_manifest.setdefault("completed_bout_duration", {})[
+            "figure7_render_sidecar"
+        ] = str(sidecar_path.resolve())
+        atomic_json(analysis_manifest_path, analysis_manifest)
+
+
+def rerender_subject_figure7(
+    subject: int,
+    game: int,
+    output_root: Path,
+) -> None:
+    """Re-render one subject Figure 7 from frozen tables only."""
+    output_dir = output_root / f"sub{subject:03d}_game{game}"
+    result_dir = output_dir / "results"
+    bout_path = result_dir / "completed_known_onset_bout_endpoint_changes.csv.gz"
+    effect_path = result_dir / "bout_duration_endpoint_change_run_effects.csv"
+    summary_path = result_dir / "bout_duration_endpoint_change_run_summary.csv"
+    input_paths = [bout_path, effect_path, summary_path]
+    missing = [str(path) for path in input_paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Figure-7 render inputs are missing: {missing}")
+    bouts = pd.read_csv(bout_path, low_memory=False)
+    effects = pd.read_csv(effect_path, low_memory=False)
+    summary = pd.read_csv(summary_path, low_memory=False)
+    figure_path = (
+        output_dir / "figures" / "main"
+        / "main_figure7_completed_bout_deep_narrow_allocation.png"
+    )
+    plot_completed_bout_duration(
+        bouts,
+        effects,
+        summary,
+        figure_path,
+        f"sub{subject:03d}, game {game}",
+        unit="run_label",
+    )
+    write_figure7_render_manifest(
+        output_dir,
+        unit="run_label",
+        input_paths=input_paths,
+        figure_path=figure_path,
+        subjects=[subject],
+        game=game,
+    )
+
+
+def rerender_group_figure7(
+    subjects: Sequence[int],
+    game: int,
+    output_root: Path,
+) -> None:
+    """Re-render one group Figure 7 from frozen subject tables only."""
+    bouts: List[pd.DataFrame] = []
+    effects: List[pd.DataFrame] = []
+    input_paths: List[Path] = []
+    for subject in subjects:
+        result_dir = output_root / f"sub{subject:03d}_game{game}" / "results"
+        bout_path = result_dir / "completed_known_onset_bout_endpoint_changes.csv.gz"
+        effect_path = result_dir / "bout_duration_endpoint_change_run_effects.csv"
+        for path in (bout_path, effect_path):
+            if not path.exists():
+                raise FileNotFoundError(f"Figure-7 render input is missing: {path}")
+            input_paths.append(path)
+        bouts.append(pd.read_csv(bout_path, low_memory=False))
+        effects.append(pd.read_csv(effect_path, low_memory=False))
+    group_dir = output_root / f"group_game{game}"
+    summary_path = (
+        group_dir / "results" / "bout_duration_endpoint_change_group_effects.csv"
+    )
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Figure-7 group summary is missing: {summary_path}")
+    input_paths.append(summary_path)
+    summary = pd.read_csv(summary_path, low_memory=False)
+    figure_path = (
+        group_dir / "figures" / "main"
+        / "main_figure7_cross_subject_completed_bout_deep_narrow_allocation.png"
+    )
+    plot_completed_bout_duration(
+        pd.concat(bouts, ignore_index=True),
+        pd.concat(effects, ignore_index=True),
+        summary,
+        figure_path,
+        f"game {game}, {len(subjects)} subjects",
+        unit="subject",
+    )
+    write_figure7_render_manifest(
+        group_dir,
+        unit="subject",
+        input_paths=input_paths,
+        figure_path=figure_path,
+        subjects=subjects,
+        game=game,
+    )
+
+
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--subject", type=parse_subject, default=None)
-    parser.add_argument("--game", type=int, choices=[1, 2], required=True)
+    parser.add_argument("--game", type=int, choices=[0, 1, 2], required=True)
     parser.add_argument(
         "--aggregate-subjects",
         nargs="+",
@@ -3340,6 +4584,22 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="Recompute the small derivative Q-revision summary from event cache.",
     )
+    parser.add_argument(
+        "--rerender-figure6-only",
+        action="store_true",
+        help=(
+            "Read frozen window/effect tables and refresh only Figure 6; "
+            "no analysis model is refit."
+        ),
+    )
+    parser.add_argument(
+        "--rerender-figure7-only",
+        action="store_true",
+        help=(
+            "Read frozen completed-bout/effect tables and refresh only Figure 7; "
+            "no analysis model is refit."
+        ),
+    )
     return parser
 
 
@@ -3348,6 +4608,26 @@ def main() -> None:
     args = build_argparser().parse_args()
     if args.subject is None and not args.aggregate_subjects:
         raise ValueError("Provide --subject or --aggregate-subjects")
+    if args.rerender_figure6_only:
+        if args.subject is not None:
+            rerender_subject_figure6(
+                args.subject, args.game, args.output_root
+            )
+        if args.aggregate_subjects:
+            rerender_group_figure6(
+                args.aggregate_subjects, args.game, args.output_root
+            )
+        return
+    if args.rerender_figure7_only:
+        if args.subject is not None:
+            rerender_subject_figure7(
+                args.subject, args.game, args.output_root
+            )
+        if args.aggregate_subjects:
+            rerender_group_figure7(
+                args.aggregate_subjects, args.game, args.output_root
+            )
+        return
     if args.subject is not None:
         log(f"Loading sub{args.subject:03d}, game {args.game} from shared cache")
         frame, qa = load_subject_metrics(

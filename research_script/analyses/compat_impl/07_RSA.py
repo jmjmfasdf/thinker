@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Controlled representational similarity analysis for the 02--04 pathway.
+"""Canonical native-state and full-planning-trace RSA entry point.
 
-The default analysis tests distinct P, M, Q0, R, E, joint search geometry,
-terminal Actor, and switch/stay representational families with staged upstream
-models and visual, action, task-history, drift/time, and optional RAM
-nuisances.  Signed conditional beta and partial Spearman correlation are the
-primary statistics; in-sample delta R2 is descriptive.  Temporal nulls use one
-synchronized within-run block schedule across every ROI and effect, followed
-by exact run-level and subject-level sign-flip inference.
+The native-state family tests distinct P, M, Q0, R, E, joint search geometry,
+terminal Actor, and switch/stay representations with staged upstream models
+and visual, action, task-history, drift/time, and optional RAM nuisances.  The
+full-trace family tests cached concat29 and mean29 planning representations.
+Both families use signed conditional beta/partial Spearman statistics and
+exact synchronized run- and subject-level sign-flip inference.  This script
+only reads canonical v4/v1 caches and writes all results below outputs/07_RSA.
 
 Direct transition decoding and MVPA belong to 06_neural_state_space.py.  The
 former uncontrolled transition/topology, composite, and feature-resolved
@@ -49,6 +49,45 @@ DEFAULT_PLANNING_TRACE_ROOT = (
 PLANNING_TRACE_SCRIPT = SCRIPT_DIR / "07_planning_trace_RSA.py"
 T0 = time.time()
 
+_PLANNING_TRACE_MODULE: Optional[Any] = None
+
+
+def _load_planning_trace_module() -> Any:
+    """Load the maintained full-trace implementation without importing by digit."""
+    global _PLANNING_TRACE_MODULE
+    if _PLANNING_TRACE_MODULE is not None:
+        return _PLANNING_TRACE_MODULE
+    if not PLANNING_TRACE_SCRIPT.is_file():
+        raise FileNotFoundError(
+            f"Missing planning-trace implementation: {PLANNING_TRACE_SCRIPT}"
+        )
+    module_name = "_thinker_07_planning_trace_RSA"
+    spec = importlib.util.spec_from_file_location(
+        module_name, PLANNING_TRACE_SCRIPT
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"Could not load planning-trace implementation: {PLANNING_TRACE_SCRIPT}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    required = (
+        "run_subject_analysis", "run_group_analysis", "run_paired_analysis",
+        "TRACE_NAMES", "TRACE_LABELS",
+    )
+    missing = [name for name in required if not hasattr(module, name)]
+    if missing:
+        raise RuntimeError(
+            f"Planning-trace module lacks required API: {missing}"
+        )
+    _PLANNING_TRACE_MODULE = module
+    return module
+
 TRANSITION_CONDITIONS = (
     "noop_to_active",
     "active_to_noop",
@@ -77,6 +116,13 @@ CONTROLLED_RSA_ESTIMATOR_SPEC = (
 CONTROLLED_RSA_ESTIMATOR_HASH = hashlib.sha256(
     CONTROLLED_RSA_ESTIMATOR_SPEC.encode("utf-8")
 ).hexdigest()
+V4_COMPATIBLE_CONTROLLED_SOURCES = (
+    "55c350383881e7c22ae008d7f762804a183e5c404d9aecd6aacb2f9e1920cc6a",
+)
+V4_COMPATIBLE_CONTROLLED_SETTINGS_SHA256 = (
+    "d5738897a2f5f148b168ce8fb9a06cbe12d04daef68e3c3b5908b10f57860714",
+)
+
 def controlled_estimator_provenance() -> Dict[str, object]:
     return {
         "controlled_estimator_version": CONTROLLED_RSA_ESTIMATOR_VERSION,
@@ -90,9 +136,15 @@ def controlled_estimator_provenance() -> Dict[str, object]:
 def validate_controlled_estimator_manifest(
     manifest: Mapping[str, object],
     path: Path,
+    *,
+    allow_compatible_v4_source: bool = False,
 ) -> None:
     expected = controlled_estimator_provenance()
     for key, value in expected.items():
+        if key == "source_sha256" and allow_compatible_v4_source:
+            observed = str(manifest.get(key, ""))
+            if observed in V4_COMPATIBLE_CONTROLLED_SOURCES:
+                continue
         if manifest.get(key) != value:
             raise ValueError(
                 f"Controlled RSA estimator provenance mismatch in {path}: "
@@ -337,10 +389,12 @@ def validate_controlled_subject_provenance(
     manifest: Mapping[str, object],
     path: Path,
     frame: Optional[pd.DataFrame] = None,
-    allow_frozen_source: bool = False,
+    *,
+    allow_compatible_v4_source: bool = False,
 ) -> Tuple[str, Dict[str, object], str]:
     validate_controlled_estimator_manifest(
-        manifest, path, allow_frozen_source=allow_frozen_source
+        manifest, path,
+        allow_compatible_v4_source=allow_compatible_v4_source,
     )
     settings = manifest.get("controlled_settings")
     if not isinstance(settings, Mapping):
@@ -348,17 +402,22 @@ def validate_controlled_subject_provenance(
     digest = _controlled_json_sha256(settings)
     if manifest.get("controlled_settings_sha256") != digest:
         raise ValueError(f"Controlled settings hash mismatch in {path}")
+    observed_source = str(manifest.get("source_sha256", ""))
+    if (
+        allow_compatible_v4_source
+        and observed_source in V4_COMPATIBLE_CONTROLLED_SOURCES
+        and digest not in V4_COMPATIBLE_CONTROLLED_SETTINGS_SHA256
+    ):
+        raise ValueError(
+            f"Compatible v4 settings hash mismatch in {path}: {digest}"
+        )
     bad = {
         key: (settings.get(key), expected)
         for key, expected in CONTROLLED_CANONICAL_FIXED_SETTINGS.items()
         if settings.get(key) != expected
     }
-    frozen_settings = (
-        bool(allow_frozen_source)
-        and digest in FROZEN_COMPATIBLE_CONTROLLED_SETTINGS_SHA256
-    )
     if (
-        (bad and not frozen_settings)
+        bad
         or manifest.get("controlled_canonical_full_analysis") is not True
     ):
         raise ValueError(
@@ -434,11 +493,7 @@ def validate_controlled_subject_provenance(
     if _controlled_roi_names_sha256(cache.get("roi_names", [])) != roi_digest:
         raise ValueError(f"Cache ROI grid mismatch in {path}")
     for contract, cache_run in zip(run_contract, cache_runs):
-        expected_cache_schema = (
-            "canonical_04_schema3_v7"
-            if frozen_settings
-            else "canonical_00brain_nativehrf_schema4_v8"
-        )
+        expected_cache_schema = "canonical_00brain_nativehrf_schema4_v8"
         if (
             int(contract.get("subject", -1)) != subject
             or int(contract.get("game", -1)) != game
@@ -5230,6 +5285,36 @@ def run_controlled_subject_analysis(
         ),
     )
 
+    subject_map_source = subject_effects[
+        subject_effects["statistic"].astype(str).eq("conditional_partial_r")
+        & subject_effects["effect"].astype(str).isin(NEURAL_MAP_EFFECTS)
+    ].copy()
+    subject_corrected = subject_map_source[
+        pd.to_numeric(
+            subject_map_source["p_max_abs_t_fwer"], errors="raise"
+        ) < 0.05
+    ].copy()
+    subject_brain_path = (
+        figure_dir / "controlled_rsa_corrected_brain_maps.pdf"
+    )
+    NROI.save_effect_brain_maps(
+        subject_brain_path,
+        panels=_effect_panels(
+            subject_corrected, value_column="mean_effect"
+        ),
+        value_column="mean_effect",
+        title=(
+            f"{NEURAL_GAME_LABELS[int(args.game)]} · participant "
+            f"{int(args.subject)} process-resolved RSA"
+        ),
+        subtitle=(
+            "11-run exact sign flip; max-|t| within the prespecified "
+            "planning, transition, and sensitivity families"
+        ),
+        metric_label="Conditional partial Spearman r",
+        signed=True,
+        n_columns=4,
+    )
     manifest = {
         "analysis": "controlled 02--04 planning-pathway RSA",
         "schema_version": CONTROLLED_RSA_SCHEMA_VERSION,
@@ -5387,7 +5472,8 @@ def run_controlled_group_analysis(args: argparse.Namespace) -> None:
             )
         settings_hash, settings, cache_hash = (
             validate_controlled_subject_provenance(
-                subject_manifest, subject_manifest_path, frame
+                subject_manifest, subject_manifest_path, frame,
+                allow_compatible_v4_source=True,
             )
         )
         if common_settings_hash is None:
@@ -5432,6 +5518,62 @@ def run_controlled_group_analysis(args: argparse.Namespace) -> None:
         figure_dir / "controlled_rsa_group_partial_r.png",
         title=f"Controlled planning RSA · group game {int(args.game)}",
     )
+    group_map_source = group_effects[
+        group_effects["statistic"].astype(str).eq("conditional_partial_r")
+        & group_effects["effect"].astype(str).isin(NEURAL_MAP_EFFECTS)
+    ].copy()
+    group_corrected = group_map_source[
+        pd.to_numeric(
+            group_map_source["p_max_abs_t_fwer"], errors="raise"
+        ) < 0.05
+    ].copy()
+    group_brain_path = figure_dir / "controlled_rsa_corrected_brain_maps.pdf"
+    NROI.save_effect_brain_maps(
+        group_brain_path,
+        panels=_effect_panels(
+            group_corrected, value_column="mean_effect"
+        ),
+        value_column="mean_effect",
+        title=f"{NEURAL_GAME_LABELS[int(args.game)]} · process-resolved RSA",
+        subtitle=(
+            "Six-subject exact sign flip; max-|t| within the prespecified "
+            "planning, transition, and sensitivity families"
+        ),
+        metric_label="Mean conditional partial Spearman r",
+        signed=True,
+        n_columns=4,
+    )
+    primary_subjects = subject_effects[
+        subject_effects["statistic"].astype(str).eq("conditional_partial_r")
+        & subject_effects["effect"].astype(str).isin(NEURAL_MAP_EFFECTS)
+    ].copy()
+    predefined_subjects = NROI.aggregate_predefined_rois(
+        primary_subjects,
+        value_columns=["mean_effect"],
+        grouping_columns=[
+            "subject", "game", "effect", "effect_label",
+            "inference_family", "statistic",
+        ],
+    )
+    predefined_inference = _predefined_roi_exact_inference_07(
+        predefined_subjects
+    )
+    predefined_mapping_path = result_dir / "predefined_roi_mapping.csv"
+    predefined_subject_path = result_dir / "predefined_roi_subject_effects.csv"
+    predefined_inference_path = result_dir / "predefined_roi_inference.csv"
+    NROI.predefined_roi_mapping_frame().to_csv(
+        predefined_mapping_path, index=False
+    )
+    predefined_subjects.to_csv(predefined_subject_path, index=False)
+    predefined_inference.to_csv(predefined_inference_path, index=False)
+    predefined_figure_path = figure_dir / "predefined_roi_effects.pdf"
+    _save_predefined_roi_effect_figure_07(
+        predefined_subjects, predefined_inference, predefined_figure_path,
+        game=int(args.game),
+    )
+    anatomy_path = Path(args.output_root) / "figures" / "predefined_roi_anatomy.pdf"
+    NROI.save_predefined_roi_anatomy(anatomy_path)
+
     COMMON.atomic_write_json(
         result_dir / "analysis_manifest.json",
         {
@@ -5451,6 +5593,21 @@ def run_controlled_group_analysis(args: argparse.Namespace) -> None:
                 "p, max-|t| FWER within predeclared planning, transition, "
                 "and sensitivity families, and BH q within family"
             ),
+            "predefined_roi_inference": (
+                "equal left/right parcel mean; exhaustive 64-pattern subject "
+                "sign flip; max-|t| across eight literature-defined ROIs "
+                "separately for each effect and game"
+            ),
+            "predefined_roi_status": (
+                "literature-defined secondary, not preregistered"
+            ),
+            "predefined_roi_artifacts": {
+                "mapping": str(predefined_mapping_path.resolve()),
+                "subject_effects": str(predefined_subject_path.resolve()),
+                "inference": str(predefined_inference_path.resolve()),
+                "effect_figure": str(predefined_figure_path.resolve()),
+                "anatomy_figure": str(anatomy_path.resolve()),
+            },
             "n_sign_patterns": int(2 ** len(subjects)),
         },
     )
@@ -5528,7 +5685,8 @@ def run_controlled_cross_game_analysis(args: argparse.Namespace) -> None:
                 )
             settings_hash, settings, cache_hash = (
                 validate_controlled_subject_provenance(
-                    manifest, manifest_path, frame
+                    manifest, manifest_path, frame,
+                    allow_compatible_v4_source=True,
                 )
             )
             if common_settings_hash is None:
@@ -5724,88 +5882,702 @@ NEURAL_MAP_TITLES = {
 NEURAL_GAME_LABELS = {1: "Pong", 2: "Space Invaders"}
 
 
-def _postprocess_input_sha256(path: Path) -> str:
-    return NROI.sha256_file(Path(path))
+def _validate_unified_v4_cache_roots(
+    args: argparse.Namespace,
+    *,
+    require_planning_trace: bool,
+) -> None:
+    """Fail closed: analysis code is a read-only consumer of canonical caches."""
+    observed_neural = Path(args.cache_root).expanduser().resolve()
+    expected_neural = Path(COMMON.DEFAULT_SHARED_CACHE_ROOT).resolve()
+    if observed_neural != expected_neural:
+        raise ValueError(
+            "Unified 07_RSA accepts only the canonical v4 neural cache: "
+            f"{expected_neural}; received {observed_neural}"
+        )
+    if not expected_neural.is_dir():
+        raise FileNotFoundError(
+            f"Canonical v4 neural cache is missing: {expected_neural}. "
+            "Build it with 00_brain_cache.py."
+        )
+    output_root = Path(args.output_root).expanduser().resolve()
+    if (
+        output_root == expected_neural
+        or output_root in expected_neural.parents
+        or expected_neural in output_root.parents
+    ):
+        raise ValueError("Analysis output may not overlap the v4 neural cache")
+    if not require_planning_trace:
+        return
+    observed_trace = Path(args.planning_trace_root).expanduser().resolve()
+    expected_trace = DEFAULT_PLANNING_TRACE_ROOT.resolve()
+    if observed_trace != expected_trace:
+        raise ValueError(
+            "Planning-trace RSA accepts only the persistent v1 cache: "
+            f"{expected_trace}; received {observed_trace}"
+        )
+    if not expected_trace.is_dir():
+        raise FileNotFoundError(
+            f"Persistent planning-trace cache is missing: {expected_trace}. "
+            "Build it with 00_brain_cache.py --planning-trace-only."
+        )
+    output_root = Path(args.output_root).expanduser().resolve()
+    if (
+        output_root == expected_trace
+        or output_root in expected_trace.parents
+        or expected_trace in output_root.parents
+    ):
+        raise ValueError("Analysis output may not overlap the planning-trace cache")
 
 
-def _load_frozen_controlled_subject_outputs(
+def _planning_trace_namespace(
     output_root: Path,
-) -> Tuple[pd.DataFrame, pd.DataFrame, List[Dict[str, object]]]:
-    """Load and validate the canonical 12 frozen subject outputs."""
-    subject_frames: List[pd.DataFrame] = []
-    run_frames: List[pd.DataFrame] = []
-    inputs: List[Dict[str, object]] = []
-    settings_hash: Optional[str] = None
-    settings_contract: Optional[Dict[str, object]] = None
-    source_hash: Optional[str] = None
-    for game in (1, 2):
-        for subject in range(1, 7):
-            result_dir = (
-                Path(output_root)
-                / f"sub{subject:03d}_game{game}"
-                / "results"
-            )
-            subject_path = result_dir / "subject_effects.csv"
-            run_path = result_dir / "controlled_rsa_run_effects.csv"
-            manifest_path = result_dir / "analysis_manifest.json"
-            for path in (subject_path, run_path, manifest_path):
-                if not path.is_file():
-                    raise FileNotFoundError(
-                        f"Missing frozen controlled RSA input: {path}"
-                    )
-            subject_frame = pd.read_csv(subject_path)
-            run_frame = pd.read_csv(run_path)
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            observed_source = str(manifest.get("source_sha256", ""))
-            observed_settings_hash, observed_settings, _ = (
-                validate_controlled_subject_provenance(
-                    manifest,
-                    manifest_path,
-                    subject_frame,
-                    allow_frozen_source=True,
-                )
-            )
-            if settings_hash is None:
-                settings_hash = observed_settings_hash
-                settings_contract = observed_settings
-                source_hash = observed_source
-            elif (
-                settings_hash != observed_settings_hash
-                or settings_contract != observed_settings
-                or source_hash != observed_source
-            ):
-                raise ValueError(
-                    "Frozen controlled RSA outputs do not share one estimator contract"
-                )
-            if set(subject_frame["subject"].astype(int)) != {subject} or set(
-                subject_frame["game"].astype(int)
-            ) != {game}:
-                raise ValueError(f"Subject/game mismatch in {subject_path}")
-            if set(run_frame["subject"].astype(int)) != {subject} or set(
-                run_frame["game"].astype(int)
-            ) != {game}:
-                raise ValueError(f"Subject/game mismatch in {run_path}")
-            subject_frames.append(subject_frame)
-            run_frames.append(run_frame)
-            inputs.append(
-                {
-                    "subject": subject,
-                    "game": game,
-                    "subject_effects_path": str(subject_path),
-                    "subject_effects_sha256": _postprocess_input_sha256(subject_path),
-                    "run_effects_path": str(run_path),
-                    "run_effects_sha256": _postprocess_input_sha256(run_path),
-                    "manifest_path": str(manifest_path),
-                    "manifest_sha256": _postprocess_input_sha256(manifest_path),
-                    "frozen_source_sha256": observed_source,
-                    "controlled_settings_sha256": observed_settings_hash,
-                }
-            )
-    return (
-        pd.concat(subject_frames, ignore_index=True),
-        pd.concat(run_frames, ignore_index=True),
-        inputs,
+    *,
+    subject: Optional[int] = None,
+    game: Optional[int] = None,
+    paired: bool = False,
+) -> Path:
+    if paired:
+        return Path(output_root) / "group_paired_games" / "planning_trace"
+    if subject is not None and game is not None:
+        return (
+            Path(output_root)
+            / f"sub{int(subject):03d}_game{int(game)}"
+            / "planning_trace"
+        )
+    if game is not None:
+        return Path(output_root) / f"group_game{int(game)}" / "planning_trace"
+    raise ValueError("Planning-trace namespace requires subject/game or paired=True")
+
+
+def _planning_trace_args(args: argparse.Namespace) -> argparse.Namespace:
+    trace_args = argparse.Namespace(**vars(args))
+    trace_args.planning_trace_root = DEFAULT_PLANNING_TRACE_ROOT
+    trace_args.n_permutations = int(args.trace_temporal_permutations)
+    trace_args.permutation_block_size = int(args.trace_permutation_block_size)
+    trace_args.permutation_batch_size = int(args.trace_permutation_batch_size)
+    trace_args.n_jobs = int(args.trace_n_jobs)
+    trace_args.exemplar_roi = str(args.trace_exemplar_roi)
+    trace_args.diagnostic_noncanonical = False
+    trace_args.brain_maps_only = True
+    return trace_args
+
+
+def _planning_trace_subject_exact_inference(
+    run_effects: pd.DataFrame,
+    trace_module: Any,
+) -> pd.DataFrame:
+    required = {
+        "run_label", "roi", "trace", "conditional_partial_r",
+    }
+    missing = sorted(required.difference(run_effects.columns))
+    if missing:
+        raise ValueError(f"Planning-trace run table lacks columns: {missing}")
+    runs = sorted(run_effects["run_label"].astype(str).unique())
+    rois = sorted(run_effects["roi"].astype(str).unique())
+    traces = tuple(str(value) for value in trace_module.TRACE_NAMES)
+    if len(runs) != 11 or len(rois) != 110:
+        raise ValueError(
+            "Participant planning-trace inference requires 11 runs x 110 ROIs"
+        )
+    columns = [(roi, trace) for roi in rois for trace in traces]
+    pivot = run_effects.pivot(
+        index="run_label",
+        columns=["roi", "trace"],
+        values="conditional_partial_r",
+    ).reindex(
+        index=runs,
+        columns=pd.MultiIndex.from_tuples(columns),
     )
+    if pivot.isna().any().any():
+        raise ValueError("Incomplete run x ROI x trace matrix")
+    names = [f"{roi}\t{trace}" for roi, trace in columns]
+    result = exact_synchronized_signflip(
+        pivot.to_numpy(dtype=float), names
+    )
+    lookup = {
+        f"{roi}\t{trace}": (roi, trace) for roi, trace in columns
+    }
+    result["roi"] = result["effect"].map(
+        lambda key: lookup[str(key)][0]
+    )
+    result["trace"] = result["effect"].map(
+        lambda key: lookup[str(key)][1]
+    )
+    result = result.drop(columns=["effect"])
+    result["trace_label"] = result["trace"].map(trace_module.TRACE_LABELS)
+    result["q_bh_family"] = COMMON.fdr_bh(
+        result["p_exact_two_sided"].to_numpy(dtype=float)
+    )
+    result["inference_family"] = "planning_trace_2x110"
+    result["population_unit"] = "run"
+    return result
+
+
+def _planning_trace_map_panels(
+    frame: pd.DataFrame,
+    trace_module: Any,
+) -> List[Tuple[str, pd.DataFrame]]:
+    return [
+        (
+            str(trace_module.TRACE_LABELS[trace]),
+            frame[frame["trace"].astype(str).eq(str(trace))].copy(),
+        )
+        for trace in trace_module.TRACE_NAMES
+    ]
+
+
+def _save_planning_trace_brain_map(
+    frame: pd.DataFrame,
+    path: Path,
+    *,
+    value_column: str,
+    title: str,
+    subtitle: str,
+    trace_module: Any,
+) -> None:
+    corrected = frame[
+        pd.to_numeric(frame["p_max_abs_t_fwer"], errors="raise") < 0.05
+    ].copy()
+    NROI.save_effect_brain_maps(
+        Path(path),
+        panels=_planning_trace_map_panels(corrected, trace_module),
+        value_column=value_column,
+        title=title,
+        subtitle=subtitle,
+        metric_label="Conditional partial Spearman r",
+        signed=True,
+        n_columns=2,
+    )
+
+
+def run_planning_trace_subject_analysis(args: argparse.Namespace) -> None:
+    """Run full-trace RSA from persistent caches and publish corrected maps."""
+    _validate_unified_v4_cache_roots(args, require_planning_trace=True)
+    if bool(args.cache_only):
+        raise ValueError(
+            "Planning-trace cache construction belongs to 00_brain_cache.py; "
+            "07_RSA.py is read-only and does not implement --cache-only."
+        )
+    trace_module = _load_planning_trace_module()
+    trace_args = _planning_trace_args(args)
+    output_dir = _planning_trace_namespace(
+        Path(args.output_root),
+        subject=int(args.subject),
+        game=int(args.game),
+    )
+    original_subject_output_root = trace_module.subject_output_root
+    trace_module.subject_output_root = lambda _unused: output_dir
+    try:
+        trace_module.run_subject_analysis(trace_args)
+    finally:
+        trace_module.subject_output_root = original_subject_output_root
+
+    result_dir = output_dir / "results"
+    run_path = result_dir / "planning_trace_run_effects.csv"
+    exact = _planning_trace_subject_exact_inference(
+        pd.read_csv(run_path), trace_module
+    )
+    exact.insert(0, "game", int(args.game))
+    exact.insert(0, "subject", int(args.subject))
+    exact_path = result_dir / "subject_run_exact_inference.csv"
+    exact.to_csv(exact_path, index=False)
+
+    direct_figure_dir = (
+        Path(args.output_root)
+        / f"sub{int(args.subject):03d}_game{int(args.game)}"
+        / "figures"
+    )
+    brain_path = direct_figure_dir / "planning_trace_corrected_brain_maps.pdf"
+    _save_planning_trace_brain_map(
+        exact,
+        brain_path,
+        value_column="mean_effect",
+        title=(
+            f"{NEURAL_GAME_LABELS[int(args.game)]} · participant "
+            f"{int(args.subject)} full planning trace"
+        ),
+        subtitle=(
+            "11-run exact sign flip; max-|t| across "
+            "2 trace representations x 110 parcels"
+        ),
+        trace_module=trace_module,
+    )
+
+    for name in (
+        "residual_rdm_distance_scatter.png",
+        "residual_rdm_distance_scatter.svg",
+    ):
+        path = output_dir / "figures" / name
+        if path.exists():
+            path.unlink()
+    manifest_path = result_dir / "analysis_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts = dict(manifest.get("artifacts", {}))
+    artifacts.pop("residual_rdm_distance_scatter.png", None)
+    artifacts.pop("residual_rdm_distance_scatter.svg", None)
+    artifacts["subject_run_exact_inference.csv"] = {
+        "sha256": trace_module.sha256_file(exact_path),
+        "rows": int(len(exact)),
+        "n_sign_patterns": 2048,
+    }
+    artifacts["planning_trace_corrected_brain_maps.pdf"] = {
+        "path": str(brain_path.resolve()),
+        "sha256": trace_module.sha256_file(brain_path),
+    }
+    manifest["artifacts"] = artifacts
+    manifest.pop("exemplar_figure", None)
+    manifest["participant_inference"] = (
+        "11 run means; all 2048 exact sign patterns; synchronized "
+        "max-|t| across 2 trace representations x 110 parcels"
+    )
+    manifest["participant_figure"] = (
+        "corrected Harvard-Oxford parcel effects on a 1-mm MNI template"
+    )
+    manifest["unified_entrypoint"] = str(Path(__file__).resolve())
+    trace_module.atomic_write_json(manifest_path, manifest)
+    log(f"Planning-trace subject RSA complete -> {output_dir}")
+
+
+def _load_unified_planning_trace_subjects(
+    output_root: Path,
+    game: int,
+    trace_module: Any,
+) -> Tuple[pd.DataFrame, List[Dict[str, object]], str, Dict[str, object]]:
+    frames: List[pd.DataFrame] = []
+    input_rows: List[Dict[str, object]] = []
+    settings_hash: Optional[str] = None
+    settings: Optional[Dict[str, object]] = None
+    source_contract = trace_module.current_source_contract()
+    for subject in range(1, 7):
+        result_dir = _planning_trace_namespace(
+            Path(output_root), subject=subject, game=int(game)
+        ) / "results"
+        effect_path = result_dir / "subject_effects.csv"
+        manifest_path = result_dir / "analysis_manifest.json"
+        if not effect_path.is_file() or not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Missing unified planning-trace input: {result_dir}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (
+            manifest.get("analysis") != trace_module.ANALYSIS_NAME
+            or int(manifest.get("schema_version", -1)) != 1
+            or int(manifest.get("subject", -1)) != int(subject)
+            or int(manifest.get("game", -1)) != int(game)
+        ):
+            raise ValueError(
+                f"Planning-trace manifest identity mismatch: {manifest_path}"
+            )
+        brain_audit = manifest.get("brain_cache_audit")
+        if (
+            not isinstance(brain_audit, Mapping)
+            or int(brain_audit.get("cache_version", -1)) != 4
+            or int(brain_audit.get("process_feature_version", -1)) != 8
+            or int(brain_audit.get("neural_feature_schema_version", -1)) != 4
+        ):
+            raise ValueError(
+                f"Planning-trace input is not based on canonical cache 4/8/4: "
+                f"{manifest_path}"
+            )
+        trace_audit = manifest.get("planning_trace_audit")
+        trace_source = (
+            trace_audit.get("source_contract", {})
+            if isinstance(trace_audit, Mapping)
+            else {}
+        )
+        if (
+            not isinstance(trace_audit, Mapping)
+            or int(trace_audit.get("schema_version", -1)) != 1
+            or str(trace_audit.get("representation_version", ""))
+            != "v1_concat29_mean29"
+            or Path(str(trace_audit.get("trace_root", ""))).resolve()
+            != DEFAULT_PLANNING_TRACE_ROOT.resolve()
+            or int(trace_source.get("cache_version", -1)) != 4
+            or int(trace_source.get("process_feature_version", -1)) != 8
+            or int(trace_source.get("neural_feature_schema_version", -1)) != 4
+        ):
+            raise ValueError(
+                f"Planning-trace v1 source contract mismatch: {manifest_path}"
+            )
+        declared_effect_hash = (
+            manifest.get("artifacts", {})
+            .get("subject_effects.csv", {})
+            .get("sha256")
+        )
+        if str(declared_effect_hash) != trace_module.sha256_file(effect_path):
+            raise ValueError(
+                f"Planning-trace subject artifact hash mismatch: {effect_path}"
+            )
+        if manifest.get("source_contract") != source_contract:
+            raise ValueError(
+                f"Planning-trace source contract mismatch: {manifest_path}"
+            )
+        run_contract = manifest.get("run_contract", {})
+        if (
+            not bool(run_contract.get("canonical_full_v1", False))
+            or int(run_contract.get("n_runs", -1)) != 11
+            or int(run_contract.get("n_rois", -1)) != 110
+        ):
+            raise ValueError(f"Noncanonical planning-trace input: {manifest_path}")
+        observed_hash = str(manifest.get("settings_sha256", ""))
+        observed_settings = manifest.get("settings")
+        if (
+            not isinstance(observed_settings, dict)
+            or trace_module.stable_hash(observed_settings) != observed_hash
+        ):
+            raise ValueError(f"Planning-trace settings hash mismatch: {manifest_path}")
+        if settings_hash is None:
+            settings_hash = observed_hash
+            settings = observed_settings
+        elif settings_hash != observed_hash or settings != observed_settings:
+            raise ValueError("Planning-trace subject settings differ within game")
+        frame = pd.read_csv(effect_path)
+        if (
+            set(pd.to_numeric(frame["subject"], errors="raise").astype(int))
+            != {int(subject)}
+            or set(pd.to_numeric(frame["game"], errors="raise").astype(int))
+            != {int(game)}
+        ):
+            raise ValueError(
+                f"Planning-trace subject/game table mismatch: {effect_path}"
+            )
+        frames.append(frame)
+        input_rows.append(
+            {
+                "subject": subject,
+                "game": int(game),
+                "subject_effects_path": str(effect_path.resolve()),
+                "subject_effects_sha256": trace_module.sha256_file(effect_path),
+                "manifest_path": str(manifest_path.resolve()),
+                "manifest_sha256": trace_module.sha256_file(manifest_path),
+            }
+        )
+    combined = pd.concat(frames, ignore_index=True)
+    trace_module.validate_subject_effect_contract(combined)
+    if settings_hash is None or settings is None:
+        raise AssertionError("Planning-trace settings were not initialized")
+    return combined, input_rows, settings_hash, settings
+
+
+def _planning_trace_predefined_inference(
+    subject_effects: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    predefined = NROI.aggregate_predefined_rois(
+        subject_effects,
+        value_columns=["mean_conditional_partial_r"],
+        grouping_columns=["subject", "game", "trace", "trace_label"],
+    )
+    rows: List[pd.DataFrame] = []
+    for (game, trace, trace_label), selected in predefined.groupby(
+        ["game", "trace", "trace_label"], sort=False
+    ):
+        pivot = selected.pivot(
+            index="subject",
+            columns="roi_key",
+            values="mean_conditional_partial_r",
+        ).reindex(index=range(1, 7), columns=NROI.ROI_ORDER)
+        if pivot.isna().any().any():
+            raise ValueError(
+                f"Incomplete trace predefined ROI matrix: game={game}, trace={trace}"
+            )
+        inference = exact_synchronized_signflip(
+            pivot.to_numpy(dtype=float), list(NROI.ROI_ORDER)
+        ).rename(columns={"effect": "roi_key"})
+        inference["q_bh_8roi"] = COMMON.fdr_bh(
+            inference["p_exact_two_sided"].to_numpy(dtype=float)
+        )
+        inference.insert(0, "trace_label", str(trace_label))
+        inference.insert(0, "trace", str(trace))
+        inference.insert(0, "game", int(game))
+        rows.append(inference)
+    result = pd.concat(rows, ignore_index=True).merge(
+        NROI.predefined_roi_mapping_frame()[
+            ["roi_key", "roi_label", "anatomical_label"]
+        ].drop_duplicates(),
+        on="roi_key",
+        how="left",
+        validate="many_to_one",
+    )
+    result["roi_family"] = "eight_literature_defined_bilateral_rois"
+    result["selection_timing"] = "literature_defined_secondary_not_preregistered"
+    return predefined, result
+
+
+def _save_planning_trace_predefined_figure(
+    subjects: pd.DataFrame,
+    inference: pd.DataFrame,
+    path: Path,
+    *,
+    game: int,
+    trace: str,
+    trace_module: Any,
+) -> None:
+    if str(trace) not in set(trace_module.TRACE_NAMES):
+        raise ValueError(f"Unknown planning trace figure target: {trace}")
+    figure, axis = plt.subplots(
+        1, 1, figsize=(6.0, 2.8), constrained_layout=False
+    )
+    colors = plt.cm.tab10(np.linspace(0.05, 0.85, len(NROI.ROI_ORDER)))
+    x = np.arange(len(NROI.ROI_ORDER), dtype=float)
+    selected = subjects[
+        subjects["game"].astype(int).eq(int(game))
+        & subjects["trace"].astype(str).eq(str(trace))
+    ]
+    tested = inference[
+        inference["game"].astype(int).eq(int(game))
+        & inference["trace"].astype(str).eq(str(trace))
+    ]
+    data = [
+        selected[selected["roi_key"].eq(key)][
+            "mean_conditional_partial_r"
+        ].to_numpy(dtype=float)
+        for key in NROI.ROI_ORDER
+    ]
+    axis.boxplot(
+        data, positions=x, widths=0.58, patch_artist=True, showfliers=False,
+        medianprops={"color": "#222426", "linewidth": 0.8},
+        whiskerprops={"color": "#6C737A", "linewidth": 0.6},
+        capprops={"color": "#6C737A", "linewidth": 0.6},
+        boxprops={
+            "facecolor": "#E9EDF1", "edgecolor": "#6C737A", "linewidth": 0.6
+        },
+    )
+    for roi_index, roi_key in enumerate(NROI.ROI_ORDER):
+        values = data[roi_index]
+        offsets = np.linspace(-0.16, 0.16, len(values))
+        axis.scatter(
+            roi_index + offsets, values, s=12, color=colors[roi_index],
+            edgecolor="white", linewidth=0.25, zorder=3,
+        )
+        row = tested[tested["roi_key"].eq(roi_key)]
+        if len(row) != 1:
+            raise ValueError(f"Missing predefined trace row: {trace}/{roi_key}")
+        if float(row.iloc[0]["p_max_abs_t_fwer"]) < 0.05:
+            span = max(float(np.ptp(values)), 0.02)
+            axis.text(
+                roi_index, max(float(np.max(values)), 0.0) + 0.08 * span,
+                "†", ha="center", va="bottom", fontsize=7.0,
+            )
+    axis.axhline(0, color="#8B9094", linewidth=0.55, linestyle="--")
+    data_min = min(0.0, min(float(np.min(values)) for values in data))
+    data_max = max(0.0, max(float(np.max(values)) for values in data))
+    data_span = max(data_max - data_min, 0.02)
+    axis.set_ylim(
+        data_min - 0.12 * data_span,
+        data_max + 0.24 * data_span,
+    )
+    axis.set_title(str(trace_module.TRACE_LABELS[trace]), fontsize=7.2)
+    axis.grid(axis="y", color="#E1E4E7", linewidth=0.45)
+    axis.tick_params(labelsize=5.8)
+    axis.set_xticks(x)
+    axis.set_xticklabels(
+        [NROI.ROI_LABELS[key] for key in NROI.ROI_ORDER],
+        rotation=30, ha="right",
+    )
+    figure.suptitle(
+        f"{NEURAL_GAME_LABELS[int(game)]} · full-trace predefined ROIs",
+        fontsize=8.2, fontweight="normal", y=0.97,
+    )
+    figure.subplots_adjust(
+        left=0.075, right=0.99, top=0.72, bottom=0.25,
+    )
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=300, facecolor="white")
+    plt.close(figure)
+
+
+def run_planning_trace_group_analysis(args: argparse.Namespace) -> None:
+    _validate_unified_v4_cache_roots(args, require_planning_trace=True)
+    trace_module = _load_planning_trace_module()
+    subject_effects, input_rows, settings_hash, settings = (
+        _load_unified_planning_trace_subjects(
+            Path(args.output_root), int(args.game), trace_module
+        )
+    )
+    inference = trace_module.group_inference(subject_effects)
+    output_dir = _planning_trace_namespace(
+        Path(args.output_root), game=int(args.game)
+    )
+    result_dir = output_dir / "results"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    subject_path = result_dir / "subject_inputs.csv"
+    inference_path = result_dir / "group_inference.csv"
+    input_path = result_dir / "input_manifest.csv"
+    subject_effects.to_csv(subject_path, index=False)
+    inference.to_csv(inference_path, index=False)
+    pd.DataFrame(input_rows).to_csv(input_path, index=False)
+
+    direct_figure_dir = (
+        Path(args.output_root) / f"group_game{int(args.game)}" / "figures"
+    )
+    brain_path = direct_figure_dir / "planning_trace_corrected_brain_maps.pdf"
+    _save_planning_trace_brain_map(
+        inference,
+        brain_path,
+        value_column="mean_effect",
+        title=f"{NEURAL_GAME_LABELS[int(args.game)]} · full planning trace",
+        subtitle=(
+            "Six-subject exact sign flip; max-|t| across "
+            "2 trace representations x 110 parcels"
+        ),
+        trace_module=trace_module,
+    )
+
+    predefined_subjects, predefined_inference = (
+        _planning_trace_predefined_inference(subject_effects)
+    )
+    predefined_subject_path = (
+        result_dir / "predefined_roi_subject_effects.csv"
+    )
+    predefined_inference_path = (
+        result_dir / "predefined_roi_inference.csv"
+    )
+    predefined_subjects.to_csv(predefined_subject_path, index=False)
+    predefined_inference.to_csv(predefined_inference_path, index=False)
+    predefined_figure_specs = (
+        (
+            "planning_concat29",
+            "planning_trace_predefined_roi_effects_concat29.pdf",
+        ),
+        (
+            "planning_mean29",
+            "planning_trace_predefined_roi_effects_mean29.pdf",
+        ),
+    )
+    legacy_predefined_figure = (
+        direct_figure_dir / "planning_trace_predefined_roi_effects.pdf"
+    )
+    legacy_predefined_figure.unlink(missing_ok=True)
+    predefined_figure_paths: Dict[str, Path] = {}
+    for trace, filename in predefined_figure_specs:
+        figure_path = direct_figure_dir / filename
+        _save_planning_trace_predefined_figure(
+            predefined_subjects,
+            predefined_inference,
+            figure_path,
+            game=int(args.game),
+            trace=trace,
+            trace_module=trace_module,
+        )
+        predefined_figure_paths[filename] = figure_path
+    anatomy_path = Path(args.output_root) / "figures" / "predefined_roi_anatomy.pdf"
+    NROI.save_predefined_roi_anatomy(anatomy_path)
+
+    manifest = {
+        "analysis": "07_RSA unified planning-trace RSA group",
+        "analysis_version": trace_module.ANALYSIS_VERSION,
+        "schema_version": 1,
+        "aggregation": "group",
+        "game": int(args.game),
+        "source_contract": trace_module.current_source_contract(),
+        "unified_entrypoint_sha256": hashlib.sha256(
+            Path(__file__).read_bytes()
+        ).hexdigest(),
+        "settings": settings,
+        "settings_sha256": settings_hash,
+        "n_subjects": 6,
+        "n_rois": 110,
+        "n_traces": 2,
+        "n_sign_patterns": 64,
+        "correction": "two-sided exact synchronized max-|t| across 2x110",
+        "predefined_roi_inference": (
+            "equal left/right parcel mean; exact 64 subject sign flips; "
+            "max-|t| across eight ROIs separately for each trace"
+        ),
+        "artifacts": {
+            "subject_inputs.csv": {
+                "sha256": trace_module.sha256_file(subject_path),
+                "rows": int(len(subject_effects)),
+            },
+            "group_inference.csv": {
+                "sha256": trace_module.sha256_file(inference_path),
+                "rows": int(len(inference)),
+            },
+            "input_manifest.csv": {
+                "sha256": trace_module.sha256_file(input_path),
+                "rows": int(len(input_rows)),
+            },
+            "planning_trace_corrected_brain_maps.pdf": {
+                "path": str(brain_path.resolve()),
+                "sha256": trace_module.sha256_file(brain_path),
+            },
+            "predefined_roi_subject_effects.csv": {
+                "sha256": trace_module.sha256_file(predefined_subject_path),
+                "rows": int(len(predefined_subjects)),
+            },
+            "predefined_roi_inference.csv": {
+                "sha256": trace_module.sha256_file(predefined_inference_path),
+                "rows": int(len(predefined_inference)),
+            },
+            **{
+                filename: {
+                    "path": str(figure_path.resolve()),
+                    "sha256": trace_module.sha256_file(figure_path),
+                }
+                for filename, figure_path in predefined_figure_paths.items()
+            },
+            "predefined_roi_anatomy.pdf": {
+                "path": str(anatomy_path.resolve()),
+                "sha256": trace_module.sha256_file(anatomy_path),
+            },
+        },
+    }
+    trace_module.atomic_write_json(
+        result_dir / "analysis_manifest.json", manifest
+    )
+    log(f"Planning-trace group RSA complete -> {output_dir}")
+
+
+def run_planning_trace_paired_analysis(args: argparse.Namespace) -> None:
+    _validate_unified_v4_cache_roots(args, require_planning_trace=True)
+    trace_module = _load_planning_trace_module()
+    game1, rows1, settings_hash1, settings1 = (
+        _load_unified_planning_trace_subjects(
+            Path(args.output_root), 1, trace_module
+        )
+    )
+    game2, rows2, settings_hash2, settings2 = (
+        _load_unified_planning_trace_subjects(
+            Path(args.output_root), 2, trace_module
+        )
+    )
+    if settings_hash1 != settings_hash2 or settings1 != settings2:
+        raise ValueError("Planning-trace settings differ between games")
+    paired = trace_module.build_paired_effects(game1, game2)
+    inference = trace_module.paired_inference(paired)
+    output_dir = _planning_trace_namespace(
+        Path(args.output_root), paired=True
+    )
+    result_dir = output_dir / "results"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    paired_path = result_dir / "paired_subject_effects.csv"
+    inference_path = result_dir / "paired_game_inference.csv"
+    input_path = result_dir / "input_manifest.csv"
+    paired.to_csv(paired_path, index=False)
+    inference.to_csv(inference_path, index=False)
+    pd.DataFrame([*rows1, *rows2]).to_csv(input_path, index=False)
+    trace_module.atomic_write_json(
+        result_dir / "analysis_manifest.json",
+        {
+            "analysis": "07_RSA unified paired-game planning-trace RSA",
+            "analysis_version": trace_module.ANALYSIS_VERSION,
+            "source_contract": trace_module.current_source_contract(),
+            "settings": settings1,
+            "settings_sha256": settings_hash1,
+            "contrasts": {
+                "across_game_common": "(Game1 + Game2) / 2 within subject",
+                "game2_minus_game1": "Game2 - Game1 within subject",
+            },
+            "n_subjects": 6,
+            "n_sign_patterns_per_contrast": 64,
+            "correction": (
+                "separate exact synchronized max-|t| family per contrast, "
+                "each across 2 traces x 110 parcels"
+            ),
+        },
+    )
+    log(f"Planning-trace paired-game RSA complete -> {output_dir}")
 
 
 def _predefined_roi_exact_inference_07(
@@ -5867,7 +6639,7 @@ def _save_predefined_roi_effect_figure_07(
         & inference["effect"].astype(str).isin(NEURAL_MAP_EFFECTS)
     ].copy()
     figure, axes = plt.subplots(
-        4, 2, figsize=(6.0, 7.4), sharex=True, constrained_layout=True
+        2, 4, figsize=(12.8, 5.0), sharex=True, constrained_layout=False
     )
     colors = plt.cm.tab10(np.linspace(0.05, 0.85, 8))
     x = np.arange(len(NROI.ROI_ORDER), dtype=float)
@@ -5878,6 +6650,10 @@ def _save_predefined_roi_effect_figure_07(
             effect_rows[effect_rows["roi_key"].eq(key)]["mean_effect"].to_numpy(float)
             for key in NROI.ROI_ORDER
         ]
+        data_min = min(0.0, min(float(np.min(values)) for values in data))
+        data_max = max(0.0, max(float(np.max(values)) for values in data))
+        data_span = max(data_max - data_min, 0.02)
+        marker_y = data_max + 0.08 * data_span
         ax.boxplot(
             data,
             positions=x,
@@ -5908,16 +6684,18 @@ def _save_predefined_roi_effect_figure_07(
             p_raw = float(test_row.iloc[0]["p_exact_two_sided"])
             marker = "†" if p_max < 0.05 else ("*" if p_raw < 0.05 else "")
             if marker:
-                ymax = max(float(np.max(values)), 0.0)
-                ymin = min(float(np.min(values)), 0.0)
                 ax.text(
                     roi_index,
-                    ymax + 0.08 * max(ymax - ymin, 0.02),
+                    marker_y,
                     marker,
                     ha="center",
                     va="bottom",
                     fontsize=7.0,
                 )
+        ax.set_ylim(
+            data_min - 0.12 * data_span,
+            data_max + 0.30 * data_span,
+        )
         ax.axhline(0, color="#8B9094", linewidth=0.55, linestyle="--")
         ax.set_title(NEURAL_MAP_TITLES[effect], fontsize=7.2, fontweight="normal")
         ax.tick_params(labelsize=5.8)
@@ -5929,14 +6707,18 @@ def _save_predefined_roi_effect_figure_07(
             rotation=30,
             ha="right",
         )
+    figure.subplots_adjust(
+        left=0.045, right=0.995, top=0.82, bottom=0.23,
+        hspace=0.62, wspace=0.22,
+    )
     figure.suptitle(
         f"{NEURAL_GAME_LABELS[int(game)]} · literature-defined ROI effects",
         fontsize=8.2,
-        fontweight="normal",
+        fontweight="normal", y=0.985,
     )
     figure.text(
         0.5,
-        0.010,
+        0.018,
         "points: participants  |  * raw exact p<.05  |  † max-|t| corrected across 8 ROIs",
         ha="center",
         fontsize=5.7,
@@ -5962,163 +6744,12 @@ def _effect_panels(
 
 
 def run_neural_figure_postprocessing(args: argparse.Namespace) -> None:
-    """Create participant maps and targeted ROI inference from frozen results."""
-    output_root = Path(args.output_root)
-    subject_effects, run_effects, input_rows = (
-        _load_frozen_controlled_subject_outputs(output_root)
+    """Retired compatibility hook; canonical runs emit maps in-place."""
+    del args
+    raise RuntimeError(
+        "Central neural_figures postprocessing is retired; run canonical "
+        "subject/group modes so figures are written in their result folders."
     )
-    primary = subject_effects[
-        subject_effects["statistic"].astype(str).eq("conditional_partial_r")
-        & subject_effects["effect"].astype(str).isin(NEURAL_MAP_EFFECTS)
-    ].copy()
-    participant_corrected = primary[
-        pd.to_numeric(primary["p_max_abs_t_fwer"], errors="raise") < 0.05
-    ].copy()
-
-    post_root = output_root / "neural_figures"
-    result_dir = post_root / "results"
-    figure_dir = post_root / "figures"
-    result_dir.mkdir(parents=True, exist_ok=True)
-    figure_dir.mkdir(parents=True, exist_ok=True)
-    NROI.predefined_roi_mapping_frame().to_csv(
-        result_dir / "predefined_roi_mapping.csv", index=False
-    )
-    pd.DataFrame(input_rows).to_csv(
-        result_dir / "postprocess_input_manifest.csv", index=False
-    )
-    participant_corrected.to_csv(
-        result_dir / "participant_corrected_effects.csv", index=False
-    )
-
-    for game in (1, 2):
-        for subject in range(1, 7):
-            selected = participant_corrected[
-                participant_corrected["game"].astype(int).eq(game)
-                & participant_corrected["subject"].astype(int).eq(subject)
-            ]
-            NROI.save_effect_brain_maps(
-                figure_dir / f"sub{subject:03d}_game{game}_corrected_maps.pdf",
-                panels=_effect_panels(selected, value_column="mean_effect"),
-                value_column="mean_effect",
-                title=(
-                    f"{NEURAL_GAME_LABELS[game]} · participant {subject} "
-                    "run-replicated effects"
-                ),
-                subtitle=(
-                    "11-run exact sign-flip; max-|t| corrected within each "
-                    "predeclared atlas family"
-                ),
-                metric_label="Conditional partial Spearman r",
-                signed=True,
-                n_columns=4,
-            )
-
-    group_frames: List[pd.DataFrame] = []
-    for game in (1, 2):
-        group = summarize_controlled_group(
-            subject_effects[subject_effects["game"].astype(int).eq(game)]
-        )
-        group.insert(0, "game", game)
-        group_frames.append(group)
-        selected = group[
-            group["statistic"].astype(str).eq("conditional_partial_r")
-            & group["effect"].astype(str).isin(NEURAL_MAP_EFFECTS)
-            & (pd.to_numeric(group["p_max_abs_t_fwer"], errors="raise") < 0.05)
-        ].copy()
-        NROI.save_effect_brain_maps(
-            figure_dir / f"group_game{game}_corrected_maps.pdf",
-            panels=_effect_panels(selected, value_column="mean_effect"),
-            value_column="mean_effect",
-            title=f"{NEURAL_GAME_LABELS[game]} · group effects",
-            subtitle="Six-subject exact sign-flip; atlas-family max-|t| correction",
-            metric_label="Mean conditional partial Spearman r",
-            signed=True,
-            n_columns=4,
-        )
-    group_effects = pd.concat(group_frames, ignore_index=True)
-    group_effects.to_csv(result_dir / "game_specific_group_effects.csv", index=False)
-
-    predefined_subjects = NROI.aggregate_predefined_rois(
-        primary,
-        value_columns=["mean_effect"],
-        grouping_columns=[
-            "subject",
-            "game",
-            "effect",
-            "effect_label",
-            "inference_family",
-            "statistic",
-        ],
-    )
-    predefined_inference = _predefined_roi_exact_inference_07(
-        predefined_subjects
-    )
-    predefined_subjects.to_csv(
-        result_dir / "predefined_roi_subject_effects.csv", index=False
-    )
-    predefined_inference.to_csv(
-        result_dir / "predefined_roi_inference.csv", index=False
-    )
-    conjunction_keys = [
-        "effect", "effect_label", "inference_family", "statistic",
-        "roi_key", "roi_label", "anatomical_label",
-    ]
-    conjunction = predefined_inference.pivot(
-        index=conjunction_keys,
-        columns="game",
-        values="p_max_abs_t_fwer",
-    ).reset_index()
-    conjunction = conjunction.rename(
-        columns={1: "game1_p_maxT_8roi", 2: "game2_p_maxT_8roi"}
-    )
-    conjunction["corrected_in_both_games"] = (
-        conjunction["game1_p_maxT_8roi"].to_numpy(float) < 0.05
-    ) & (
-        conjunction["game2_p_maxT_8roi"].to_numpy(float) < 0.05
-    )
-    conjunction.to_csv(
-        result_dir / "predefined_roi_game_conjunction.csv", index=False
-    )
-    NROI.save_predefined_roi_anatomy(
-        figure_dir / "predefined_roi_anatomy.pdf"
-    )
-    for game in (1, 2):
-        _save_predefined_roi_effect_figure_07(
-            predefined_subjects,
-            predefined_inference,
-            figure_dir / f"predefined_roi_effects_game{game}.pdf",
-            game=game,
-        )
-
-    COMMON.atomic_write_json(
-        result_dir / "analysis_manifest.json",
-        {
-            "analysis": "controlled RSA participant maps and targeted ROI inference",
-            "postprocess_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            "shared_figure_source_sha256": NROI.sha256_file(Path(NROI.__file__)),
-            "input_contract": "12 canonical frozen subject outputs, 11 runs each",
-            "input_source_sha256": sorted({row["frozen_source_sha256"] for row in input_rows}),
-            "statistics": "conditional_partial_r",
-            "participant_inference": (
-                "existing 2048-pattern exact run sign flip; max-|t| within "
-                "planning, transition, or sensitivity atlas family"
-            ),
-            "targeted_roi_inference": (
-                "64-pattern exact subject sign flip; max-|t| across the eight "
-                "bilateral literature-defined ROIs separately for each effect and game"
-            ),
-            "targeted_roi_status": "literature-defined secondary, not preregistered",
-            "hemisphere_weighting": "equal left/right parcel mean",
-            "games": "tested and displayed separately; no game averaging",
-            "n_subjects": 6,
-            "n_runs_per_subject_game": 11,
-            "n_atlas_parcels": 110,
-            "n_predefined_bilateral_rois": 8,
-            "n_run_effect_rows_loaded": int(len(run_effects)),
-        },
-    )
-    log(f"Controlled RSA neural postprocessing complete -> {post_root}")
-
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -6131,6 +6762,64 @@ def build_argparser() -> argparse.ArgumentParser:
         if action.dest in {"subject", "game"}:
             action.required = False
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--render-predefined-roi-anatomy",
+        action="store_true",
+        help=(
+            "Render only the shared literature-defined bilateral ROI anatomy "
+            "PDF, without fitting RSA or recomputing inference"
+        ),
+    )
+    parser.add_argument(
+        "--rsa-family",
+        choices=("native", "planning-trace", "both"),
+        default="native",
+        help=(
+            "RSA representation family: process-resolved native variables, "
+            "full concat29/mean29 planning trace, or both"
+        ),
+    )
+    parser.add_argument(
+        "--analysis-level",
+        choices=("auto", "subject", "group", "both"),
+        default="auto",
+        help=(
+            "Execution level. 'auto' preserves legacy subject/aggregation "
+            "flags; 'both' runs the requested subject cell and then its game group."
+        ),
+    )
+    parser.add_argument(
+        "--planning-trace-root",
+        type=Path,
+        default=DEFAULT_PLANNING_TRACE_ROOT,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--trace-temporal-permutations",
+        type=int,
+        default=0,
+        help=(
+            "Optional diagnostic within-run block permutations for full-trace "
+            "RSA (0..200). Exact 2048 run and 64 subject sign flips are primary."
+        ),
+    )
+    parser.add_argument(
+        "--trace-permutation-block-size", type=int, default=40
+    )
+    parser.add_argument(
+        "--trace-permutation-batch-size", type=int, default=20
+    )
+    parser.add_argument(
+        "--trace-n-jobs",
+        type=int,
+        default=1,
+        help="Low-concurrency ROI workers for planning-trace RSA",
+    )
+    parser.add_argument(
+        "--trace-exemplar-roi",
+        default="right_caudate",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--aggregate-subjects",
         action="store_true",
@@ -6151,9 +6840,9 @@ def build_argparser() -> argparse.ArgumentParser:
         "--postprocess-neural-figures",
         action="store_true",
         help=(
-            "Validate the 12 canonical frozen subject outputs, then create "
-            "participant-corrected MNI maps and literature-defined bilateral "
-            "ROI inference without recomputing first-level RSA"
+            "Deprecated: corrected brain maps and predefined-ROI results are "
+            "written directly by canonical subject/group runs; "
+            "no central neural_figures directory is created"
         ),
     )
     parser.add_argument(
@@ -6964,6 +7653,65 @@ def main() -> None:
     if args.self_test:
         run_self_test()
         return
+    if args.render_predefined_roi_anatomy:
+        anatomy_path = (
+            Path(args.output_root) / "figures" / "predefined_roi_anatomy.pdf"
+        )
+        NROI.save_predefined_roi_anatomy(anatomy_path)
+        anatomy_sha256 = NROI.sha256_file(anatomy_path)
+        for game in (1, 2):
+            manifest_path = (
+                Path(args.output_root)
+                / f"group_game{game}"
+                / "planning_trace"
+                / "results"
+                / "analysis_manifest.json"
+            )
+            if not manifest_path.is_file():
+                continue
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact = manifest.get("artifacts", {}).get(
+                "predefined_roi_anatomy.pdf"
+            )
+            if isinstance(artifact, dict):
+                artifact["path"] = str(anatomy_path.resolve())
+                artifact["sha256"] = str(anatomy_sha256)
+                COMMON.atomic_write_json(manifest_path, manifest)
+        log(f"Predefined ROI anatomy -> {anatomy_path}")
+        return
+    run_native = args.rsa_family in {"native", "both"}
+    run_trace = args.rsa_family in {"planning-trace", "both"}
+    run_group_after_subject = False
+    if args.analysis_level == "subject":
+        if args.aggregate_subjects or args.aggregate_games:
+            parser.error(
+                "--analysis-level subject cannot be combined with aggregation flags"
+            )
+    elif args.analysis_level == "group":
+        if args.aggregate_games:
+            parser.error(
+                "--analysis-level group cannot be combined with --aggregate-games"
+            )
+        if args.subject is not None:
+            parser.error(
+                "--analysis-level group does not accept --subject"
+            )
+        args.aggregate_subjects = True
+    elif args.analysis_level == "both":
+        if args.aggregate_subjects or args.aggregate_games:
+            parser.error(
+                "--analysis-level both cannot be combined with aggregation flags"
+            )
+        run_group_after_subject = True
+
+    if not 0 <= int(args.trace_temporal_permutations) <= 200:
+        parser.error("--trace-temporal-permutations must be in 0..200")
+    if int(args.trace_permutation_block_size) < 2:
+        parser.error("--trace-permutation-block-size must be >=2")
+    if int(args.trace_permutation_batch_size) < 1:
+        parser.error("--trace-permutation-batch-size must be >=1")
+    if int(args.trace_n_jobs) < 1:
+        parser.error("--trace-n-jobs must be >=1")
     legacy_transition_mode = bool(
         args.legacy_transition_topology
         or args.transition_pattern_permutation_pilot
@@ -6973,23 +7721,21 @@ def main() -> None:
         + int(bool(args.individual_rdms))
         + int(legacy_transition_mode)
     )
+    if legacy_modes and args.rsa_family != "native":
+        raise ValueError(
+            "Legacy RSA modes are native-only and cannot be combined with "
+            "--rsa-family planning-trace/both"
+        )
+    if args.cross_game_fdr_bars_only and args.rsa_family != "native":
+        raise ValueError(
+            "--cross-game-fdr-bars-only is a legacy native-only option"
+        )
     if args.postprocess_neural_figures:
-        if (
-            args.aggregate_subjects
-            or args.aggregate_games
-            or legacy_modes
-            or args.cross_game_fdr_bars_only
-        ):
-            raise ValueError(
-                "--postprocess-neural-figures cannot be combined with other modes"
-            )
-        if args.subject is not None or args.game is not None:
-            raise ValueError(
-                "--postprocess-neural-figures uses all six subjects and both "
-                "games; do not pass --subject or --game"
-            )
-        run_neural_figure_postprocessing(args)
-        return
+        parser.error(
+            "--postprocess-neural-figures is retired. Canonical subject and "
+            "group runs now write corrected brain maps directly to their "
+            "figures directories."
+        )
     if args.aggregate_subjects:
         if args.aggregate_games:
             raise ValueError(
@@ -7001,7 +7747,13 @@ def main() -> None:
             )
         if args.game is None:
             parser.error("--game is required with --aggregate-subjects")
-        run_controlled_group_analysis(args)
+        if run_native:
+            _validate_unified_v4_cache_roots(
+                args, require_planning_trace=False
+            )
+            run_controlled_group_analysis(args)
+        if run_trace:
+            run_planning_trace_group_analysis(args)
         return
     if args.aggregate_games:
         if legacy_modes or args.cross_game_fdr_bars_only:
@@ -7012,7 +7764,13 @@ def main() -> None:
             raise ValueError(
                 "--aggregate-games pairs both games; do not pass --game"
             )
-        run_controlled_cross_game_analysis(args)
+        if run_native:
+            _validate_unified_v4_cache_roots(
+                args, require_planning_trace=False
+            )
+            run_controlled_cross_game_analysis(args)
+        if run_trace:
+            run_planning_trace_paired_analysis(args)
         return
     if args.subject is None:
         parser.error(
@@ -7074,11 +7832,22 @@ def main() -> None:
         return
 
     if not (args.legacy_composite or args.individual_rdms):
-        args.include_topology_cache = False
-        run_specs, _, cache_audit = COMMON.shared_prepare_from_args(args)
-        run_controlled_subject_analysis(
-            args, run_specs, cache_audit
-        )
+        if run_native:
+            _validate_unified_v4_cache_roots(
+                args, require_planning_trace=False
+            )
+            args.include_topology_cache = False
+            run_specs, _, cache_audit = COMMON.shared_prepare_from_args(args)
+            run_controlled_subject_analysis(
+                args, run_specs, cache_audit
+            )
+        if run_trace:
+            run_planning_trace_subject_analysis(args)
+        if run_group_after_subject:
+            if run_native:
+                run_controlled_group_analysis(args)
+            if run_trace:
+                run_planning_trace_group_analysis(args)
         return
 
     args.legacy_process_cache = True
