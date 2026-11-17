@@ -45,8 +45,12 @@ class ImitationNumericTrace:
         self.rng = {"torch": torch.get_rng_state(),
                     "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
         self.capture_max = float(getattr(learner, "_numeric_bc_capture_max", 0.))
-        self.trigger = max(1e4, self.capture_max * 10.)
         self.stop_at = float(os.environ.get("DI72_NUMERIC_STOP_AT_LOGIT", "0"))
+        self.trigger = max(1e4, self.capture_max * 10.)
+        # A diagnostic stop below the ordinary capture threshold must still
+        # retain the exact triggering recurrent state and actor input.
+        if self.stop_at > 0.:
+            self.trigger = min(self.trigger, self.stop_at)
         self.trigger_event = None
 
     def __enter__(self):
@@ -59,11 +63,16 @@ class ImitationNumericTrace:
                     self.handles.append(module.register_forward_hook(
                         self._hook(prefix + "." + name), with_kwargs=True))
         actor = self.learner.actor_net
-        for name in ("h_encoder", "tree_rep_encoder", "final_layer", "policy"):
+        for name in ("h_encoder", "x_encoder_pre", "real_state_encoder",
+                     "tree_rep_encoder", "final_mlp", "final_layer", "policy"):
             module = getattr(actor, name, None)
             if isinstance(module, torch.nn.Module):
                 self.handles.append(module.register_forward_hook(
                     self._hook("actor." + name), with_kwargs=True))
+        encoder = getattr(actor, "h_encoder", None)
+        if isinstance(getattr(encoder, "output_norm", None), torch.nn.LayerNorm):
+            self.handles.append(encoder.fc.register_forward_hook(
+                self._hook("actor.h_encoder_pre_norm"), with_kwargs=True))
         self.handles.append(actor.register_forward_pre_hook(self._actor_before))
         self.handles.append(actor.register_forward_hook(self._actor_after))
         return self

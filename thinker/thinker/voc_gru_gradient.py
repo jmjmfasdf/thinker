@@ -7,6 +7,7 @@ actor AMP unscale, before the ordinary actor clipping and optimizer step.
 This is mathematically selective un-detaching, without sending gradients to
 the other encoders, phase embedding, targets, or EMA teacher.
 """
+import math
 import torch
 
 
@@ -30,6 +31,9 @@ class SelectiveVOCGradient:
         self.learner=learner
         self.actor=learner.actor_net
         self.enabled=bool(enabled)
+        self.scale=float(getattr(getattr(learner, "flags", None), "voc_gru_gradient_scale", 1.0))
+        if not math.isfinite(self.scale) or self.scale <= 0:
+            raise ValueError("VOC GRU gradient scale must be positive and finite")
         for name in ['tree_rep_encoder','policy','voc_head']:
             if not hasattr(self.actor,name):
                 raise ValueError('This diagnostic requires ActorNetSingle with '+name)
@@ -67,7 +71,7 @@ class SelectiveVOCGradient:
         self.records=[];self.live=None;self.active=True
         try:
             result=self.original_compute(*args,**kwargs)
-            self.pending=selected_feature_vjp(result[0].get('_voc_total_loss'),
+            self.pending=selected_feature_vjp(result[0].get('_voc_gru_loss', result[0].get('_voc_total_loss')),
                                               self.records,self.parameters)
             if any(g is not None and not torch.isfinite(g).all() for g in self.pending):
                 raise FloatingPointError('Nonfinite unscaled VOC -> GRU gradient')
@@ -88,12 +92,13 @@ class SelectiveVOCGradient:
                 if p.grad is not None:
                     dot+=float((p.grad.detach().double()*g.double()).sum())
                 if self.enabled:
-                    if p.grad is None:p.grad=g.clone()
-                    else:p.grad.add_(g)
+                    if p.grad is None:p.grad=g.clone().mul_(self.scale)
+                    else:p.grad.add_(g, alpha=self.scale)
                     if not torch.isfinite(p.grad).all():
                         raise FloatingPointError('Nonfinite merged actor/VOC GRU gradient')
         self.last_metrics=dict(voc_gru_candidate_norm=norm2**.5,
-            voc_gru_applied_norm=norm2**.5 if self.enabled else 0.,
+            voc_gru_applied_norm=self.scale*norm2**.5 if self.enabled else 0.,
+            voc_gru_gradient_scale=self.scale,
             actor_gru_gradient_norm=actor2**.5,
             voc_actor_gru_cosine=dot/(norm2*actor2)**.5 if norm2*actor2>0 else 0.)
         # Gradients added above are finite and already unscaled; the unchanged

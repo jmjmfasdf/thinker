@@ -84,7 +84,12 @@ def arm_rollout(flags, actor_ck, model_ck, *, seed, repetition, prefix,
                 pending = np.array([e is None for e in entries]) & (real_count == prefix) & (phase == 0)
                 if np.any(counts[pending] > targets[pending]):
                     raise AssertionError('Missed entry')
-                control[pending] = conditional[pending]
+                # Preserve the natural PROCEED/RESET draw during mandatory
+                # queries. Resampling it with another RNG channel can change
+                # the tree before the intended first optional intervention.
+                # Force continuation only where the natural policy may STOP.
+                force_pending = pending & env.legal_control_mask[0, :, util.STOP].cpu().numpy().astype(bool)
+                control[force_pending] = conditional[force_pending]
                 control[is_entry] = util.STOP if arm == 'stop' else conditional[is_entry]
                 action = (torch.as_tensor(primary, device=rt.device).reshape(out.action[0].shape),
                           torch.as_tensor(control, device=rt.device).reshape(out.action[1].shape))

@@ -8,7 +8,7 @@ actor.  A batch is expected to follow this edge-aligned contract::
     obs_seq             [B, L + 2, C, H, W]
     actions_seq         [B, L + 1]
     initial_prev_action [B]
-    score_mask          [B, L + 1]  # first column is the burn-in edge
+    score_mask          [B, K + L]  # K unscored burn-in, L scored edges
 
 ``BehaviorSequenceVectorEnv`` supplies the recorded transition for each edge.
 The first edge is executed but not scored, so its human action conditions both
@@ -206,8 +206,9 @@ def validate_behavior_batch(batch: Mapping[str, Any]) -> Tuple[int, int]:
         score_np = np.broadcast_to(score_np, (batch_size, edge_count))
     if np.any(score_np[:, 0]):
         raise ValueError("the first (burn-in) transition must not be scored")
-    if not np.all(score_np[:, 1:]):
-        raise ValueError("all transitions after burn-in must be scored")
+    if ((edge_count > 1 and not np.all(score_np[:, -1])) or np.any(score_np[:, :-1] & ~score_np[:, 1:])
+            or not np.all(score_np == score_np[:1])):
+        raise ValueError("all transitions after burn-in must be scored; use one common unscored prefix")
     for name in ("rewards_seq", "done_seq", "truncated_seq"):
         if name in batch and batch[name] is not None:
             if tuple(batch[name].shape) != (batch_size, edge_count):
@@ -250,8 +251,9 @@ def validate_stream_behavior_episode(
         score_mask = score_mask[0]
     if score_mask.shape != (edge_count,):
         raise ValueError("lazy score_mask must have shape [E] or [1,E]")
-    if score_mask[0] or not np.all(score_mask[1:]):
-        raise ValueError("score_mask must be [False, True, ..., True]")
+    if (score_mask[0] or (edge_count > 1 and not score_mask[-1])
+            or np.any(score_mask[:-1] & ~score_mask[1:])):
+        raise ValueError("score_mask must have an unscored prefix and a scored suffix")
     for name in ("rewards_seq", "done_seq", "truncated_seq"):
         if batch.get(name) is None:
             continue
@@ -1965,6 +1967,7 @@ class DynamicImitationResult:
     proposal: torch.Tensor
     argmax: torch.Tensor
     executed: torch.Tensor
+    # Legacy diagnostics name the first warm-up edge; score_mask covers all K.
     burnin_proposal: torch.Tensor
     burnin_executed: torch.Tensor
     augmented_steps: int

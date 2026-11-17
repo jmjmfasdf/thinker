@@ -36,6 +36,9 @@ from thinker.dynamic_imitation import (
 )
 import thinker.util as util
 from thinker.buffer import RetBuffer
+from thinker.planning_protocol import (
+    planning_training_contract, validate_planning_training_checkpoint,
+)
 
 
 ActorGradientStepResult = collections.namedtuple(
@@ -679,6 +682,7 @@ DynamicVoCLossResult = collections.namedtuple(
         "greedy_action",
         "valid",
         "q_train_valid",
+        "gru_q_loss",
     ),
 )
 DynamicVoCSoftGateLoss = collections.namedtuple(
@@ -1326,6 +1330,7 @@ def compute_dynamic_voc_loss(
     voc_state_value=None,
     expected_gate_loss=False,
     gate_policy_schema_version=None,
+    critic_parameterization="policy_centered_v1",
 ):
     """Selected-action Huber critic loss and soft off-policy gate loss.
 
@@ -1349,6 +1354,11 @@ def compute_dynamic_voc_loss(
     """
 
     mode = normalize_dynamic_voc_mode(mode)
+    if critic_parameterization not in ("policy_centered_v1", "common_contrast_v1"):
+        raise ValueError("unknown VOC critic parameterization")
+    common_contrast = critic_parameterization == "common_contrast_v1"
+    if common_contrast and not dueling_q:
+        raise ValueError("common contrast requires dueling_q")
     if mode == "off":
         raise ValueError("compute_dynamic_voc_loss is invalid in off mode")
     expected_q_shape = tuple(control_action.shape) + (2,)
@@ -1431,7 +1441,7 @@ def compute_dynamic_voc_loss(
         centered_advantage = voc_q - torch.sum(
             target_gate_probabilities.detach() * voc_q, dim=-1, keepdim=True
         )
-        if gate_policy_schema_version in (
+        if common_contrast or gate_policy_schema_version in (
             util.VOC_GATE_POLICY_COMMON_MODE_Q_SCHEMA_VERSION,
             util.VOC_GATE_POLICY_HUBER_COMMON_Q_SCHEMA_VERSION,
             util.VOC_GATE_POLICY_ORTHOCD_ADAM_Q_SCHEMA_VERSION,
@@ -1482,6 +1492,17 @@ def compute_dynamic_voc_loss(
             selected_q_work, target_work, reduction="none"
         )
     q_loss = torch.sum(q_loss_rows * q_train_valid.float())
+    gru_q_loss = q_loss
+    if common_contrast:
+        # Fit the common offset in the isolated Q head, while the GRU receives
+        # only the contrast derivative. Forward values/TD targets stay equal.
+        contrast_q = (state_value.unsqueeze(-1)
+                      + voc_q.mean(dim=-1, keepdim=True).detach()
+                      + centered_advantage)
+        selected_contrast = contrast_q.gather(-1, gate_action.unsqueeze(-1)).squeeze(-1)
+        gru_q_loss = torch.sum(F.smooth_l1_loss(
+            selected_contrast.float(), target_work, reduction="none")
+            * q_train_valid.float())
     if half_squared_q:
         schema_label = (
             "schema-8"
@@ -1569,6 +1590,7 @@ def compute_dynamic_voc_loss(
         greedy_action=greedy_action,
         valid=valid,
         q_train_valid=q_train_valid,
+        gru_q_loss=gru_q_loss,
     )
 
 
@@ -3197,6 +3219,7 @@ class SActorLearner:
         self._imitation_contract_validated = False
 
         self.ckp_path = os.path.join(flags.ckpdir, "ckp_actor.tar")
+        planning_training_contract(self.flags)
         if flags.ckp: self.load_checkpoint(self.ckp_path)
 
         # initialize file logs
@@ -3519,7 +3542,8 @@ class SActorLearner:
                 dim=-1,
                 keepdim=True,
             )
-            if getattr(self, "voc_gate_policy_schema_version", None) in (
+            if (getattr(getattr(self, "flags", None), "voc_critic_parameterization", "policy_centered_v1")
+                    == "common_contrast_v1") or getattr(self, "voc_gate_policy_schema_version", None) in (
                 util.VOC_GATE_POLICY_COMMON_MODE_Q_SCHEMA_VERSION,
                 util.VOC_GATE_POLICY_HUBER_COMMON_Q_SCHEMA_VERSION,
                 util.VOC_GATE_POLICY_ORTHOCD_ADAM_Q_SCHEMA_VERSION,
@@ -4061,6 +4085,8 @@ class SActorLearner:
             sessions=sessions,
             num_actions=int(self.actor_net.num_actions),
             scored_length=scored_length,
+            burn_in_steps=getattr(self.flags, "icopro_burn_in_steps", 1),
+            sampling_context=getattr(self.flags, "icopro_sampling_context", None),
             frame_stack_n=stack_n,
             target_size=tuple(int(value) for value in obs_space.shape[-2:]),
             grayscale=bool(self.flags.grayscale),
@@ -4235,7 +4261,11 @@ class SActorLearner:
         from thinker.dynamic_imitation import validate_behavior_batch
 
         batch_size, edge_count = validate_behavior_batch(batch)
-        expected_edges = int(getattr(self.flags, "batch_length", 4)) + 1
+        burn = int(getattr(self.flags, "icopro_burn_in_steps", 1))
+        expected_edges = int(getattr(self.flags, "batch_length", 4)) + burn
+        score = np.asarray(batch["score_mask"], dtype=bool)
+        if np.any(score[..., :burn]) or not np.all(score[..., burn:]):
+            raise ValueError("behavior score mask differs from configured burn-in")
         if edge_count != expected_edges:
             raise ValueError(
                 f"behavior batch has {edge_count} edges, expected {expected_edges}"
@@ -5544,6 +5574,7 @@ class SActorLearner:
             raise
         losses, train_actor_out = out
         total_loss = losses["total_loss"]
+        losses.pop("_voc_gru_loss", None)  # consumed by selective GRU adapter
         voc_total_loss = losses.pop("_voc_total_loss", None)
         voc_gate_total_loss = losses.pop("_voc_gate_total_loss", None)
         try:
@@ -6390,6 +6421,8 @@ class SActorLearner:
                 gate_policy_schema_version=(
                     self.voc_gate_policy_schema_version
                 ),
+                critic_parameterization=getattr(
+                    self.flags, "voc_critic_parameterization", "policy_centered_v1"),
             )
             train_valid = voc_result.q_train_valid
             train_count = int(train_valid.sum().detach().cpu())
@@ -6534,6 +6567,11 @@ class SActorLearner:
                 losses["_voc_total_loss"] = (
                     float(self.flags.voc_loss_cost) * voc_result.q_loss
                 )
+                losses["_voc_gru_loss"] = (
+                    float(self.flags.voc_loss_cost) * voc_result.gru_q_loss
+                )
+                losses["voc_raw_common_abs_mean"] = voc_q.detach().mean(-1)[train_valid].abs().mean()
+                losses["voc_raw_contrast_abs_mean"] = (voc_q.detach()[..., 0] - voc_q.detach()[..., 1])[train_valid].abs().mean()
             if (
                 voc_soft_gate_result is not None
                 and train_count > 0
@@ -7183,16 +7221,35 @@ class SActorLearner:
                 getattr(self, "_last_bc_numeric_maxima", {})
                 if imitation_result is not None else {}
             )
-            for label, module in (
+            numeric_components = [
                 ("sr_dynamics", "sr_net.RNN"),
                 ("vp_dynamics", "vp_net.RNN"),
                 ("h_encoder", "actor.h_encoder"),
+                ("h_encoder_pre_norm", "actor.h_encoder_pre_norm"),
                 ("all_phase_logits", "actor.logits"),
-            ):
+            ]
+            if getattr(self.flags, "actor_h_encoder_norm", "none") == "layer":
+                # The normalization trial must also expose amplification in
+                # the other visual pathways and the shared final readout.
+                # Preserve the metric keyset of legacy raw-encoder runs.
+                numeric_components.extend([
+                    ("x_encoder", "actor.x_encoder_pre"),
+                    ("real_state_encoder", "actor.real_state_encoder"),
+                    ("tree_encoder", "actor.tree_rep_encoder"),
+                    ("final_mlp", "actor.final_mlp"),
+                    ("policy", "actor.policy"),
+                ])
+            for label, module in numeric_components:
                 losses[f"icopro_numeric_{label}_absmax"] = torch.tensor(
                     numeric_maxima.get(module, 0.), device=total_loss.device,
                     dtype=torch.float64,
                 )
+            encoder_norm = getattr(getattr(self.actor_net, "h_encoder", None), "output_norm", None)
+            for name in ("weight", "bias"):
+                parameter = getattr(encoder_norm, name, None)
+                losses[f"icopro_h_encoder_norm_{name}_absmax"] = (
+                    parameter.detach().abs().max() if parameter is not None
+                    else torch.zeros((), device=total_loss.device))
             if imitation_result is not None:
                 # The online actor objective is represented as a sum.  Scale
                 # the mean behavioral objective by the number of online real
@@ -7795,6 +7852,7 @@ class SActorLearner:
                 gate_schema_version = util.VOC_GATE_POLICY_SCHEMA_VERSION
         self._logger.info("Saving actor checkpoint to %s" % self.ckp_path)
         d = {
+                "planning_training_contract": planning_training_contract(self.flags),
                 "step": self.step,
                 "real_step": self.real_step,
                 "tot_eps": self.tot_eps,
@@ -7989,6 +8047,7 @@ class SActorLearner:
 
     def load_checkpoint(self, ckp_path: str):
         train_checkpoint = torch.load(ckp_path, torch.device("cpu"), weights_only = False)
+        validate_planning_training_checkpoint(train_checkpoint, getattr(self, "flags", None))
         checkpoint_flags = train_checkpoint.get("flags", {})
         checkpoint_dynamic = bool(train_checkpoint.get(
             "dynamic_search", checkpoint_flags.get("dynamic_search", False)

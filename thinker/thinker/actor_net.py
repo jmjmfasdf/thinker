@@ -463,6 +463,7 @@ class AFrameEncoder(nn.Module):
                  firstpool=False,    
                  out_size=256,
                  see_double=False,                 
+                 output_norm="none",
                  ):
         super(AFrameEncoder, self).__init__()
         if see_double:
@@ -474,6 +475,8 @@ class AFrameEncoder(nn.Module):
         self.see_double = see_double    
         self.enc_1d_shallow = getattr(flags, "enc_1d_shallow", False)
         self.flags = flags    
+        if output_norm not in ("none", "layer"):
+            raise ValueError("actor encoder output_norm must be 'none' or 'layer'")
 
         self.oned_input = len(self.input_shape) == 1
         if self.enc_1d_shallow and self.oned_input: self.out_size = 64
@@ -569,6 +572,10 @@ class AFrameEncoder(nn.Module):
         
         mlp_out_size = self.out_size if not self.see_double else self.out_size // 2
         self.fc = nn.Sequential(nn.Linear(core_out_size, mlp_out_size), nn.ReLU())
+        # Opt-in normalization bounds feature scale after the residual CNN.
+        # Identity preserves the parameter keys and forward of old checkpoints.
+        self.output_norm = (nn.LayerNorm(mlp_out_size) if output_norm == "layer"
+                            else nn.Identity())
             
 
     def forward(self, x, record_state=False):
@@ -604,6 +611,7 @@ class AFrameEncoder(nn.Module):
             x = self.input_block(x)
             x = self.res(x)
         x = self.fc(F.relu(x))
+        x = self.output_norm(x)
         if record_state: self.hidden_state = tile_and_concat_tensors(self.hidden_state)
         return x
 
@@ -1192,6 +1200,7 @@ class ActorNetSingle(ActorBaseNet):
             self.h_encoder = FrameEncoder(
                 input_shape=self.hs_shape,                    
                 flags=flags,                      
+                output_norm=getattr(flags, "actor_h_encoder_norm", "none"),
             )
             h_out_size = self.h_encoder.out_size
             if self.h_rnn:

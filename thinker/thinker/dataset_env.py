@@ -147,8 +147,8 @@ class BehaviorSequenceVectorEnv:
                 raise ValueError(
                     f"score_mask shape {mask.shape} must equal {(edge_n,)}"
                 )
-            if mask[0] or not np.all(mask[1:]):
-                raise ValueError("score_mask must be [False, True, ..., True]")
+            if mask[0] or (edge_n > 1 and not mask[-1]) or np.any(mask[:-1] & ~mask[1:]):
+                raise ValueError("score_mask must have an unscored prefix and a scored suffix")
             mask = mask.copy()
 
         if observation_space is not None:
@@ -470,8 +470,8 @@ class LazyBehaviorEpisodeVectorEnv:
                 raise ValueError(
                     f"score_mask shape {mask.shape} must equal {(self.edge_n,)}"
                 )
-            if mask[0] or not np.all(mask[1:]):
-                raise ValueError("score_mask must be [False, True, ..., True]")
+            if mask[0] or (self.edge_n > 1 and not mask[-1]) or np.any(mask[:-1] & ~mask[1:]):
+                raise ValueError("score_mask must have an unscored prefix and a scored suffix")
             mask = mask.copy()
         self.score_mask = mask
 

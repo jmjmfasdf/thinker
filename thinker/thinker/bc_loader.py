@@ -5,8 +5,9 @@ agents act once every four 60 Hz emulator frames.  This module constructs a
 causal 15 Hz view of each recorded episode and samples windows with the exact
 contract used by dynamic imitation:
 
-``obs[0]`` / ``initial_prev_action`` initialise the burn-in root, edge zero is
-the unscored burn-in human action, and edges one through ``L`` are scored.
+``obs[0]`` / ``initial_prev_action`` initialise the burn-in root. The first
+``burn_in_steps`` edges are unscored; the following ``L`` edges are scored.
+A shared ``sampling_context`` allows matched targets across burn-in lengths.
 No window is allowed to cross a recorded episode/file/time-gap boundary.
 """
 
@@ -76,6 +77,11 @@ def behavioral_data_signature(loader: Any, data_root: str | Path) -> str:
         "files": sorted(file_manifest, key=lambda item: item["path"]),
         "loader_signature": str(getattr(loader, "data_signature", None)),
     }
+    burn = getattr(loader, "burn_in_steps", 1)
+    context = getattr(loader, "sampling_context", burn)
+    if burn != 1 or context != 1:
+        payload.update(protocol="obs[t]-to-action[t]/burnin-prefix/v2",
+                       burn_in_steps=burn, sampling_context=context)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -151,7 +157,7 @@ class FrameStackedBehavioralDataLoader:
         filter takes precedence.
     scored_length:
         Number of scored actions.  Every sampled sequence additionally has
-        one unscored burn-in edge and one final next observation.
+        ``burn_in_steps`` unscored edges and one final next observation.
     num_actions:
         Size of the runtime policy's discrete action space.  This is supplied
         by the environment/Actor rather than inferred from ``game_id`` so new
@@ -177,6 +183,8 @@ class FrameStackedBehavioralDataLoader:
         source_paths: Optional[Sequence[str | Path]] = None,
         split: Optional[str] = "train",
         scored_length: int = 4,
+        burn_in_steps: int = 1,
+        sampling_context: Optional[int] = None,
         frame_stack_n: int = 4,
         target_size: Tuple[int, int] = (84, 84),
         grayscale: bool = False,
@@ -197,6 +205,12 @@ class FrameStackedBehavioralDataLoader:
         self.split = split
         self._selected_source_paths = self._normalise_source_paths(source_paths)
         self.scored_length = int(scored_length)
+        if type(burn_in_steps) is not int or burn_in_steps < 1:
+            raise ValueError("burn_in_steps must be a positive integer")
+        self.burn_in_steps = burn_in_steps
+        self.sampling_context = burn_in_steps if sampling_context is None else sampling_context
+        if type(self.sampling_context) is not int or self.sampling_context < burn_in_steps:
+            raise ValueError("sampling_context must be an integer covering burn-in")
         self.frame_stack_n = int(frame_stack_n)
         self.target_size = (int(target_size[0]), int(target_size[1]))
         self.grayscale = bool(grayscale)
@@ -674,12 +688,14 @@ class FrameStackedBehavioralDataLoader:
         if scored_length < 1:
             raise ValueError("sequence_length must be at least one")
         refs: List[_WindowRef] = []
-        required_edges = scored_length + 1
+        required_edges = scored_length + self.burn_in_steps
         for episode_index, episode in enumerate(self._episodes):
             max_burn_edge = len(episode.actions) - required_edges
             # burn_edge >= 1 ensures that a_{t-2}, a_{t-1} both exist before
             # the first scored target a_t.
-            for burn_edge in range(1, max_burn_edge + 1):
+            # Equal sampling_context and seed yield the same target blocks.
+            first_burn = self.sampling_context - self.burn_in_steps + 1
+            for burn_edge in range(first_burn, max_burn_edge + 1):
                 stop = burn_edge + required_edges
                 # A real terminal is legal only on the final returned edge;
                 # otherwise the fixed-length sequence would continue past it.
@@ -795,7 +811,7 @@ class FrameStackedBehavioralDataLoader:
         return [
             ref
             for ref in self._window_refs(scored_length)
-            if (ref.burn_in_edge - 1) % stride == 0
+            if (ref.burn_in_edge + self.burn_in_steps - self.sampling_context - 1) % stride == 0
         ]
 
     def evaluation_coverage(
@@ -803,11 +819,10 @@ class FrameStackedBehavioralDataLoader:
     ) -> Dict[str, int | float]:
         """Describe deterministic fixed-length evaluation target coverage.
 
-        With the default stride ``L``, one window scores edges ``2..L+1`` and
-        the next window scores ``L+2..2L+1``: the prior window's final scored
-        action is reused only as the next window's burn-in action.  A trailing
-        fragment shorter than ``L`` is intentionally skipped rather than
-        padded or wrapped.
+        With stride ``L``, scored target blocks do not overlap. Burn-in may
+        overlap the preceding target block. The first target is at
+        ``sampling_context + 1``; a trailing fragment shorter than ``L`` is
+        skipped rather than padded or wrapped.
         """
 
         scored_length = (
@@ -815,15 +830,16 @@ class FrameStackedBehavioralDataLoader:
         )
         refs = self._strided_window_refs(scored_length, stride)
         covered = len(refs) * scored_length
-        eligible = sum(max(0, len(episode.actions) - 2) for episode in self._episodes)
+        eligible = sum(max(0, len(episode.actions) - self.sampling_context - 1)
+                       for episode in self._episodes)
         # stride < L intentionally overlaps targets, so unique coverage cannot
         # be inferred from n_windows * L.  Compute it explicitly.
         unique_targets = {
             (ref.episode_index, edge)
             for ref in refs
             for edge in range(
-                ref.burn_in_edge + 1,
-                ref.burn_in_edge + scored_length + 1,
+                ref.burn_in_edge + self.burn_in_steps,
+                ref.burn_in_edge + self.burn_in_steps + scored_length,
             )
         }
         return {
@@ -878,14 +894,15 @@ class FrameStackedBehavioralDataLoader:
         """Decode image arrays for an already selected set of window refs."""
 
         batch_size = len(selected_refs)
+        edge_count = scored_length + self.burn_in_steps
 
         # Decompress at most one large image archive at a time.  Result slots
         # preserve RNG order even though source files are processed in groups.
         result_obs: List[Optional[np.ndarray]] = [None] * batch_size
-        actions_out = np.empty((batch_size, scored_length + 1), dtype=np.int64)
-        rewards_out = np.empty((batch_size, scored_length + 1), dtype=np.float32)
-        done_out = np.empty((batch_size, scored_length + 1), dtype=np.bool_)
-        truncated_out = np.empty((batch_size, scored_length + 1), dtype=np.bool_)
+        actions_out = np.empty((batch_size, edge_count), dtype=np.int64)
+        rewards_out = np.empty((batch_size, edge_count), dtype=np.float32)
+        done_out = np.empty((batch_size, edge_count), dtype=np.bool_)
+        truncated_out = np.empty((batch_size, edge_count), dtype=np.bool_)
         initial_prev = np.empty(batch_size, dtype=np.int64)
         source_file: List[str] = [""] * batch_size
         subject = np.empty(batch_size, dtype=np.int64)
@@ -895,10 +912,10 @@ class FrameStackedBehavioralDataLoader:
         local_episode = np.empty(batch_size, dtype=np.int64)
         window_start = np.empty(batch_size, dtype=np.int64)
         decision_times = np.empty(
-            (batch_size, scored_length + 2), dtype=np.float64
+            (batch_size, edge_count + 1), dtype=np.float64
         )
         observation_source = np.empty(
-            (batch_size, scored_length + 2), dtype=np.int64
+            (batch_size, edge_count + 1), dtype=np.int64
         )
 
         by_file: Dict[int, List[Tuple[int, _WindowRef]]] = {}
@@ -913,8 +930,8 @@ class FrameStackedBehavioralDataLoader:
                 for output_index, ref in group:
                     episode = self._episodes[ref.episode_index]
                     burn = ref.burn_in_edge
-                    obs_stop = burn + scored_length + 2
-                    edge_stop = burn + scored_length + 1
+                    obs_stop = burn + edge_count + 1
+                    edge_stop = burn + edge_count
                     if np.max(
                         episode.observation_source_index[burn:obs_stop], initial=-1
                     ) >= len(images):
@@ -952,8 +969,8 @@ class FrameStackedBehavioralDataLoader:
         if any(observation is None for observation in result_obs):
             raise RuntimeError("Internal error: not every sampled window was materialised")
         obs_seq = np.stack(result_obs, axis=0)  # type: ignore[arg-type]
-        score_mask = np.ones(scored_length + 1, dtype=np.bool_)
-        score_mask[0] = False
+        score_mask = np.ones(edge_count, dtype=np.bool_)
+        score_mask[:self.burn_in_steps] = False
         return {
             "obs_seq": obs_seq,
             "actions_seq": actions_out,

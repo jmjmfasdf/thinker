@@ -3256,6 +3256,8 @@ def validate_voc_gate_policy_schema(checkpoint, *, label="VoC checkpoint"):
     embedded = checkpoint.get("flags", {})
     if not isinstance(embedded, collections.abc.Mapping):
         raise ValueError(f"{label} lacks embedded training flags")
+    from thinker.planning_protocol import validate_planning_training_checkpoint
+    validate_planning_training_checkpoint(checkpoint)
     schema = checkpoint.get("voc_gate_policy_schema_version")
     if (
         isinstance(schema, (bool, np.bool_))
@@ -10717,6 +10719,12 @@ def add_parse(filename, parser=None, prefix=''):
     option = f'--{prefix}min_search_steps'
     if option not in parser._option_string_actions:
         parser.add_argument(option, type=int, default=None)
+    for name, kind in (("icopro_burn_in_steps", int), ("icopro_sampling_context", int),
+                       ("voc_gru_gradient_scale", float), ("voc_critic_parameterization", str),
+                       ("actor_h_encoder_norm", str)):
+        option = f"--{prefix}{name}"
+        if option not in parser._option_string_actions:
+            parser.add_argument(option, type=kind, default=None)
     return parser
 
 def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
@@ -10761,6 +10769,11 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
     if kwargs.get("min_search_steps") is not None:
         config["min_search_steps"] = kwargs["min_search_steps"]
         explicit_config_keys.add("min_search_steps")
+    for name in ("icopro_burn_in_steps", "icopro_sampling_context",
+                 "voc_gru_gradient_scale", "voc_critic_parameterization", "actor_h_encoder_norm"):
+        if kwargs.get(name) is not None:
+            config[name] = kwargs[name]
+            explicit_config_keys.add(name)
     # The schema discriminator is derived for canonical atomic CLIs and is
     # therefore intentionally absent from the global YAML/parser surface.
     # A caller can nevertheless supply it directly.  Preserve that explicit

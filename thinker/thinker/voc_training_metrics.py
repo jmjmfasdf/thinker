@@ -16,6 +16,13 @@ class TrainingMetrics:
         self.last_episode = np.zeros(flags.env_n)
         self.returns = deque(maxlen=100)
         self.hist = np.zeros(self.cap + 1, dtype=np.int64)
+        self.window_hist = np.zeros_like(self.hist)
+        self.window_gate = np.zeros((2, 2), dtype=np.int64)  # EMA sign, accepted continue/stop
+        self.window_count_choices = np.zeros((self.cap + 1, 2), dtype=np.int64)
+        self.window_saturated = self.window_optional = 0
+        self.last_sign = np.zeros(flags.env_n, dtype=np.int8)
+        self.changed_sign = np.zeros(flags.env_n, dtype=bool)
+        self.window_sign_changes = 0
         self.steps = self.think = self.episodes = self.controls = self.forced = 0
         self.stops = self.resets = 0
         self.mandatory = self.optional = 0
@@ -58,7 +65,25 @@ class TrainingMetrics:
         self.controls += int(valid.sum())
         self.stops += int(((accepted == util.STOP) & valid).sum())
         self.resets += int(((accepted == util.RESET) & valid).sum())
-        self.forced += int(((phase == util.SEARCH_PHASE) & forced).sum())
+        # The cap is emitted by the transition that finishes the stage, not
+        # by a subsequent SEARCH row. Count each event once from returned info.
+        emitted_forced = array(info['forced_stop']).astype(bool)
+        stage_end = array(info['stage_end']).astype(bool)
+        self.forced += int((emitted_forced & stage_end).sum())
+        if choice_valid.any():
+            p_all = out.search_control_logits.detach().float().softmax(-1).cpu().numpy().reshape(-1, 3)[:, :2].sum(-1)
+            ema = self.gate_logits.detach().float().cpu().numpy().reshape(-1)
+            counts = array(previous.search_steps).astype(int)
+            signs = np.sign(ema).astype(np.int8)
+            self.changed_sign |= choice_valid & (self.last_sign != 0) & (signs != 0) & (self.last_sign != signs)
+            self.last_sign[choice_valid] = signs[choice_valid]
+            self.window_optional += int(choice_valid.sum())
+            self.window_saturated += int((choice_valid & ((p_all < .1) | (p_all > .9))).sum())
+            for i in np.flatnonzero(choice_valid):
+                action = int(accepted[i] == util.STOP)
+                self.window_count_choices[counts[i], action] += 1
+                if signs[i] != 0:
+                    self.window_gate[int(signs[i] < 0), action] += 1
         # Deterministic stream-0 subsample, including every query within the
         # sampled decision. Other streams remain in all aggregate counters.
         decision = real_step // self.flags.env_n
@@ -84,7 +109,12 @@ class TrainingMetrics:
                 raise AssertionError('Imagination budget exceeded cap')
             if np.any(self.current < getattr(self.flags, 'min_search_steps', 0)):
                 raise AssertionError('Imagination budget below required minimum')
-            self.hist += np.bincount(self.current, minlength=self.cap+1)
+            completed = np.bincount(self.current, minlength=self.cap+1)
+            self.hist += completed
+            self.window_hist += completed
+            self.window_sign_changes += int(self.changed_sign.sum())
+            self.changed_sign[:] = False
+            self.last_sign[:] = 0
             self.current[:] = 0
             ep = array(info['episode_return'])
             done = array(info['real_done']).astype(bool)
@@ -114,6 +144,12 @@ class TrainingMetrics:
         tmp = path.with_suffix('.tmp')
         tmp.write_text(json.dumps(payload, allow_nan=False))
         tmp.replace(path)
+        with (self.output / 'planning_intervals.jsonl').open('a') as stream:
+            stream.write(json.dumps(payload, allow_nan=False) + '\n')
+        self.window_hist[:] = 0
+        self.window_gate[:] = 0
+        self.window_count_choices[:] = 0
+        self.window_saturated = self.window_optional = self.window_sign_changes = 0
 
     def state(self):
         return {**{k:getattr(self,k) for k in ('steps','think','episodes','controls','forced','stops','resets','raw_reward','best')},
@@ -134,6 +170,25 @@ class TrainingMetrics:
             reset_fraction=self.resets/max(self.controls,1),forced_stop_count=self.forced)
         for k, value in enumerate(self.hist):
             result[f'count_{k}_decisions'] = int(value)
+        window_n = int(self.window_hist.sum())
+        minimum = int(getattr(self.flags, 'min_search_steps', 0))
+        result.update(window_decisions=window_n,
+            window_mean_length=float(np.dot(self.window_hist, np.arange(self.cap+1))/window_n) if window_n else None,
+            window_min_fraction=float(self.window_hist[minimum]/window_n) if window_n else None,
+            window_interior_fraction=float(self.window_hist[minimum+1:self.cap].sum()/window_n) if window_n else None,
+            window_cap_fraction=float(self.window_hist[-1]/window_n) if window_n else None,
+            window_sign_change_fraction=self.window_sign_changes/window_n if window_n else None,
+            window_optional_choices=self.window_optional,
+            window_saturated_fraction=self.window_saturated/self.window_optional if self.window_optional else None)
+        for sign_i, label in enumerate(('positive', 'negative')):
+            count = int(self.window_gate[sign_i].sum())
+            result['window_ema_'+label+'_choices'] = count
+            result['window_ema_'+label+'_continue_fraction'] = float(self.window_gate[sign_i, 0]/count) if count else None
+        for k in range(self.cap+1):
+            result[f'window_count_{k}_decisions'] = int(self.window_hist[k])
+            choices = int(self.window_count_choices[k].sum())
+            result[f'window_count_{k}_optional_choices'] = choices
+            result[f'window_count_{k}_continue_fraction'] = float(self.window_count_choices[k, 0]/choices) if choices else None
         return result
 
     def close(self):
