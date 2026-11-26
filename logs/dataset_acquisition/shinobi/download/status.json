@@ -1,0 +1,33 @@
+{
+  "updated_at": "2026-11-26T01:34:42.507920+00:00",
+  "started_at": "2026-11-19T04:01:56.253910+00:00",
+  "pid": 3189779,
+  "state": "RUNNING",
+  "groups": {
+    "raw_bold": {
+      "files": 160,
+      "available_files": 0,
+      "bytes": 79280323738,
+      "available_bytes": 0
+    },
+    "behavior": {
+      "files": 847,
+      "available_files": 811,
+      "bytes": 2074316353,
+      "available_bytes": 2074251408
+    },
+    "mni_support": {
+      "files": 644,
+      "available_files": 644,
+      "bytes": 1112773783,
+      "available_bytes": 1112773783
+    },
+    "mni_bold": {
+      "files": 161,
+      "available_files": 0,
+      "bytes": 190238149318,
+      "available_bytes": 0
+    }
+  },
+  "verification": "git-annex validates payload checksums; these progress counts count complete files, not partial transfers."
+}

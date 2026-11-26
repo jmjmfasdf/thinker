@@ -1,0 +1,44 @@
+#!/bin/bash
+#PBS -N visual-heldout-shared
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=8:mem=16gb:host=bml2-slave5
+#PBS -l walltime=168:00:00
+#PBS -j oe
+#PBS -o /home/jeongmin/thinker-dynamic-imitation/logs/visual_behav/heldout_5m_20260921/pbs
+
+set -euo pipefail
+REPO=/home/jeongmin/thinker-dynamic-imitation
+ROOT="$REPO/logs/visual_behav/heldout_5m_20260921"
+SNAPSHOT=${VISUAL_SNAPSHOT:?VISUAL_SNAPSHOT is required}
+INDEX=${VISUAL_INDEX:?VISUAL_INDEX is required}
+ENV_DIR=/home/jeongmin/vbenv-25d766c04fe7
+SUMS=/home/jeongmin/visual-behav-assets/shared-runtime-25d766c04fe7-core.sha256
+SUMS_SHA=${VISUAL_RUNTIME_SUMS_SHA:?VISUAL_RUNTIME_SUMS_SHA is required}
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+JOB_LOCAL=$(mktemp -d "/dev/shm/visual-heldout.${PBS_JOBID}.XXXXXX")
+cleanup() { if [[ -d "$JOB_LOCAL" && "$JOB_LOCAL" == /dev/shm/visual-heldout.* ]]; then rm -rf -- "$JOB_LOCAL"; fi; }
+trap cleanup EXIT
+exec > >(tee -a "$ROOT/pbs/fold-$(printf '%02d' "$INDEX").${PBS_JOBID}.log") 2>&1
+echo "job=$PBS_JOBID fold=$INDEX host=$(hostname) started=$(date -u +%FT%TZ)"
+echo "runtime=pre-relocated-read-only-tarball env=$ENV_DIR"
+FREE_KB=$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')
+if (( FREE_KB < 100 * 1024 * 1024 )); then echo 'Less than 100 GiB shared storage remains'; exit 3; fi
+TMP_KB=$(df -Pk "$JOB_LOCAL" | awk 'NR==2 {print $4}')
+if (( TMP_KB < 4 * 1024 * 1024 )); then echo 'Less than 4 GiB shared memory scratch remains'; exit 3; fi
+printf '%s  %s\n' "$SUMS_SHA" "$SUMS" | sha256sum -c -
+(cd "$ENV_DIR" && sha256sum -c "$SUMS")
+(cd "$SNAPSHOT" && sha256sum -c SHA256SUMS >/dev/null)
+CONTAINER=(/usr/local/bin/singularity exec --cleanenv
+  --bind "$REPO:$REPO:ro" --bind "$ROOT:$ROOT:rw" --bind "$SNAPSHOT:$SNAPSHOT:ro"
+  --bind "$ENV_DIR:$ENV_DIR:ro" --bind "$JOB_LOCAL:$JOB_LOCAL:rw"
+  --env "PYTHONPATH=$SNAPSHOT/thinker" --env PYTHONNOUSERSITE=1 --env PYTHONDONTWRITEBYTECODE=1
+  --env "LD_LIBRARY_PATH=$ENV_DIR/lib:$ENV_DIR/lib/python3.10/site-packages/torch/lib"
+  --env CUDA_VISIBLE_DEVICES= --env PYTHONHASHSEED=0 --env "TMPDIR=$JOB_LOCAL"
+  --env "PBS_JOBID=$PBS_JOBID"
+  --env OMP_NUM_THREADS=2 --env MKL_NUM_THREADS=2 --env OPENBLAS_NUM_THREADS=1 --env NUMEXPR_NUM_THREADS=1
+  "$SIF")
+"${CONTAINER[@]}" "$ENV_DIR/bin/python" -B -c 'import cv2,torch,zarr,numcodecs,thinker.cenv; assert cv2.__version__ == "4.11.0" and zarr.__version__ == "2.18.3" and numcodecs.__version__ == "0.13.1"; print("compute-environment-ok",torch.__version__,flush=True)'
+/usr/bin/time -v -o "$ROOT/reports/fold-$(printf '%02d' "$INDEX").${PBS_JOBID}.time.txt" \
+  "${CONTAINER[@]}" "$ENV_DIR/bin/python" -B -u "$SNAPSHOT/thinker/tools/visual_heldout_campaign.py" run --root "$ROOT" --index "$INDEX"
+echo "completed=$(date -u +%FT%TZ)"

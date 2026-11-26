@@ -1,0 +1,1072 @@
+import os
+import shutil
+import time
+from collections import namedtuple
+from collections.abc import Mapping
+import ray
+import numpy as np
+import torch
+import gymnasium as gym
+
+import thinker.util as util
+from thinker.buffer import (
+    GeneralBuffer,
+    ModelBuffer,
+    SModelBuffer,
+    validate_schema7_model_buffer_status,
+)
+from thinker.learn_model import ModelLearner, SModelLearner
+from thinker.model_net import ModelNet
+
+from thinker.gym_add.asyn_vector_env import AsyncVectorEnv
+import thinker.gym_add.wrapper as wrapper
+from thinker.cenv import cModelWrapper, cPerfectWrapper
+
+
+def _resolve_model_input_seal_schema_version(flags):
+    gate_schema = getattr(flags, "voc_gate_policy_schema_version", None)
+    seal_schema = getattr(flags, "voc_model_input_seal_schema_version", 0)
+    expected = (
+        1
+        if type(gate_schema) is int and gate_schema in (7, 8, 9, 10, 11, 12, 13)
+        else 0
+    )
+    if type(seal_schema) is not int or seal_schema != expected:
+        raise ValueError(
+            "voc_model_input_seal_schema_version must be exact integer "
+            f"{expected} for gate schema {gate_schema!r}"
+        )
+    return seal_schema
+
+
+def _resolve_model_input_seal_runtime(flags):
+    """Enable versioned sealed-input coordination for parallel training."""
+
+    seal_schema = _resolve_model_input_seal_schema_version(flags)
+    if seal_schema != 1:
+        return False
+    train_model = getattr(flags, "train_model", None)
+    parallel = getattr(flags, "parallel", None)
+    if type(train_model) is not bool or type(parallel) is not bool:
+        raise ValueError(
+            "versioned model input sealing requires exact boolean runtime flags"
+        )
+    if train_model and not parallel:
+        raise ValueError("versioned model input sealing requires parallel=true")
+    return train_model and parallel
+
+
+def _validate_online_env_contract(
+    real_state_space,
+    primary_action_space,
+    frame_stack_n,
+    *,
+    expected_frame_stack_n=None,
+    require_discrete=False,
+):
+    """Validate the observation/action metadata used to build ModelNet."""
+
+    frame_stack_n = int(frame_stack_n)
+    if frame_stack_n <= 0:
+        raise ValueError("frame_stack_n must be positive")
+    if expected_frame_stack_n is not None:
+        expected_frame_stack_n = int(expected_frame_stack_n)
+        if frame_stack_n != expected_frame_stack_n:
+            raise ValueError(
+                "online environment frame-stack metadata disagrees with flags: "
+                f"environment={frame_stack_n}, flags={expected_frame_stack_n}"
+            )
+
+    shape = tuple(real_state_space.shape)
+    if len(shape) == 3:
+        channel_n = int(shape[0])
+        if channel_n <= 0 or channel_n % frame_stack_n != 0:
+            raise ValueError(
+                "online observation channels must be divisible by "
+                "frame_stack_n: "
+                f"shape={shape}, frame_stack_n={frame_stack_n}"
+            )
+        frame_ch = channel_n // frame_stack_n
+    elif len(shape) == 1:
+        if frame_stack_n != 1:
+            raise ValueError(
+                "one-dimensional observations require frame_stack_n=1, "
+                f"got {frame_stack_n}"
+            )
+        frame_ch = int(shape[0])
+    else:
+        raise ValueError(
+            "environment observations must be one-dimensional or "
+            f"channel-first images, got shape {shape}"
+        )
+
+    if require_discrete:
+        if not isinstance(primary_action_space, gym.spaces.Discrete):
+            raise TypeError(
+                "EnvPool/dynamic imitation requires a Discrete primary "
+                f"action space, got {type(primary_action_space).__name__}"
+            )
+        if int(getattr(primary_action_space, "start", 0)) != 0:
+            raise ValueError(
+                "EnvPool/dynamic imitation requires zero-based Discrete actions"
+            )
+    return frame_ch
+
+
+def _runtime_primary_action_meanings(
+    env, primary_action_space, *, name=None, envpool=False
+):
+    """Read and validate primary-action semantics from the live runtime.
+
+    Gymnasium vector workers expose their underlying action table directly.
+    EnvPool does not expose names, so its Atari task is paired with the same
+    installed ALE runtime and the action-space width is checked before the
+    table is accepted.  No action index is inferred from convention.
+    """
+
+    if not isinstance(primary_action_space, gym.spaces.Discrete):
+        return None
+    action_n = int(primary_action_space.n)
+    if envpool:
+        if not name:
+            raise RuntimeError(
+                "cannot resolve EnvPool action meanings without an environment id"
+            )
+        probe_id = str(name)
+        if "/" not in probe_id:
+            probe_id = f"ALE/{probe_id}"
+        runtime_env = getattr(env, "env", env)
+        spec = getattr(runtime_env, "spec", None)
+        config = getattr(spec, "config", None)
+        full_action_space = bool(
+            getattr(config, "full_action_space", False)
+        )
+        probe = gym.make(probe_id, full_action_space=full_action_space)
+        try:
+            meanings = probe.unwrapped.get_action_meanings()
+        finally:
+            probe.close()
+    else:
+        call = getattr(env, "call", None)
+        if call is None:
+            raise RuntimeError(
+                "vector environment does not expose runtime action meanings"
+            )
+        values = call("get_action_meanings")
+        if not values:
+            raise RuntimeError(
+                "runtime action-meaning query returned no action table"
+            )
+        meanings = tuple(values[0])
+        if any(tuple(value) != meanings for value in values[1:]):
+            raise ValueError(
+                "vector environments disagree on runtime action meanings"
+            )
+
+    if isinstance(meanings, (str, bytes)):
+        raise TypeError("runtime action meanings must be a sequence")
+    meanings = tuple(meanings)
+    if len(meanings) != action_n:
+        raise ValueError(
+            "runtime action meanings disagree with the live action space: "
+            f"{len(meanings)} != {action_n}"
+        )
+    if any(not isinstance(value, str) or not value.strip() for value in meanings):
+        raise ValueError("runtime action meanings must be non-empty strings")
+    return meanings
+
+
+def ray_init(flags=None, **kwargs):
+    # initialize resources for Thinker wrapper
+    if flags is None:
+        flags = util.create_flags(filename='default_thinker.yaml',
+                              **kwargs)
+        flags.parallel=True
+
+    if not ray.is_initialized(): 
+        object_store_memory = int(flags.ray_mem * 1024**3) if flags.ray_mem > 0 else None
+        ray.init(num_cpus=flags.ray_cpu if flags.ray_cpu > 0 else None,
+                 num_gpus=flags.ray_gpu if flags.ray_gpu > 0 else None,
+                 object_store_memory=object_store_memory)
+    model_input_seal_schema_version = (
+        _resolve_model_input_seal_schema_version(flags)
+    )
+    strict_ray_options = (
+        {"max_restarts": 0, "max_task_retries": 0}
+        if bool(getattr(flags, "voc_actor_policy_barrier_runtime", False))
+        else {}
+    )
+    model_buffer = ModelBuffer.options(
+        num_cpus=1, **strict_ray_options
+    ).remote(
+            buffer_n = flags.model_buffer_n,
+            max_rank = flags.self_play_n,
+            batch_size = flags.env_n,
+            alpha = flags.priority_alpha,
+            warm_up_n = flags.model_warm_up_n,
+            model_input_seal_schema_version = (
+                model_input_seal_schema_version
+            ),
+            total_steps = (
+                flags.total_steps
+                if model_input_seal_schema_version == 1 else None
+            ),
+    )
+    param_buffer = GeneralBuffer.options(
+        num_cpus=1, **strict_ray_options
+    ).remote()
+    param_buffer.set_data.remote("flags", flags)
+    signal_buffer = GeneralBuffer.options(
+        num_cpus=1, **strict_ray_options
+    ).remote()
+    ray_obj = {"model_buffer": model_buffer,
+               "param_buffer": param_buffer,
+               "signal_buffer": signal_buffer}
+    return ray_obj
+
+class Env(gym.Wrapper):
+    def __init__(self, 
+                 name=None, 
+                 env_fn=None, 
+                 ray_obj=None, 
+                 env_n=1, 
+                 gpu=True,
+                 load_net=True, 
+                 timing=False,
+                 local_flags=None,
+                 **kwargs):
+        assert name is not None or env_fn is not None, \
+            "need either env or env-making function"        
+        
+        if local_flags is not None:
+            if ray_obj is not None or kwargs or local_flags.parallel:
+                raise ValueError("local_flags requires synchronous, fully resolved flags")
+            self.flags = local_flags
+        elif ray_obj is None:
+            self.flags = util.create_flags(filename='default_thinker.yaml',
+                              **kwargs)
+            if self.flags.parallel:
+                ray_obj = ray_init(self.flags)       
+        else:
+            assert not kwargs, "Unexpected keyword arguments provided"
+            self.flags = ray.get(ray_obj["param_buffer"].get_data.remote("flags"))
+        
+        self._logger = util.logger() 
+        self.parallel = self.flags.parallel
+        self.dynamic_search = util.dynamic_search_enabled(self.flags)
+        self.voc_model_input_seal_schema_version = (
+            _resolve_model_input_seal_schema_version(self.flags)
+        )
+        self.voc_model_input_seal_runtime = _resolve_model_input_seal_runtime(
+            self.flags
+        )
+                
+        self.env_n = env_n
+        self.device = torch.device("cuda") if gpu else torch.device("cpu")
+        
+        if self.parallel:
+            self.model_buffer = ray_obj["model_buffer"]
+            self.param_buffer = ray_obj["param_buffer"]
+            self.signal_buffer = ray_obj["signal_buffer"]
+            self.rank = ray.get(self.param_buffer.get_and_increment.remote("rank"))
+        else:
+            self.rank = 0
+        self.counter = 0
+        self.ckp_start_time = int(time.strftime("%M")) // 10
+        self.ckp_env_path = os.path.join(self.flags.ckpdir, "ckp_env.npz")    
+
+        self._logger.info(
+            "Initializing env %d with device %s"
+            % (
+                self.rank,
+                "cuda" if self.device == torch.device("cuda") else "cpu",
+            )
+        )
+        if self.flags.envpool:
+            env = wrapper.create_envpool(name, self.flags, env_n)
+        else:
+            if env_fn is None: 
+                env_fn = wrapper.create_env_fn(name, self.flags)
+            # initialize a single env to collect env information            
+            env = AsyncVectorEnv([env_fn for _ in range(env_n)]) 
+        imitation_enabled = bool(
+            str(getattr(self.flags, "icopro_data_path", "")).strip()
+        )
+        self.primary_action_meanings = None
+        if imitation_enabled:
+            raw_primary_action_space = env.get_wrapper_attr(
+                "single_action_space"
+            )
+            self.primary_action_meanings = _runtime_primary_action_meanings(
+                env,
+                raw_primary_action_space,
+                name=name,
+                envpool=bool(self.flags.envpool),
+            )
+        env = wrapper.VectorWrap(env, self.flags)
+
+        
+        self.real_state_space  = env.get_wrapper_attr('single_observation_space')
+        self.real_state_shape = self.real_state_space.shape
+
+        if self.real_state_space.dtype == 'uint8':
+            self.state_dtype = 0
+        elif self.real_state_space.dtype == 'float32':
+            self.state_dtype = 1
+        else:
+            raise TypeError(
+                "environment observations must use uint8 or float32, got "
+                f"{self.real_state_space.dtype}"
+            )
+
+        self.pri_action_space = env.get_wrapper_attr('single_action_space')
+        self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
+            util.process_action_space(self.pri_action_space)
+
+        if isinstance(self.pri_action_space, gym.spaces.Box):
+            assert len(self.pri_action_space) == 1, f"Invalid action space {self.pri_action_space}"
+
+        self._logger.info(f"Init. environment with obs space \033[91m{self.real_state_space}\033[0m and action space \033[91m{self.pri_action_space}\033[0m")        
+
+        if self.tuple_action:
+            self.pri_action_shape = (self.env_n, self.dim_actions)
+            if self.discrete_action:
+                self.action_prob_shape = self.pri_action_shape + (self.num_actions,)
+            else:
+                self.action_prob_shape = self.pri_action_shape + (2,) # mean and var of Gaussian dist
+        else:
+            self.pri_action_shape = (self.env_n,)
+            self.action_prob_shape = (self.env_n, self.num_actions,)
+
+        try:
+            self.frame_stack_n = env.get_wrapper_attr('frame_stack_n')
+        except AttributeError:
+            self.frame_stack_n = 1
+        expected_frame_stack_n = (
+            self.flags.frame_stack_n
+            if self.flags.envpool or imitation_enabled
+            else None
+        )
+        self.frame_ch = _validate_online_env_contract(
+            self.real_state_space,
+            self.pri_action_space,
+            self.frame_stack_n,
+            expected_frame_stack_n=expected_frame_stack_n,
+            require_discrete=self.flags.envpool or imitation_enabled,
+        )
+        if self.rank == 0 and self.frame_stack_n > 1:
+            self._logger.info("Detected frame stacking with %d counts" % self.frame_stack_n)
+
+        self.model_mem_unroll_len = self.flags.model_mem_unroll_len
+        self.pre_len = self.frame_stack_n - 1 + self.model_mem_unroll_len
+        self.post_len = self.flags.model_unroll_len + self.flags.model_return_n + 1
+
+        # initalize model
+        self.has_model = self.flags.has_model
+        self.train_model = self.has_model and self.flags.train_model 
+        self.require_prob = False
+        if self.has_model:
+            model_param = {
+                "obs_space": self.real_state_space,                
+                "action_space": self.pri_action_space, 
+                "flags": self.flags,
+                "frame_stack_n": self.frame_stack_n
+            }
+            self.model_net = ModelNet(**model_param)
+            if self.rank == 0:
+                self._logger.info(
+                    "Model network size: %d"
+                    % sum(p.numel() for p in self.model_net.parameters())
+                )
+            if load_net: self._load_net()            
+            self.model_net.train(False)
+            self.model_net.to(self.device)       
+            if self.train_model and self.rank == 0:
+                if self.parallel:
+                    # init. the model learner thread
+                    learner_options = {
+                        "num_cpus": 1,
+                        "num_gpus": self.flags.gpu_learn,
+                    }
+                    if bool(getattr(
+                        self.flags, "voc_actor_policy_barrier_runtime", False
+                    )):
+                        learner_options.update(
+                            max_restarts=0, max_task_retries=0
+                        )
+                    self.model_learner = ModelLearner.options(
+                        **learner_options
+                    ).remote(name, ray_obj, model_param, self.flags)
+                    # start learning
+                    self.r_learner = self.model_learner.learn_data.remote()
+                    self.model_buffer.set_frame_stack_n.remote(self.frame_stack_n)
+                else:
+                    self.model_learner = SModelLearner(name=name, ray_obj=None, model_param=model_param,
+                        flags=self.flags, model_net=self.model_net, device=self.device)
+                    self.model_buffer = SModelBuffer(
+                        buffer_n = self.flags.model_buffer_n,
+                        max_rank = self.flags.self_play_n,
+                        batch_size = self.flags.env_n,
+                        alpha = self.flags.priority_alpha,
+                        warm_up_n = self.flags.model_warm_up_n,
+                        model_input_seal_schema_version = (
+                            self.voc_model_input_seal_schema_version
+                        ),
+                        total_steps = (
+                            self.flags.total_steps
+                            if self.voc_model_input_seal_runtime else None
+                        ),
+                    )
+                    self.model_buffer.set_frame_stack_n(self.frame_stack_n)
+            if self.train_model: self.require_prob = self.flags.require_prob
+            
+            per_state = self.model_net.initial_state(batch_size=1)
+            self.per_state_shape = {k:v.shape[1:] for k, v in per_state.items()}
+        else:
+            self.model_net = None            
+
+        # Dynamic search may accept a real action several augmented steps before
+        # the synchronous barrier executes it.  Cache the policy target at the
+        # acceptance step so model training is attributed to the executed action,
+        # rather than to the ignored action supplied by a later WAIT call.
+        self.pending_primary_action = None
+        self.pending_action_prob = None
+        self.pending_action_valid = None
+        self.think_episode_return = None
+        self.last_accepted_primary_action = None
+        self.last_accepted_search_control = None
+        
+        self.env_seed =  list(range(
+            self.rank * env_n + self.flags.base_seed, 
+            self.rank * env_n + self.flags.base_seed + env_n
+        ))        
+
+        if self.flags.wrapper_type == 0:
+            core_wrapper = cModelWrapper
+        elif self.flags.wrapper_type == 1:
+            core_wrapper = wrapper.DummyWrapper
+        elif self.flags.wrapper_type == 2:
+            core_wrapper = cPerfectWrapper
+        else:
+            raise Exception(
+                f"wrapper_type can only be [0, 1, 2], not {self.flags.wrapper_type}")
+
+        # wrap the env with core Cython wrapper that runs
+        # the core Thinker algorithm
+        env = core_wrapper(
+            env=env, 
+            env_n=env_n, 
+            flags=self.flags, 
+            model_net=self.model_net, 
+            device=self.device, 
+            timing=timing
+        )        
+
+        if self.flags.ckp and os.path.exists(self.ckp_env_path):
+            with np.load(self.ckp_env_path, allow_pickle=True) as data:
+                env.get_wrapper_attr('load_ckp')(data)                    
+
+        env = wrapper.PostWrapper(env, self.flags) 
+        self.tree_rep_meaning = None
+
+        gym.Wrapper.__init__(self, env)                          
+
+        if self.train_model:
+            if self.flags.parallel:
+                self._pending_model_write_refs = []
+                self._last_model_write_ref = None
+                self._last_model_write_acknowledged = False
+                self._model_input_seal_acknowledged = False
+                self.status_ptr = self.model_buffer.get_status.remote()        
+                self._update_status()
+                self.signal_ptr = self.signal_buffer.get_data.remote("self_play_signals")
+            else:
+                self.status = self.model_buffer.get_status()
+        else:
+            self.status = {"processed_n": 0,
+                           "warm_up_n": 0,
+                           "running": False,
+                           "finish": True,
+                            }
+
+        
+    def _load_net(self):
+        if self.rank == 0:
+            # load the network from preload or load_checkpoint  
+            path = None
+            if self.flags.ckp:
+                path = os.path.join(self.flags.ckpdir, "ckp_model.tar")
+            else:
+                if self.flags.preload:
+                    path = os.path.join(self.flags.preload, "ckp_model.tar")
+                    shutil.copyfile(path, os.path.join(self.flags.ckpdir, "ckp_model.tar"))
+            if path is not None:                
+                checkpoint = torch.load(
+                    path, map_location=torch.device("cpu")
+                )
+                self.model_net.set_weights(
+                    checkpoint["model_net_state_dict"]
+                )
+                self._logger.info("Loaded model net from %s" % path)
+            
+            if self.has_model and self.parallel:
+                self.param_buffer.set_data.remote(
+                    "model_net", self.model_net.get_weights()
+                )
+        else:
+            self._refresh_net()
+        return
+    
+    def _refresh_net(self):
+        while True:
+            weights = ray.get(
+                self.param_buffer.get_data.remote("model_net")
+            )  
+            if weights is not None:
+                self.model_net.set_weights(weights)
+                del weights
+                break                
+            time.sleep(0.1)  
+    
+    def _update_status(self):
+        if self.voc_model_input_seal_runtime:
+            timeout = float(self.flags.voc_actor_policy_barrier_timeout_s)
+            self.status = ray.get(self.status_ptr, timeout=timeout)
+            self._validate_schema7_model_status(self.status)
+        else:
+            self.status = ray.get(self.status_ptr)
+        self.status_ptr = self.model_buffer.get_status.remote()
+
+    def _validate_schema7_model_status(self, status, *, require_sealed=False):
+        return validate_schema7_model_buffer_status(
+            status,
+            total_steps=self.flags.total_steps,
+            self_play_n=self.flags.self_play_n,
+            warm_up_n=self.flags.model_warm_up_n,
+            require_sealed=require_sealed,
+            label=f"schema-7 Env rank {self.rank} ModelBuffer status",
+        )
+
+    def _poll_model_learner(self, *, wait=False, timeout=None):
+        """Surface a remote ModelLearner failure while self-play is running."""
+
+        if self.rank != 0 or not hasattr(self, "r_learner"):
+            return None
+        if getattr(self, "_model_learner_result", None) is not None:
+            return self._model_learner_result
+        if wait:
+            ready = [self.r_learner]
+        else:
+            ready, _ = ray.wait([self.r_learner], num_returns=1, timeout=0)
+            if not ready:
+                return None
+        try:
+            result = (
+                ray.get(ready[0], timeout=timeout)
+                if timeout is not None else ray.get(ready[0])
+            )
+        except Exception as error:
+            raise RuntimeError("model learner failed") from error
+        if result is not True:
+            raise RuntimeError(
+                f"model learner terminated without success: {result!r}"
+            )
+        self._model_learner_result = result
+        return result
+
+    def poll_model_status_no_step(self, *, timeout):
+        """Bounded terminal health polling without taking an environment step."""
+
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not np.isfinite(timeout)
+            or float(timeout) <= 0.0
+        ):
+            raise ValueError("model health timeout must be finite and positive")
+        if not self.train_model:
+            return dict(self.status)
+        if not self.parallel:
+            return dict(self.status)
+        deadline = time.monotonic() + float(timeout)
+
+        def remaining_timeout():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError("model health poll exceeded its time bound")
+            return remaining
+
+        learner_result = self._poll_model_learner(wait=False)
+        self.status = ray.get(self.status_ptr, timeout=remaining_timeout())
+        if self.voc_model_input_seal_runtime:
+            self._validate_schema7_model_status(self.status)
+        self.status_ptr = self.model_buffer.get_status.remote()
+        latest_learner_result = self._poll_model_learner(wait=False)
+        if latest_learner_result is not None:
+            learner_result = latest_learner_result
+        if learner_result is True and not self.status["finish"]:
+            self.status = ray.get(
+                self.status_ptr, timeout=remaining_timeout()
+            )
+            self._validate_schema7_model_status(self.status)
+            self.status_ptr = self.model_buffer.get_status.remote()
+            if not self.status["finish"]:
+                raise RuntimeError(
+                    "model learner returned success before ModelBuffer finish"
+                )
+        if (
+            self.voc_model_input_seal_runtime
+            and self.status.get("voc_model_input_aborted") is True
+        ):
+            if self.rank == 0:
+                self._poll_model_learner(
+                    wait=True, timeout=remaining_timeout()
+                )
+            raise RuntimeError("schema-7 model input was aborted")
+        if self.status["finish"]:
+            self._poll_model_learner(
+                wait=self.rank == 0,
+                timeout=remaining_timeout(),
+            )
+            self.train_model = False
+        return dict(self.status)
+
+    def _ack_pending_model_writes_no_step(self, *, timeout=None):
+        if not self.voc_model_input_seal_runtime:
+            return
+        refs = list(self._pending_model_write_refs)
+        if not refs:
+            return
+        if timeout is None:
+            timeout = float(self.flags.voc_actor_policy_barrier_timeout_s)
+        results = (
+            ray.get(refs, timeout=float(timeout))
+            if timeout is not None else ray.get(refs)
+        )
+        if not isinstance(results, list) or len(results) != len(refs):
+            raise RuntimeError("schema-7 model write acknowledgements are incomplete")
+        for result in results:
+            if (
+                not isinstance(result, Mapping)
+                or set(result) != {"rank", "processed_n"}
+                or type(result["rank"]) is not int
+                or result["rank"] != self.rank
+                or type(result["processed_n"]) is not int
+                or result["processed_n"] < 0
+            ):
+                raise RuntimeError("schema-7 model write acknowledgement is malformed")
+        if self._last_model_write_ref in refs:
+            self._last_model_write_acknowledged = True
+        self._pending_model_write_refs.clear()
+
+    def seal_model_input_no_step(self, *, timeout):
+        """Acknowledge all writes, then seal this producer without an env step."""
+
+        if not self.voc_model_input_seal_runtime:
+            raise RuntimeError("model input sealing is inactive")
+        if self._model_input_seal_acknowledged:
+            raise RuntimeError("model input producer sealed twice")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not np.isfinite(timeout)
+            or float(timeout) <= 0.0
+        ):
+            raise ValueError("model input seal timeout must be finite and positive")
+        timeout = float(timeout)
+        write_ack_deadline = time.monotonic() + timeout
+        self._ack_pending_model_writes_no_step(
+            timeout=max(write_ack_deadline - time.monotonic(), 1e-9)
+        )
+        if (
+            self._last_model_write_ref is None
+            or not self._last_model_write_acknowledged
+        ):
+            raise RuntimeError(
+                "schema-7 terminal model write was not acknowledged"
+            )
+        seal_deadline = time.monotonic() + timeout
+        status = ray.get(
+            self.model_buffer.seal_input.remote(
+                self.rank, self.flags.total_steps
+            ),
+            timeout=max(seal_deadline - time.monotonic(), 1e-9),
+        )
+        status = self._validate_schema7_model_status(status)
+        if (
+            status["voc_model_input_seal_count"] <= 0
+            or status["voc_model_input_aborted"] is not False
+            or status["finish"] is not False
+        ):
+            raise RuntimeError("schema-7 ModelBuffer seal acknowledgement is malformed")
+        self._model_input_seal_acknowledged = True
+        self.status = dict(status)
+        self.status_ptr = self.model_buffer.get_status.remote()
+        return dict(status)
+
+    def abort_model_input_no_step(self, *, timeout):
+        if not self.voc_model_input_seal_runtime:
+            return None
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not np.isfinite(timeout)
+            or float(timeout) <= 0.0
+        ):
+            raise ValueError("model input abort timeout must be finite and positive")
+        status = ray.get(
+            self.model_buffer.abort_input.remote(), timeout=float(timeout)
+        )
+        status = self._validate_schema7_model_status(status)
+        if (
+            status["finish"] is not False
+            or status["voc_model_input_aborted"] is not True
+            or status["voc_model_input_abort_count"] != 1
+        ):
+            raise RuntimeError("schema-7 ModelBuffer abort acknowledgement is malformed")
+        self.status = dict(status)
+        self.status_ptr = self.model_buffer.get_status.remote()
+        return dict(status)
+
+    def reset(self, seed=None):
+        if seed is None: seed = self.env_seed
+        state = self.env.reset(self.model_net, seed=seed)
+        if self.dynamic_search:
+            self.pending_primary_action = torch.zeros(
+                self.pri_action_shape, dtype=torch.long, device=self.device
+            )
+            self.pending_action_prob = torch.zeros(
+                self.action_prob_shape, dtype=torch.float, device=self.device
+            )
+            self.pending_action_valid = torch.zeros(
+                self.env_n, dtype=torch.bool, device=self.device
+            )
+            self.think_episode_return = torch.zeros(
+                self.env_n, dtype=torch.float, device=self.device
+            )
+            self.last_accepted_primary_action = torch.zeros(
+                self.pri_action_shape, dtype=torch.long, device=self.device
+            )
+            self.last_accepted_search_control = torch.zeros(
+                self.env_n, dtype=torch.long, device=self.device
+            )
+        return state
+
+    def step(
+            self, primary_action, reset_action=None, action_prob=None,
+            ignore=False, search_control=None):
+
+        if search_control is not None:
+            if reset_action is not None:
+                raise ValueError(
+                    "Pass either search_control or the legacy reset_action "
+                    "alias, not both."
+                )
+            reset_action = search_control
+
+        assert primary_action.shape == self.pri_action_shape, \
+                    f"primary_action should have shape {self.pri_action_shape} not {primary_action.shape}"  
+        if self.flags.wrapper_type == 1:
+            action = primary_action                
+        else:
+            if reset_action is None:
+                name = "search_control" if self.dynamic_search else "reset_action"
+                raise ValueError(f"{name} is required for this wrapper")
+            assert reset_action.shape == (self.env_n,), \
+                    f"reset should have shape {(self.env_n,)} not {reset_action.shape}"
+            action = (primary_action, reset_action)            
+                
+        if self.require_prob and not ignore: 
+            assert action_prob is not None
+            assert action_prob.shape == self.action_prob_shape, \
+                    f"action_prob should have shape {self.action_prob_shape} not {action_prob.shape}"
+        
+        with torch.set_grad_enabled(False):
+            state, reward, done, truncated_done, info = self.env.step(action, self.model_net)  
+        if self.dynamic_search:
+            last_step_real = info["real_transition"].bool()
+            accepted_primary = info.get("accepted_primary_action")
+            if accepted_primary is not None:
+                accepted_primary = accepted_primary.to(primary_action.device)
+                accepted_mask = accepted_primary >= 0
+                self.last_accepted_primary_action[accepted_mask] = (
+                    accepted_primary[accepted_mask]
+                )
+            accepted_control = info.get("accepted_control")
+            if accepted_control is not None:
+                accepted_control = accepted_control.to(primary_action.device)
+                accepted_mask = accepted_control >= 0
+                self.last_accepted_search_control[accepted_mask] = (
+                    accepted_control[accepted_mask]
+                )
+            executed_primary = info.get("executed_primary_action")
+            if executed_primary is not None and torch.any(last_step_real):
+                executed_primary = executed_primary.to(primary_action.device)
+                self.last_accepted_primary_action[last_step_real] = (
+                    executed_primary[last_step_real]
+                )
+            # Callers other than SelfPlayWorker can use these effective tokens
+            # when WAIT inputs were ignored.  They are deliberately separate
+            # from accepted_* whose -1 sentinel remains an event-level API.
+            info["effective_primary_action"] = (
+                self.last_accepted_primary_action.clone()
+            )
+            info["effective_search_control"] = (
+                self.last_accepted_search_control.clone()
+            )
+            stored_action_mask = info.get("stored_action_mask")
+            if stored_action_mask is None:
+                stored_action_mask = torch.zeros_like(last_step_real)
+            else:
+                stored_action_mask = stored_action_mask.bool()
+
+            if torch.any(stored_action_mask):
+                if self.pending_primary_action is None:
+                    self.pending_primary_action = torch.zeros_like(primary_action)
+                    self.pending_action_valid = torch.zeros_like(stored_action_mask)
+                self.pending_primary_action[stored_action_mask] = primary_action[stored_action_mask]
+                self.pending_action_valid[stored_action_mask] = True
+                if action_prob is not None:
+                    if self.pending_action_prob is None or self.pending_action_prob.dtype != action_prob.dtype:
+                        self.pending_action_prob = torch.zeros_like(action_prob)
+                    self.pending_action_prob[stored_action_mask] = action_prob[stored_action_mask]
+
+            think_reward = info.get("think_reward")
+            if think_reward is None:
+                think_reward = torch.zeros_like(reward)
+            if think_reward.ndim > reward.ndim:
+                think_reward = think_reward[..., 0]
+            if self.think_episode_return is None:
+                self.think_episode_return = torch.zeros_like(think_reward, dtype=torch.float)
+            self.think_episode_return += think_reward.float()
+            info["think_episode_return"] = self.think_episode_return.clone()
+            stage_end = info.get("stage_end")
+            if stage_end is not None:
+                self.think_episode_return[stage_end.bool()] = 0.
+        else:
+            last_step_real = (info["step_status"] == 0) | (info["step_status"] == 3)
+        
+        # real_done 정보가 없으면 설정
+        if "real_done" not in info:
+            info["real_done"] = done | truncated_done
+        
+        # 디버깅: 에피소드 종료 상태 추적
+        if torch.any(done) or torch.any(truncated_done):
+            real_done = info.get("real_done", done | truncated_done)
+            self._logger.info(f"[DEBUG] Episode termination detected:")
+            self._logger.info(f"  - done: {done}")
+            self._logger.info(f"  - truncated_done: {truncated_done}")
+            self._logger.info(f"  - real_done: {real_done}")
+            self._logger.info(f"  - step_status: {info.get('step_status', 'N/A')}")
+            self._logger.info(f"  - counter: {self.counter}")
+        
+        if self.train_model and not ignore and torch.any(last_step_real):
+            model_primary_action = primary_action
+            model_action_prob = action_prob
+            if self.dynamic_search:
+                executed_primary_action = info.get("executed_primary_action")
+                if executed_primary_action is not None:
+                    model_primary_action = executed_primary_action.to(primary_action.device)
+                    if primary_action.ndim > model_primary_action.ndim:
+                        model_primary_action = model_primary_action.unsqueeze(-1)
+                if action_prob is not None and self.pending_action_prob is not None:
+                    missing = last_step_real & ~self.pending_action_valid
+                    if torch.any(missing):
+                        # This should only be needed by partially upgraded wrappers.
+                        self.pending_action_prob[missing] = action_prob[missing]
+                    model_action_prob = self.pending_action_prob
+            self._write_send_model_buffer(
+                state, reward, done, truncated_done, info,
+                model_primary_action, model_action_prob, real_step_mask=last_step_real,
+            )
+            if self.dynamic_search:
+                self.pending_action_valid[last_step_real] = False
+        if self.train_model:
+            if self.parallel:
+                if self.counter % 200 == 0:
+                    self._refresh_wait()
+            else:
+                self.status = self._train_model()
+            if self.status["finish"]:
+                # A failed remote learner also sets ModelBuffer.finish in its
+                # finally block.  Resolve the future before treating that bit
+                # as successful completion.
+                self._poll_model_learner(wait=self.rank == 0)
+                if self.rank == 0 and self.train_model: 
+                    self._logger.info("Finish training model")
+                self.train_model = False   
+
+        if self.rank == 0 and int(time.strftime("%M")) // 10 != self.ckp_start_time:
+            self.save_ckp()
+            self.ckp_start_time = int(time.strftime("%M")) // 10
+        
+        info["model_status"] = self.status
+        self.counter += 1
+        return state, reward, done, truncated_done, info      
+
+    def _write_send_model_buffer(
+            self, state, reward, done, truncated_done, info,
+            primary_action, action_prob, real_step_mask=None):
+        if real_step_mask is None:
+            real_step_mask = (info["step_status"] == 0) | (info["step_status"] == 3)
+        reward = reward.unsqueeze(-1)
+        data = {
+                "baseline": info["baseline"][real_step_mask],
+                "action": primary_action[real_step_mask],            
+                "reward": reward[real_step_mask],
+                "done": done[real_step_mask],
+                "truncated_done": truncated_done[real_step_mask],
+                "real_state": info["real_states_np"][real_step_mask.cpu().numpy()],
+            }       
+
+        per_state = info["initial_per_state"] if "initial_per_state"  in info else {}
+        for k in per_state.keys():
+            if not k.startswith("per"): continue
+            data[k] = per_state[k][real_step_mask]   
+
+        if action_prob is not None:
+            action_prob = action_prob[real_step_mask]
+            if not self.tuple_action: action_prob = action_prob.unsqueeze(-2)        
+            data["action_prob"] = action_prob
+        
+        data = util.dict_map(data, lambda x: x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x)    
+        for k in ["baseline", "reward"]: data[k] = data[k].astype(np.float32)
+        if self.frame_stack_n > 1:
+            data["real_state"] = data["real_state"][:, -self.frame_ch:]
+        idx = np.arange(self.env_n)[real_step_mask.detach().cpu().numpy()]
+        if not self.parallel:
+            self.model_buffer.write(data, rank=self.rank, idx=idx, priority=None)
+            return
+        write_ref = self.model_buffer.write.remote(
+            ray.put(data), rank=self.rank, idx=idx, priority=None
+        )
+        if self.voc_model_input_seal_runtime:
+            if self._model_input_seal_acknowledged:
+                raise RuntimeError("model write attempted after input seal")
+            self._pending_model_write_refs.append(write_ref)
+            self._last_model_write_ref = write_ref
+            self._last_model_write_acknowledged = False
+
+    def _refresh_wait(self):
+        if self.voc_model_input_seal_runtime:
+            self._ack_pending_model_writes_no_step()
+        self._poll_model_learner(wait=False)
+        self._update_status()
+        self._poll_model_learner(wait=self.status["finish"] and self.rank == 0)
+        if self.status["running"]: self._refresh_net()
+        if self.status["processed_n"] < self.status["warm_up_n"] * 2: return         
+        while self.status["replay_ratio"] < self.flags.min_replay_ratio and not self.status["finish"]:
+            time.sleep(0.01)
+            self._update_status()
+        return 
+
+    def _train_model(self):
+        with torch.set_grad_enabled(True):
+            beta = self.model_learner.compute_beta()
+            while True:            
+                data = self.model_buffer.read(
+                    self.model_learner.model_T,
+                    self.model_learner.model_B,
+                    beta,
+                    add_t=self.flags.model_return_n + 1,
+                )
+                # The synchronous buffer is newly constructed on resume.
+                # Its warm-up transitions are new interactions, unlike a
+                # restored parallel buffer's initial processed cursor.
+                cold_resume = (self.flags.ckp
+                               and not self.model_learner.start_training
+                               and data is not None)
+                self.model_learner.init_psteps(data)
+                if cold_resume:
+                    self.model_learner.last_psteps = 0
+                if data is None: 
+                    self.model_learner.log_preload(self.model_buffer.get_status())
+                    break
+                self.model_learner.update_real_step(data)                        
+                if (self.model_learner.step_per_transition() > 
+                    self.flags.max_replay_ratio):
+                    break   
+                self.model_net.train(True)
+                try:
+                    self.model_learner.consume_data(data, model_buffer=self.model_buffer)
+                finally:
+                    self.model_net.train(False)
+            if self.model_learner.real_step >= self.flags.total_steps:
+                self.model_buffer.set_finish()
+        return self.model_buffer.get_status()
+
+    def normalize(self, x):
+        if self.flags.wrapper_type == 1:
+            return self.env.normalize(x)
+        else:
+            return self.model_net.normalize(x)
+
+    def unnormalize(self, x):
+        if self.flags.wrapper_type == 1:
+            return self.env.unnormalize(x)
+        else:
+            return self.model_net.unnormalize(x)
+
+    def render(self, *args, **kwargs):  
+        return self.env.render(*args, **kwargs)
+
+    def close(self):
+        learner_error = None
+        if self.rank == 0 and hasattr(self, "r_learner"):
+            try:
+                self._poll_model_learner(wait=True)
+            except Exception as error:
+                learner_error = error
+        if self.parallel and not self.voc_model_input_seal_runtime:
+            self.model_buffer.set_finish.remote()
+        del self.model_net
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.env.close()
+        if learner_error is not None:
+            raise RuntimeError("model learner failed") from learner_error
+    
+    def decode_tree_reps(self, tree_reps):
+        if self.flags.wrapper_type in [3, 4, 5]:
+            return self.env.get_wrapper_attr('decode_tree_reps')(tree_reps)
+        if self.dynamic_search:
+            return util.decode_dynamic_tree_reps(
+                tree_reps=tree_reps,
+                num_actions=self.num_actions,
+                dim_actions=self.dim_actions,
+                enc_type=self.flags.model_enc_type,
+                f_type=self.flags.model_enc_f_type,
+            )
+        return util.decode_tree_reps(
+            tree_reps=tree_reps,
+            num_actions=self.num_actions,
+            dim_actions=self.dim_actions,
+            rec_t=self.flags.rec_t,
+            enc_type=self.flags.model_enc_type,
+            f_type=self.flags.model_enc_f_type,
+        )
+    
+    def get_tree_rep_meaning(self):
+        if self.tree_rep_meaning is None:
+            if self.flags.wrapper_type in [3, 4, 5]:
+                self.tree_rep_meaning = self.env.get_wrapper_attr('tree_rep_meaning')
+            elif self.flags.wrapper_type in [0, 2]:
+                self.tree_rep_meaning = util.get_tree_rep_meaning(
+                    self.num_actions, self.dim_actions, self.flags
+                )
+        return self.tree_rep_meaning
+
+    def get_primary_action_meanings(self):
+        """Return the validated immutable runtime primary-action table."""
+
+        if self.primary_action_meanings is None:
+            return None
+        return tuple(self.primary_action_meanings)
+    
+    def save_ckp(self):
+        data = self.env.get_wrapper_attr('save_ckp')()
+        if len(data) > 0:
+            np.savez(self.ckp_env_path, **data)
+
+def make(*args, **kwargs):
+    return Env(*args, **kwargs)

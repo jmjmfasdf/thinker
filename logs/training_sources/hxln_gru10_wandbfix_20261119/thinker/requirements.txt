@@ -1,0 +1,15 @@
+pydantic
+numpy>=1.2,<2.0
+opencv-python
+gymnasium==0.29.1
+gymnasium[atari]
+gymnasium[accept-rom-license]
+grpcio==1.51.1
+ray[default]>=2.1.0
+matplotlib>=3.0.0
+GitPython>=3.0.0
+wandb>=0.14
+moviepy>=1.0.0
+torch>=1.13.0
+torchvision
+torchaudio
