@@ -40,7 +40,7 @@ ds004323-download/
 behavioral_data_block/
 # Local behavioral datasets and compatibility links (managed outside Git).
 /behavioral_data_*
-logs/
+logs/thinker
 test/
 slurm_logs/
 *.slurm
