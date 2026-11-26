@@ -19,7 +19,7 @@ from common.statistics import group_inference
 COLORS = ['#367aa8', '#dd8a35', '#785b9e', '#399a87', '#cf6678', '#737d87']
 POP_LABELS = {'overall': 'Any action switch', 'noop_to_active': 'No input → active',
               'active_to_noop': 'Active → no input', 'active_to_other': 'Active → other action'}
-THEMES = ['01', '02', '03', '04', '05', '09', '10', '12', '13']
+THEMES = ['01', '02', '03', '04', '05', '09', '10', '12']
 plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 10, 'axes.spines.top': False,
     'axes.spines.right': False, 'pdf.fonttype': 42, 'savefig.facecolor': 'white'})
 
@@ -281,7 +281,6 @@ def aggregate(outputs, subjects, games, numbers=None):
         from .mu_heatmaps import build
         build(outputs, subjects, games)
     for number in (numbers or THEMES):
-        if number == '13': continue  # Existing HSMM already has game-specific artifacts.
         for game in games:
             root = output(number, outputs)/'panels'/f'game{game}'; root.mkdir(parents=True, exist_ok=True)
             t, sources, missing = read_units(outputs, number, game, subjects); files = []

@@ -1,9 +1,6 @@
 """Explicit additional-input analyses; never fabricate real utility from replay."""
 from pathlib import Path
-import importlib.util
 import json
-import subprocess
-import sys
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -67,27 +64,3 @@ def utility(outputs):
                      'Finite-horizon pilot outcomes differ from the critic long-horizon target.',
                      'No inference from sub001 to six-subject training population.']))
     return 'COMPLETED_SUPPLEMENTARY'
-
-def behavioral_modes(root,identity,token,subject,game):
-    if game==0:
-        write_json(root/'manifest.json',dict(identity,signature=token,status='BLOCKED_INPUT',
-            reason='Retained phase-controlled HSMM has prespecified Pong/Space Invaders RAM features only; no Enduro feature contract.'))
-        return 'BLOCKED_INPUT'
-    if importlib.util.find_spec('numba') is None:
-        write_json(root/'manifest.json',dict(identity,signature=token,status='BLOCKED_RUNTIME',reason='Retained HSMM requires numba'))
-        return 'BLOCKED_RUNTIME'
-    implementation=Path(__file__).resolve().parent/'compat_impl/04_event_segmentation_hsmm.py'
-    command=[sys.executable,'-B','-u',str(implementation),
-        '--subject',str(subject),'--game',str(game),'--data-root',str(REPO/'behavioral_data_block'),
-        '--output-root',str(root.parent)]
-    with (root/'hsmm.log').open('a') as log:
-        subprocess.run(command,check=True,stdout=log,stderr=subprocess.STDOUT)
-    manifest=json.loads((root/'analysis_manifest.json').read_text())
-    if manifest['subject']!=subject or manifest['game']!=game:raise ValueError('HSMM identity mismatch')
-    for rec in manifest['outputs']:
-        if rec['sha256'] is None or sha(rec['path'])!=rec['sha256']:raise ValueError('HSMM missing/mismatched output')
-    write_json(root/'manifest.json',dict(identity,signature=token,status='COMPLETED',
-        source=str(implementation),source_sha256=sha(implementation),
-        interpretation='Model-independent exploratory behavioral/RAM modes; not a measurement of planning states.',
-        artifacts={'analysis_manifest.json':sha(root/'analysis_manifest.json')}))
-    return 'COMPLETED'

@@ -10721,7 +10721,7 @@ def add_parse(filename, parser=None, prefix=''):
         parser.add_argument(option, type=int, default=None)
     for name, kind in (("icopro_burn_in_steps", int), ("icopro_sampling_context", int),
                        ("voc_gru_gradient_scale", float), ("voc_critic_parameterization", str),
-                       ("actor_h_encoder_norm", str)):
+                       ("actor_h_encoder_norm", str), ("actor_x_encoder_norm", str)):
         option = f"--{prefix}{name}"
         if option not in parser._option_string_actions:
             parser.add_argument(option, type=kind, default=None)
@@ -10770,7 +10770,8 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
         config["min_search_steps"] = kwargs["min_search_steps"]
         explicit_config_keys.add("min_search_steps")
     for name in ("icopro_burn_in_steps", "icopro_sampling_context",
-                 "voc_gru_gradient_scale", "voc_critic_parameterization", "actor_h_encoder_norm"):
+                 "voc_gru_gradient_scale", "voc_critic_parameterization", "actor_h_encoder_norm",
+                 "actor_x_encoder_norm"):
         if kwargs.get(name) is not None:
             config[name] = kwargs[name]
             explicit_config_keys.add(name)
@@ -11506,6 +11507,10 @@ class Timings:
 
 class Wandb:
     def __init__(self, flags, subname=""):
+        # Ray/Slurm workers must start a node-local W&B service. An inherited
+        # submitter socket may not exist here, even when authentication is valid.
+        for key in ("WANDB_SERVICE", "_WANDB_SERVICE"):
+            os.environ.pop(key, None)
         import wandb
 
         self.wandb = wandb

@@ -7,13 +7,8 @@ SCRIPTS = REPO / 'research_script'
 OUTPUTS = SCRIPTS / "outputs"
 INPUT_CACHE = OUTPUTS / "00_dynamic_cache_10m_20261110"
 GAMES = {0: "Enduro", 1: "Pong", 2: "Space Invaders"}
-THEMES = {
-    "00": "cache_and_training_diagnostics", "01": "behavior_and_model_fidelity",
-    "02": "action_boundary_mechanisms", "03": "dynamic_computation_control",
-    "04": "search_to_action", "05": "human_prediction", "06": "neural_decoding",
-    "07": "neural_rsa", "08": "neural_encoding", "09": "task_state_complexity",
-    "10": "computation_utility", "12": "continuous_dynamics", "13": "behavioral_modes",
-}
+THEMES = {'00': 'native_preparation', '01': 'behavioral_analysis', '02': 'model_validation', '03': 'computation_allocation', '04': 'computation_utility', '05': 'evaluation_revision', '06': 'search_to_policy', '07': 'computation_to_behavior', '08': 'evaluation_continuity', '09': 'evaluation_accumulation', '10': 'control_patterns', '11': 'neural_encoding', '12': 'neural_decoding', '13': 'neural_rsa'}
+
 
 def output(number, root=OUTPUTS):
     number = f"{int(number):02d}"

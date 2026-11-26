@@ -81,13 +81,7 @@ def main():
         state['coverage'] = coverage.to_dict('records')
     except Exception:
         state['render_error'] = traceback.format_exc(); print(state['render_error'], flush=True)
-    # HSMM has its own already-running campaign; record its actual state instead
-    # of launching a competing writer or pretending its panels were recomputed.
-    state['behavioral_modes'] = {}
-    for s in args.subjects:
-        for g in args.games:
-            f = output(13, args.outputs_root)/f'sub{s:03d}_game{g}'/'manifest.json'
-            state['behavioral_modes'][f'sub{s:03d}_game{g}'] = json.loads(f.read_text()).get('status') if f.exists() else 'WAITING_EXISTING_CAMPAIGN'
+    # Native directional-accumulation figures belong to their own theme13 run.
     state['status'] = 'FAILED' if state.get('render_error') or any(v['status'] == 'FAILED' for v in state['tasks'].values()) or any(v['status']=='FAILED' for v in state.get('original_human_behavior',{}).values()) else 'COMPLETED'
     if state.get('coverage') and any(v['status'] == 'INCOMPLETE_COHORT' for v in state['coverage']): state['status'] = 'PARTIAL'
     state['completed_at'] = time.time(); write_json(root/'progress.json', state)

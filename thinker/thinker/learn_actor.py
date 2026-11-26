@@ -7228,7 +7228,8 @@ class SActorLearner:
                 ("h_encoder_pre_norm", "actor.h_encoder_pre_norm"),
                 ("all_phase_logits", "actor.logits"),
             ]
-            if getattr(self.flags, "actor_h_encoder_norm", "none") == "layer":
+            if any(getattr(self.flags, name, "none") == "layer" for name in
+                   ("actor_h_encoder_norm", "actor_x_encoder_norm")):
                 # The normalization trial must also expose amplification in
                 # the other visual pathways and the shared final readout.
                 # Preserve the metric keyset of legacy raw-encoder runs.
@@ -7239,6 +7240,8 @@ class SActorLearner:
                     ("final_mlp", "actor.final_mlp"),
                     ("policy", "actor.policy"),
                 ])
+            if getattr(self.flags, "actor_x_encoder_norm", "none") == "layer":
+                numeric_components.append(("x_encoder_pre_norm", "actor.x_encoder_pre_norm"))
             for label, module in numeric_components:
                 losses[f"icopro_numeric_{label}_absmax"] = torch.tensor(
                     numeric_maxima.get(module, 0.), device=total_loss.device,
@@ -7250,6 +7253,11 @@ class SActorLearner:
                 losses[f"icopro_h_encoder_norm_{name}_absmax"] = (
                     parameter.detach().abs().max() if parameter is not None
                     else torch.zeros((), device=total_loss.device))
+            if getattr(self.flags, "actor_x_encoder_norm", "none") == "layer":
+                x_norm = self.actor_net.x_encoder_pre.output_norm
+                for name in ("weight", "bias"):
+                    losses[f"icopro_x_encoder_norm_{name}_absmax"] = (
+                        getattr(x_norm, name).detach().abs().max())
             if imitation_result is not None:
                 # The online actor objective is represented as a sum.  Scale
                 # the mean behavioral objective by the number of online real

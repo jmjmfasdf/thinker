@@ -41,7 +41,7 @@ from scipy.stats import rankdata
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-from shared_analysis_cache import (
+from common.shared_analysis_cache import (
     DEFAULT_SHARED_CACHE_ROOT,
     cache_paths as shared_cache_paths,
     load_rollout_value,
@@ -49,10 +49,10 @@ from shared_analysis_cache import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
-BASE_SCRIPT = ROOT / "research_script" / "05_persistence_uncertainty_allocation.py"
+from common.paths import REPO as ROOT
+BASE_SCRIPT = Path(__file__).with_name("05_persistence_uncertainty_allocation.py")
 DEFAULT_TRACE_ROOT = ROOT / "test"
-DEFAULT_OUTPUT_ROOT = ROOT / "research_script" / "outputs" / "05_rollout_value_allocation"
+DEFAULT_OUTPUT_ROOT = ROOT / "research_script" / "outputs" / "04" / "legacy" / "05_rollout_value_allocation"
 REAL_STATUS = 0
 SEARCH_STATUS = 2
 WINDOW_STATUSES = (1, 2, 3)

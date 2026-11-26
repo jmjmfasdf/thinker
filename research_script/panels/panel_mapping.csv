@@ -18,4 +18,3 @@ Dynamic extension,09,state_dependent_computation,Observed state versus planning 
 Dynamic extension,10,paired_environment_utility,Observed paired reward benefit and net utility,Existing sub001 pilot only; protocols kept separate; no new score evaluation
 Dynamic extension,12,bidirectional_transition_trajectories,Transition-aligned M/U/K/VOC/budget trajectories,Episode boundaries preserved; descriptive overlapping windows
 Dynamic extension,12,heldout_prediction_comparison,Incremental temporal context prediction,Verified existing held-out results
-Retained follow-up,13,existing_game_specific_HSMM,Exploratory behavioral modes,Existing campaign retained; Enduro unsupported by prespecified feature contract

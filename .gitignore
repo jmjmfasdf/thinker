@@ -38,8 +38,13 @@ mujoco-py/mujoco_py.egg-info/SOURCES.txt
 safety-gym/safety_gym.egg-info/PKG-INFO
 ds004323-download/
 behavioral_data_block/
+# Local behavioral datasets and compatibility links (managed outside Git).
+/behavioral_data_*
 logs/
 test/
 slurm_logs/
 *.slurm
 
+
+# Historical research data/source archive; kept outside the maintained tree.
+/legacy/

@@ -47,3 +47,36 @@ def test_encoder_architecture_cannot_change_silently_on_resume():
         validate_planning_training_checkpoint(checkpoint, old)
     with pytest.raises(ValueError, match='actor_h_encoder_norm'):
         planning_training_contract(dict(old, actor_h_encoder_norm='invalid'))
+
+
+def test_x_normalization_is_versioned_and_legacy_h_only_resume_is_preserved():
+    h_only = dict(actor_h_encoder_norm='layer', voc_gru_connected=True)
+    both = dict(h_only, actor_x_encoder_norm='layer')
+    h_contract = planning_training_contract(h_only)
+    assert planning_training_contract(dict(h_only, actor_x_encoder_norm='none')) == h_contract
+    assert h_contract['version'] == 2
+    contract = planning_training_contract(both)
+    assert contract['version'] == 3
+    assert contract['actor_h_encoder_norm'] == contract['actor_x_encoder_norm'] == 'layer'
+    checkpoint = dict(flags=both, planning_training_contract=contract)
+    validate_planning_training_checkpoint(checkpoint, both)
+    with pytest.raises(ValueError, match='different planning'):
+        validate_planning_training_checkpoint(checkpoint, h_only)
+    with pytest.raises(ValueError, match='actor_x_encoder_norm'):
+        planning_training_contract(dict(h_only, actor_x_encoder_norm='invalid'))
+
+
+def test_x_encoder_cli_and_image_path_stay_finite_after_amplification():
+    from thinker import util
+    flags = util.create_setting(args=['--actor_h_encoder_norm', 'layer',
+        '--actor_x_encoder_norm', 'layer'], save_flags=False)
+    assert flags.actor_h_encoder_norm == flags.actor_x_encoder_norm == 'layer'
+    encoder = AFrameEncoder((12, 84, 84), flags, downpool=True,
+        firstpool=True, output_norm=flags.actor_x_encoder_norm)
+    with torch.no_grad():
+        encoder.fc[0].weight.mul_(10000)
+    values = encoder(torch.rand(2, 12, 84, 84))
+    assert torch.isfinite(values).all() and values.abs().max() < 17
+    (values * torch.randn_like(values)).sum().backward()
+    assert encoder.fc[0].weight.grad.abs().sum() > 0
+    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in encoder.parameters())

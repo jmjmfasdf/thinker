@@ -40,9 +40,9 @@ os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib-cache"
 os.environ["XDG_CACHE_HOME"] = "/tmp"
 
 
-ROOT = Path(__file__).resolve().parent.parent
+from common.paths import REPO as ROOT
 DEFAULT_INPUT_ROOT = ROOT / "behavioral_data_block"
-DEFAULT_OUTPUT_BASE = Path(__file__).resolve().parent / "outputs" / "00_prepare"
+DEFAULT_OUTPUT_BASE = ROOT / "research_script" / "outputs" / "00" / "legacy" / "00_prepare"
 DEFAULT_DSM_ROOT = DEFAULT_OUTPUT_BASE / "behavioral_data_block_ram_dsm"
 DEFAULT_FMRI_ROOT = Path("/home/jeongmin/fmri/atari/derivatives/ants_mni")
 DEFAULT_FMRI_IMAGE = "s5_wfiltered_func_data.nii"
@@ -50,7 +50,7 @@ DEFAULT_FMRI_DSM_ROOT = DEFAULT_OUTPUT_BASE / "fmri_roi_bold_dsm"
 DEFAULT_THINKER_ROOT = ROOT / "test" / "sub001"
 DEFAULT_THINKER_DSM_ROOT = DEFAULT_OUTPUT_BASE / "thinker_rep_dsm"
 DEFAULT_HARVARD_OXFORD_MASK_ROOT = (
-    Path(__file__).resolve().parent
+    ROOT / "research_script"
     / "outputs"
     / "06_representational_mechanism"
     / "atlas"

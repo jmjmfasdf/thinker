@@ -2346,7 +2346,7 @@ def _coordinator_source_tasks(
 
     evaluator = _import_evaluator()
     flags = _flags_from_stable_config(config.checkpoint.config, config.checkpoint.directory)
-    spec = evaluator.resolve_evaluation_spec(flags)
+    spec = evaluator.resolve_behavior_replay_spec(flags)
     from thinker.bc_loader import FrameStackedBehavioralDataLoader
 
     loader = FrameStackedBehavioralDataLoader(
@@ -2452,7 +2452,7 @@ class _CaptureRuntime:
         self.flags = _flags_from_stable_config(
             config.checkpoint.config, config.checkpoint.directory
         )
-        self.spec = self.evaluator.resolve_evaluation_spec(self.flags)
+        self.spec = self.evaluator.resolve_behavior_replay_spec(self.flags)
         self.actor_checkpoint = _torch_load_stable(
             config.checkpoint.actor,
             label="actor checkpoint",

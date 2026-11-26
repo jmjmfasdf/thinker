@@ -698,6 +698,45 @@ def test_runtime_spec_assertions_never_override_checkpoint(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("game_id", "env_name", "num_actions"),
+    [(0, "Enduro-v5", 9), (1, "Pong-v5", 6)],
+)
+def test_full_episode_replay_accepts_all_sessions_without_inventing_holdout(
+    monkeypatch, game_id, env_name, num_actions
+):
+    live = _LiveEnv(num_actions)
+    monkeypatch.setattr(evaluation, "_make_live_environment", lambda flags: live)
+    flags = SimpleNamespace(**_flag_values(
+        game_id=game_id, env_name=env_name,
+        train_sessions="1,2,3,4", holdout_sessions="",
+    ))
+    before = copy.deepcopy(vars(flags))
+    with pytest.raises(ValueError, match="exactly one checkpoint holdout"):
+        evaluation.resolve_evaluation_spec(flags)
+    assert live.reset_count == 0
+
+    spec = evaluation.resolve_behavior_replay_spec(flags)
+    assert spec.subjects == (1,)
+    assert spec.train_sessions == (1, 2, 3, 4)
+    assert spec.holdout_sessions == ()
+    assert spec.game_id == game_id and spec.num_actions == num_actions
+    assert spec.observation_shape == (12, 84, 84)
+    assert vars(flags) == before
+    assert live.closed
+
+
+def test_full_episode_replay_rejects_overlapping_declared_sessions(monkeypatch):
+    live = _LiveEnv(9)
+    monkeypatch.setattr(evaluation, "_make_live_environment", lambda flags: live)
+    flags = SimpleNamespace(**_flag_values(
+        train_sessions="1,2,3,4", holdout_sessions="1",
+    ))
+    with pytest.raises(ValueError, match="training and holdout sessions overlap"):
+        evaluation.resolve_behavior_replay_spec(flags)
+    assert live.reset_count == 0
+
+
 def test_cli_expected_identity_flags_are_assertion_inputs():
     args = evaluation.parse_args(
         [

@@ -10,10 +10,13 @@ from common.io import sha,signature,write_json
 from common.reporting import save_tables,figures,aggregate
 from . import behavior
 
-SUPPORTED=['02','03','04','05','06','07','08','09','10','12','13']
+SUPPORTED=['02','03','04','05','06','07','08','09','10','12']
 
 def run_unit(number,cache,outputs,subject,game):
-    number=f'{int(number):02d}';root=output(number,outputs)/tag(subject,game)
+    number=f'{int(number):02d}'
+    if number=='13':
+        raise ValueError('Theme13 now uses native visualization captures: run 13_directional_evaluation_accumulation.py')
+    root=output(number,outputs)/tag(subject,game)
     root.mkdir(parents=True,exist_ok=True)
     source_root=Path(__file__).resolve().parents[1]
     sources={str(p.relative_to(source_root)):sha(p) for folder in ['common','analyses'] for p in (source_root/folder).rglob('*.py')}
@@ -57,9 +60,6 @@ def run_unit(number,cache,outputs,subject,game):
         tables,extra=run_neural(number,d,cache,outputs,subject,game)
         if extra.get('status')!='COMPLETED':
             write_json(mp,dict(ident,signature=token,**extra));return extra['status']
-    if number=='13':
-        from .optional import behavioral_modes
-        return behavioral_modes(root,ident,token,subject,game)
     for frame in tables.values():frame['subject']=subject;frame['game']=game
     save_tables(root,tables);figures(root,tables,f'{number} · {GAMES[game]} · subject {subject:03d}')
     failed_predictions={k:v.loc[v.status.ne('ok')].to_dict('records') for k,v in tables.items()

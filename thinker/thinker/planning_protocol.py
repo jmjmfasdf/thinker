@@ -33,6 +33,9 @@ def planning_training_contract(flags):
     norm = values.get("actor_h_encoder_norm", "none")
     if norm not in ("none", "layer"):
         raise ValueError("actor_h_encoder_norm must be 'none' or 'layer'")
+    x_norm = values.get("actor_x_encoder_norm", "none")
+    if x_norm not in ("none", "layer"):
+        raise ValueError("actor_x_encoder_norm must be 'none' or 'layer'")
     contract = dict(version=1, critic=critic, burn_in_steps=burn,
                 sampling_context=context, gru_gradient_scale=float(scale),
                 gru_connected=bool(values.get("voc_gru_connected", False)),
@@ -40,6 +43,11 @@ def planning_training_contract(flags):
     # Preserve version1 contracts byte-for-byte for existing raw encoders.
     if norm != "none":
         contract.update(version=2, actor_h_encoder_norm=norm)
+    # Keep historical v1/v2 contracts unchanged; x normalization changes the
+    # actor architecture and must never be enabled silently on resume.
+    if x_norm != "none":
+        contract.update(version=3, actor_h_encoder_norm=norm,
+                        actor_x_encoder_norm=x_norm)
     return contract
 
 

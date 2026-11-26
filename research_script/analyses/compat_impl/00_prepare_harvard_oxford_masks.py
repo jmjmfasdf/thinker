@@ -21,7 +21,7 @@ import numpy as np
 from scipy.ndimage import affine_transform
 
 
-ROOT = Path(__file__).resolve().parent.parent
+from common.paths import REPO as ROOT
 DEFAULT_ATLAS_DIR = (
     ROOT
     / "research_script"

@@ -1,3 +1,4 @@
+import os
 import sys
 from types import SimpleNamespace
 
@@ -22,6 +23,33 @@ def test_unrelated_runs_keep_existing_wandb_identity(monkeypatch):
     calls = []
     monkeypatch.delenv('DI72_WANDB_ATTEMPT', raising=False)
     monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(init=lambda **kw: calls.append(kw), config=SimpleNamespace(update=lambda *a, **k: None)))
+    util.Wandb(SimpleNamespace(xpid='existing', project='thinker'))
+    assert calls[0]['id'] == 'existing'
+    assert calls[0]['resume'] == 'allow'
+
+
+@pytest.mark.parametrize('keys', [
+    ('WANDB_SERVICE',), ('_WANDB_SERVICE',), ('WANDB_SERVICE', '_WANDB_SERVICE'),
+])
+def test_worker_does_not_connect_to_inherited_wandb_service(monkeypatch, keys):
+    monkeypatch.delenv('DI72_WANDB_ATTEMPT', raising=False)
+    for key in ('WANDB_SERVICE', '_WANDB_SERVICE'):
+        monkeypatch.delenv(key, raising=False)
+    for key in keys:
+        monkeypatch.setenv(key, '3-999999-unix-/nonexistent/submitter-wandb/socket')
+    monkeypatch.setenv('WANDB_MODE', 'online')
+    monkeypatch.setenv('WANDB_RUN_GROUP', 'existing-grid')
+    calls = []
+
+    def initialize(**kwargs):
+        assert 'WANDB_SERVICE' not in os.environ
+        assert '_WANDB_SERVICE' not in os.environ
+        assert os.environ['WANDB_MODE'] == 'online'
+        assert os.environ['WANDB_RUN_GROUP'] == 'existing-grid'
+        calls.append(kwargs)
+
+    monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(
+        init=initialize, config=SimpleNamespace(update=lambda *a, **k: None)))
     util.Wandb(SimpleNamespace(xpid='existing', project='thinker'))
     assert calls[0]['id'] == 'existing'
     assert calls[0]['resume'] == 'allow'

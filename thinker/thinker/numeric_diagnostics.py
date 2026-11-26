@@ -69,10 +69,12 @@ class ImitationNumericTrace:
             if isinstance(module, torch.nn.Module):
                 self.handles.append(module.register_forward_hook(
                     self._hook("actor." + name), with_kwargs=True))
-        encoder = getattr(actor, "h_encoder", None)
-        if isinstance(getattr(encoder, "output_norm", None), torch.nn.LayerNorm):
-            self.handles.append(encoder.fc.register_forward_hook(
-                self._hook("actor.h_encoder_pre_norm"), with_kwargs=True))
+        for name, label in (("h_encoder", "h_encoder"),
+                            ("x_encoder_pre", "x_encoder")):
+            encoder = getattr(actor, name, None)
+            if isinstance(getattr(encoder, "output_norm", None), torch.nn.LayerNorm):
+                self.handles.append(encoder.fc.register_forward_hook(
+                    self._hook(f"actor.{label}_pre_norm"), with_kwargs=True))
         self.handles.append(actor.register_forward_pre_hook(self._actor_before))
         self.handles.append(actor.register_forward_hook(self._actor_after))
         return self

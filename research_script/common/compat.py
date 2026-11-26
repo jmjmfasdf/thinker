@@ -1,27 +1,29 @@
-"""Historical implementations are preserved; new theme entry points are canonical.
-
-Keep virtual source locations for their relative imports and route defaults to
-numbered outputs. Frozen campaign sources and prior results are never edited.
-"""
-import re
+"""Load only the numeric implementations required by maintained research themes."""
+import importlib.util
 import sys
-import types
 from pathlib import Path
-from .paths import SCRIPTS,output
 
-def load(name,number):
-    path=Path(__file__).resolve().parents[1]/'analyses/compat_impl'/name
-    module=types.ModuleType('_historical_'+name.replace('.','_'))
-    module.__file__=str(SCRIPTS/name);sys.modules[module.__name__]=module
-    source=path.read_text()
-    own={Path(name).stem, '12_continuous_dynamics'}
-    source=re.sub(r'(["\x27]outputs["\x27]\s*/\s*)["\x27]([^"\x27]+)["\x27]',
-                  lambda m:m.group(1)+repr(f'{int(number):02d}')+' / "legacy" / '+repr(Path(name).stem) if m.group(2) in own else m.group(0),source)
-    # Module references keep their virtual old path, while output defaults change.
-    exec(compile(source,str(path),'exec'),module.__dict__)
+
+def load(name, number=None):
+    path = Path(__file__).resolve().parents[1]/'analyses/compat_impl'/name
+    if path.parent.name != 'compat_impl' or not path.is_file():
+        raise ImportError(f'No retained research implementation: {name}')
+    module_name = '_research_impl_'+path.stem
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     return module
 
-def export(namespace,name,number):
-    module=load(name,number)
+
+def export(namespace, name, number):
+    module = load(name, number)
     namespace.update({k:v for k,v in vars(module).items() if not k.startswith('__')})
-    if namespace.get('__name__')=='__main__':module.main()
+    if namespace.get('__name__') == '__main__':
+        module.main()

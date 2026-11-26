@@ -3988,6 +3988,31 @@ def resolve_evaluation_spec(
     dataset or override checkpoint configuration.
     """
 
+    return _resolve_behavior_input_spec(
+        flags, require_single_holdout=True,
+        expected_env_name=expected_env_name, expected_game_id=expected_game_id,
+    )
+
+
+def resolve_behavior_replay_spec(flags: Any) -> EvaluationSpec:
+    """Resolve full-episode replay inputs, including all-session checkpoints.
+
+    Replay records the declared training/holdout identity without requiring a
+    held-out fold. The paired evaluation entry point retains its strict fold
+    requirement. No checkpoint flags or session assignments are rewritten.
+    """
+
+    return _resolve_behavior_input_spec(flags, require_single_holdout=False)
+
+
+def _resolve_behavior_input_spec(
+    flags: Any,
+    *,
+    require_single_holdout: bool,
+    expected_env_name: Optional[str] = None,
+    expected_game_id: Optional[int] = None,
+) -> EvaluationSpec:
+
     subjects = _parse_id_setting(getattr(flags, "icopro_subjects", None), "icopro_subjects")
     train_sessions = _parse_id_setting(
         getattr(flags, "icopro_train_sessions", None), "icopro_train_sessions"
@@ -4004,7 +4029,7 @@ def resolve_evaluation_spec(
         raise ValueError(
             "checkpoint icopro_train_sessions must contain at least one session"
         )
-    if len(holdout_sessions) != 1:
+    if require_single_holdout and len(holdout_sessions) != 1:
         raise ValueError(
             "paired evaluation currently requires exactly one checkpoint "
             f"holdout session, got {holdout_sessions}"

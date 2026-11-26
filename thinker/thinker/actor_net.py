@@ -1219,6 +1219,7 @@ class ActorNetSingle(ActorBaseNet):
                 flags=flags,
                 downpool=True,
                 firstpool=True,
+                output_norm=getattr(flags, "actor_x_encoder_norm", "none"),
             )
             x_out_size = self.x_encoder_pre.out_size
             if self.x_rnn:

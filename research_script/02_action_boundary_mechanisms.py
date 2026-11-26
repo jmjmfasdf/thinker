@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
-"""Canonical theme 02: action boundary mechanisms. Results: outputs/02/."""
-from common.cli import main
+"""Theme 02: M/U and action boundaries; results below outputs/02/."""
+import sys
 
-if __name__ == "__main__":
-    main("02")
+if __name__ == '__main__':
+    if '--visualization' in sys.argv:
+        sys.argv.remove('--visualization')
+        from analyses.replay_themes import main
+        main('02')
+    elif '--replay-values' in sys.argv:
+        sys.argv.remove('--replay-values')
+        from analyses.value_updates import main
+        main()
+    else:
+        from common.cli import main
+        main('02')

@@ -315,7 +315,7 @@ def test_coordinator_indexes_only_selected_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(
         recorder,
         "_import_evaluator",
-        lambda: SimpleNamespace(resolve_evaluation_spec=lambda flags: spec),
+        lambda: SimpleNamespace(resolve_behavior_replay_spec=lambda flags: spec),
     )
     monkeypatch.setattr(
         recorder, "_flags_from_stable_config", lambda config, directory: object()

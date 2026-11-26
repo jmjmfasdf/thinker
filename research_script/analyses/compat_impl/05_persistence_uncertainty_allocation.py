@@ -56,7 +56,7 @@ from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, SplineTransformer, StandardScaler
 
-from shared_analysis_cache import (
+from common.shared_analysis_cache import (
     DEFAULT_SHARED_CACHE_ROOT,
     cache_paths as shared_cache_paths,
     load_model_control,
@@ -64,10 +64,10 @@ from shared_analysis_cache import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
+from common.paths import REPO as ROOT
 DEFAULT_TRACE_ROOT = ROOT / "test"
-DEFAULT_OUTPUT_ROOT = ROOT / "research_script" / "outputs" / "05_persistence_uncertainty_allocation"
-ACTOR_SCRIPT = ROOT / "research_script" / "02_actor_policy.py"
+DEFAULT_OUTPUT_ROOT = ROOT / "research_script" / "outputs" / "02" / "legacy" / "05_persistence_uncertainty_allocation"
+ACTOR_SCRIPT = Path(__file__).with_name("02_actor_policy.py")
 EPS = 1e-8
 REAL_STATUS = 0
 WINDOW_STATUSES = (1, 2, 3)
