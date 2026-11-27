@@ -51,7 +51,6 @@ def adv_l2(target_x, x):
     return target_x - x
 
 
-@torch.no_grad()
 def compute_v_trace(
     log_rhos,
     discounts,
@@ -64,9 +63,17 @@ def compute_v_trace(
     lamb=1.0,
     norm_stat=None,
     norm_mask=None,
+    differentiable_discount=False,
 ):
     """V-trace from log importance weights."""
-    with torch.no_grad():
+    with torch.set_grad_enabled(differentiable_discount):
+        if differentiable_discount:
+            if return_norm_type != -1:
+                raise ValueError("meta V-trace currently requires return_norm_type=-1")
+            log_rhos = log_rhos.detach()
+            values = values.detach()
+            bootstrap_value = bootstrap_value.detach()
+            rewards = rewards.detach()
         rhos = torch.exp(log_rhos)
         if clip_rho_threshold is not None:
             clipped_rhos = torch.clamp(rhos, max=clip_rho_threshold)

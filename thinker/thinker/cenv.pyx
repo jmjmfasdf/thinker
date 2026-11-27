@@ -73,6 +73,10 @@ def _normalize_initial_action(initial_action, int env_n, int num_actions):
 
 # Node-related function (we use structure instead of class to minimize Python code)
 
+def _planning_raw_value(model, index):
+    raw = getattr(model, "planning_raw_values", None)
+    return None if raw is None else float(raw[-1, index].detach().cpu())
+
 cdef struct Node:
     int action # action
     float r # reward
@@ -95,8 +99,9 @@ cdef struct Node:
     int num_actions # number of actions
     float discounting # discount rate
     bool remember_path # whethere to remember path for the rollout
+    PyObject* torch_node # optional differentiable arithmetic, same topology
 
-cdef Node* node_new(Node* pparent, int action, float logit, int num_actions, float discounting, int rec_t, bool remember_path):
+cdef Node* node_new(Node* pparent, int action, float logit, int num_actions, float discounting, int rec_t, bool remember_path, object planning_context=None):
     cdef Node* pnode = <Node*> malloc(sizeof(Node))
     cdef vector[Node*]* ppchildren =  new vector[Node*]()
     cdef vector[float]* prollout_qs = new vector[float]()
@@ -106,7 +111,16 @@ cdef Node* node_new(Node* pparent, int action, float logit, int num_actions, flo
     else:
         ppaths = NULL
     pnode[0] = Node(action=action, r=0., v=0., t=0, done=False, logit=logit, ppchildren=ppchildren, pparent=pparent, trail_r=0., trail_discount=1., rollout_q=0,
-        visited=False, prollout_qs=prollout_qs, ppaths=ppaths, rollout_n=0, max_q=0., encoded=NULL, rec_t=rec_t, num_actions=num_actions, discounting=discounting, remember_path=remember_path)
+        visited=False, prollout_qs=prollout_qs, ppaths=ppaths, rollout_n=0, max_q=0., encoded=NULL, rec_t=rec_t, num_actions=num_actions, discounting=discounting, remember_path=remember_path, torch_node=NULL)
+    parent_torch = None
+    if pparent != NULL and pparent[0].torch_node != NULL:
+        parent_torch = <object>pparent[0].torch_node
+        planning_context = parent_torch.context
+    if planning_context is not None:
+        from thinker.planning_tree import TorchNode
+        torch_node = TorchNode(planning_context, parent_torch, action, logit, num_actions)
+        Py_INCREF(torch_node)
+        pnode[0].torch_node = <PyObject*>torch_node
     return pnode
 
 cdef bool node_expanded(Node* pnode, int t):
@@ -181,6 +195,9 @@ cdef node_expand(Node* pnode, float r, float v, int t, bool done, float[:] logit
     """
     cdef int a    
     cdef Node* pnode_
+    if pnode[0].torch_node != NULL:
+        (<object>pnode[0].torch_node).expand(
+            r, v, done, np.asarray(logits), (<dict>encoded).get("_planning_raw_value"))
     if override and not node_expanded(pnode, -1):
         override = False # no override if not yet expanded
 
@@ -227,6 +244,8 @@ cdef node_refresh(Node* pnode, Node* pnode_to_refresh, float r_diff, float v_dif
 
 cdef node_visit(Node* pnode):
     cdef vector[Node*]* ppath    
+    if pnode[0].torch_node != NULL:
+        (<object>pnode[0].torch_node).visit()
     pnode[0].trail_r = 0.
     pnode[0].trail_discount = 1.    
     if not pnode[0].visited and pnode[0].remember_path:
@@ -325,9 +344,13 @@ cdef void node_del(Node* pnode, int except_idx) noexcept:
             node_del(pnode[0].ppchildren[0][i], -1)
         else:
             pnode[0].ppchildren[0][i][0].pparent = NULL
+            if pnode[0].ppchildren[0][i][0].torch_node != NULL:
+                (<object>pnode[0].ppchildren[0][i][0].torch_node).parent = None
     del pnode[0].ppchildren
     if pnode[0].encoded != NULL:
         Py_DECREF(<object>pnode[0].encoded)
+    if pnode[0].torch_node != NULL:
+        Py_DECREF(<object>pnode[0].torch_node)
     free(pnode)
 
 cdef void node_collect_snapshot_slots(Node* pnode, object slots):
@@ -340,6 +363,24 @@ cdef void node_collect_snapshot_slots(Node* pnode, object slots):
             slots.add(int(encoded["snapshot_slot"]))
     for i in range(int(pnode[0].ppchildren[0].size())):
         node_collect_snapshot_slots(pnode[0].ppchildren[0][i], slots)
+
+cdef void node_sync_planning_gamma(Node* pnode, float gamma):
+    cdef int i
+    pnode[0].discounting = gamma
+    if pnode[0].torch_node != NULL:
+        node = <object>pnode[0].torch_node
+        with torch.no_grad():
+            values = node.returns()
+            for i in range(len(values)):
+                pnode[0].prollout_qs[0][i] = float(values[i].detach().cpu())
+            pnode[0].v = float(node.context.value(node.v, node.raw_value).detach().cpu())
+            pnode[0].trail_r = float(node.context.evaluate(node.trail, 0.).detach().cpu())
+            pnode[0].trail_discount = gamma ** len(node.trail)
+            pnode[0].rollout_q = float(node.context.evaluate(
+                node.trail, node.trail_value, node.trail_value_raw).detach().cpu())
+            pnode[0].max_q = float(node.max_q().detach().cpu())
+    for i in range(int(pnode[0].ppchildren[0].size())):
+        node_sync_planning_gamma(pnode[0].ppchildren[0][i], gamma)
 
 cdef float enc_0(float x):
     return sign(x)*(sqrt(abs(x)+1)-1)+(0.001)*x
@@ -408,6 +449,7 @@ cdef class cWrapper():
     cdef object per_state    
     cdef list model_states_keys
     cdef object default_info    
+    cdef readonly object planning_context
 
     cdef readonly object observation_space
     cdef readonly object action_space
@@ -543,6 +585,13 @@ cdef class cWrapper():
         self.time = timing        
         
         self.device = torch.device("cpu") if device is None else device        
+        self.planning_context = None
+        if getattr(flags, "planning_backend", "cython") == "torch":
+            if not self.dynamic_search or int(getattr(flags, "wrapper_type", 0)) != 0:
+                raise ValueError("torch planning requires the learned Dynamic wrapper")
+            from thinker.planning_tree import PlanningTreeContext
+            self.planning_context = PlanningTreeContext(
+                self.discounting, self.device, reward_clip=getattr(flags, "reward_clip", -1.))
         self.env = env  
         self.timings = util.Timings()        
 
@@ -895,6 +944,14 @@ cdef class cWrapper():
 
         tree_reps = torch.tensor(
             self.compute_tree_reps_dynamic(), dtype=torch.float, device=self.device)
+        if self.planning_context is not None:
+            from thinker.planning_tree import tree_representation
+            tree_reps = tree_representation(
+                [<object>self.root_nodes[i][0].torch_node for i in range(self.env_n)],
+                [<object>self.cur_nodes[i][0].torch_node for i in range(self.env_n)],
+                self.planning_context, np.asarray(self.tree_reset_event),
+                np.asarray(self.rollout_depth), np.asarray(self.search_steps),
+                np.asarray(self.phase), self.enc_type, self.enc_f_type, self.stat_mask_type)
         states = {
             "tree_reps": tree_reps,
             "real_states": self.real_states,
@@ -916,6 +973,23 @@ cdef class cWrapper():
             assert hs is not None, "hs cannot be None"
             states["hs"] = hs
         return states
+
+    def set_planning_gamma(self, gamma):
+        """Revalue carried tree expressions, without resetting the search."""
+        cdef int i
+        if self.planning_context is None:
+            raise RuntimeError("set_planning_gamma requires planning_backend=torch")
+        self.planning_context.set_gamma(gamma)
+        self.discounting = float(self.planning_context.gamma.detach().cpu())
+        for i in range(int(self.root_nodes.size())):
+            node_sync_planning_gamma(self.root_nodes[i], self.discounting)
+            self.root_nodes_qmax[i] = self.root_nodes[i][0].max_q
+            self.root_nodes_qmax_[i] = self.root_nodes_qmax[i]
+
+    def planning_current_state(self):
+        if self.planning_context is None:
+            raise RuntimeError("planning_current_state requires torch backend")
+        return self.planning_context.cached_tree_reps()
 
     cdef update_per_state(self, model_net_out, idx):
         if idx is None or len(idx) == self.env_n:
@@ -1163,11 +1237,13 @@ cdef class cModelWrapper(cWrapper):
             # compute and update root node and current node
             for i in range(self.env_n):
                 root_node = node_new(pparent=NULL, action=pass_action[i, 0].item(), logit=0., num_actions=self.num_actions, 
-                    discounting=self.discounting, rec_t=self.rec_t, remember_path=True)   
+                    discounting=self.discounting, rec_t=self.rec_t, remember_path=True,
+                    planning_context=self.planning_context)
                 if i == 0: 
                     self.model_states_keys = [md for md in model_net_out.state.keys() if not md.startswith("per_sr")]
 
                 encoded = {"real_states": obs_py[i],
+                           "_planning_raw_value": _planning_raw_value(model_net, i),
                            "xs": model_net_out.xs[-1, i] if model_net_out.xs is not None else None,
                            "hs": model_net_out.hs[-1, i] if model_net_out.hs is not None else None,
                            "model_states": tuple(model_net_out.state[md][i] for md in self.model_states_keys),    
@@ -1697,6 +1773,7 @@ cdef class cModelWrapper(cWrapper):
                         node_descendant_expanded_count(root_node))
                 encoded = {
                     "real_states": obs_py[i],
+                    "_planning_raw_value": _planning_raw_value(model_net, i),
                     "xs": model_net_out_1.xs[-1, i] if self.return_x else None,
                     "hs": model_net_out_1.hs[-1, i] if self.return_h else None,
                     "model_states": tuple(
@@ -1707,7 +1784,7 @@ cdef class cModelWrapper(cWrapper):
                         pparent=NULL, action=model_action_np[i], logit=0.,
                         num_actions=self.num_actions,
                         discounting=self.discounting, rec_t=self.rec_t,
-                        remember_path=True)
+                        remember_path=True, planning_context=self.planning_context)
                     node_expand(
                         pnode=root_node, r=reward[i], v=vs_1[i],
                         t=self.total_step[i], done=False, logits=logits_1[i],
@@ -1806,6 +1883,7 @@ cdef class cModelWrapper(cWrapper):
             elif self.status[i] == 4:
                 encoded = {
                     "real_states": None,
+                    "_planning_raw_value": _planning_raw_value(model_net, l),
                     "xs": model_net_out_4.xs[-1, l] if self.return_x else None,
                     "hs": model_net_out_4.hs[-1, l] if self.return_h else None,
                     "model_states": tuple(

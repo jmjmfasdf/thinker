@@ -13,6 +13,7 @@ import ray
 import torch
 import torch.nn.functional as F
 from torch.optim import adam as _torch_adam
+from thinker.planning_meta_context import target as meta_target, MODE as META_MODE
 from torch.amp import grad_scaler as _torch_grad_scaler
 from torch.cuda.amp import GradScaler, autocast
 
@@ -1181,6 +1182,8 @@ def _dynamic_voc_one_step_target(rewards, discounts, vs, bootstrap_value):
             "VoC bootstrap shape must match a single time slice: "
             f"{tuple(bootstrap_value.shape)} != {tuple(rewards.shape[1:])}"
         )
+    if META_MODE.get() == "inner":
+        bootstrap_value = bootstrap_value.detach()
     next_vs = torch.cat((vs[1:], bootstrap_value.unsqueeze(0)), dim=0)
     return rewards + discounts * next_vs
 
@@ -1199,8 +1202,9 @@ def compute_dynamic_voc_target(
 ):
     """Combine recursive environment-return and computation-cost targets."""
 
-    think_cost = float(think_cost)
-    if not np.isfinite(think_cost) or think_cost < 0.0:
+    if META_MODE.get() != "inner":
+        think_cost = float(think_cost)
+    if not np.isfinite(float(think_cost.detach()) if torch.is_tensor(think_cost) else think_cost) or think_cost < 0.0:
         raise ValueError(
             f"VoC think_cost must be finite and non-negative, got {think_cost}"
         )
@@ -1212,9 +1216,9 @@ def compute_dynamic_voc_target(
     )
     net_target = task_target + think_cost * think_target
     return DynamicVoCTarget(
-        task=task_target.detach(),
-        think=think_target.detach(),
-        net=net_target.detach(),
+        task=meta_target(task_target),
+        think=meta_target(think_target),
+        net=meta_target(net_target),
     )
 
 
@@ -1414,7 +1418,7 @@ def compute_dynamic_voc_loss(
             "VoC control_action contains values outside "
             f"[{util.PROCEED}, {util.STOP}]: {bad_values.tolist()}"
         )
-    target = voc_target.to(device=voc_q.device, dtype=voc_q.dtype).detach()
+    target = meta_target(voc_target.to(device=voc_q.device, dtype=voc_q.dtype))
     _require_finite_tensor("VoC Q outputs", voc_q[valid])
     _require_finite_tensor("VoC target", target[valid])
     _require_finite_tensor(
@@ -1434,9 +1438,9 @@ def compute_dynamic_voc_loss(
         (target_entropy.continue_prob, target_entropy.stop_prob), dim=-1
     )
     if dueling_q:
-        state_value = voc_state_value.to(
+        state_value = meta_target(voc_state_value.to(
             device=voc_q.device, dtype=voc_q.dtype
-        ).detach()
+        ))
         _require_finite_tensor("VoC state value", state_value[valid])
         centered_advantage = voc_q - torch.sum(
             target_gate_probabilities.detach() * voc_q, dim=-1, keepdim=True
@@ -2254,7 +2258,7 @@ def compute_baseline_loss(
     target_baseline,
     mask=None,
 ):
-    target_baseline = target_baseline.detach()
+    target_baseline = meta_target(target_baseline)
     loss = (target_baseline - baseline)**2
     if mask is not None:
         loss = loss * mask
@@ -2351,6 +2355,10 @@ class SActorLearner:
         runtime_action_meanings=None,
     ):
         self.flags = flags
+        self.planning_meta = None
+        self._planning_meta_checkpoint = None
+        self._planning_inner_batch = None
+        self._planning_inner_rng = None
         self.time = flags.profile
         self._logger = util.logger()
         self.dynamic_search = util.dynamic_search_enabled(flags)
@@ -3395,6 +3403,19 @@ class SActorLearner:
                         stats["max_episode_return"] = collector["max_completed_episode_return"]
                 return original_log(stats, *args, **kwargs)
             self.plogger.log = log_with_voc_gradient
+
+        if getattr(self.flags, "planning_meta_enabled", False):
+            from thinker.planning_meta import PlanningMetaLearner
+            self.planning_meta = PlanningMetaLearner(self, self._planning_meta_checkpoint)
+            previous_log = self.plogger.log
+            def log_with_meta(stats, *args, **kwargs):
+                stats = dict(stats)
+                stats.update({"planning_meta/"+k: v for k, v in self.planning_meta.metrics.items()})
+                stats.update({"planning_meta/gamma": float(self.actor_net.planning_gamma),
+                              "planning_meta/think_cost": float(self.actor_net.planning_cost),
+                              "planning_meta/updates": self.planning_meta.updates})
+                return previous_log(stats, *args, **kwargs)
+            self.plogger.log = log_with_meta
 
     @staticmethod
     def _find_voc_head_modules(actor_net):
@@ -4918,6 +4939,10 @@ class SActorLearner:
             raise RuntimeError("behavioral loader returned no valid sequence batch")
         from thinker.numeric_diagnostics import ImitationNumericTrace
         with ImitationNumericTrace(self, batch) as numeric_trace:
+            if getattr(self, "planning_meta", None) is not None and self.planning_meta.due():
+                self._planning_inner_batch = batch
+                self._planning_inner_rng = (torch.get_rng_state(),
+                    torch.cuda.get_rng_state(self.device) if self.device.type == "cuda" else None)
             result = self.bc_runner.rollout(
                 batch,
                 tree_carry=bool(getattr(self.flags, "tree_carry", True)),
@@ -5071,6 +5096,10 @@ class SActorLearner:
                     self.actor_param_buffer.set_data.remote(
                         "actor_net", self._actor_weights_for_publication()
                     )
+                if getattr(self, "planning_meta", None) is not None:
+                    from thinker.planning_meta import sync_actor_planning
+                    self.actor_param_buffer.set_data.remote(
+                        "planning_parameters", sync_actor_planning(self.actor_net, self.flags))
                 if timing is not None:
                     timing.time("set weight")            
           
@@ -5113,6 +5142,16 @@ class SActorLearner:
     def consume_data(self, data, timing=None):
 
         train_actor_out, initial_actor_state = data
+        if getattr(self, "planning_meta", None) is not None:
+            version = getattr(train_actor_out, "planning_version", None)
+            if (version is None or version.dtype != torch.int64
+                    or version.shape != train_actor_out.done.shape
+                    or torch.any(version != version[0:1])):
+                raise ValueError("meta training requires a single planning version per actor unroll")
+            if torch.any(version < 0) or torch.any(version > self.planning_meta.updates):
+                raise ValueError("invalid behavior planning parameter version")
+            self.planning_meta.metrics["behavior_version_lag_max"] = float(
+                self.planning_meta.updates-version.min())
         T, B, *_ = train_actor_out.episode_return.shape
         if self.dynamic_search:
             # Row zero is the recurrent bootstrap/overlap row and is dropped
@@ -5581,6 +5620,9 @@ class SActorLearner:
                 save_actor_failure(self, data, exc)
             raise
         losses, train_actor_out = out
+        if getattr(self, "planning_meta", None) is not None:
+            self.planning_meta.prepare(data, self._planning_inner_batch, self._planning_inner_rng)
+            self._planning_inner_batch = self._planning_inner_rng = None
         total_loss = losses["total_loss"]
         losses.pop("_voc_gru_loss", None)  # consumed by selective GRU adapter
         voc_total_loss = losses.pop("_voc_total_loss", None)
@@ -5657,6 +5699,9 @@ class SActorLearner:
                 voc_gate_projection_result = (
                     self._project_voc_gate_head_to_ema_target()
                 )
+        if getattr(self, "planning_meta", None) is not None:
+            self.planning_meta.commit(step_result.optimizer_stepped,
+                voc_step_result is not None and voc_step_result.optimizer_stepped)
         if self.dynamic_voc_mode != "off":
             losses["voc_ema_gate_updated"] = torch.tensor(
                 float(
@@ -6089,7 +6134,7 @@ class SActorLearner:
             # crosses the synchronous real-step barrier.
             main_discount = (~done).float() * torch.where(
                 real_transition,
-                torch.full_like(rewards[:, :, 0], self.flags.discounting),
+                torch.ones_like(rewards[:, :, 0]) * getattr(self, "_meta_gamma", self.flags.discounting),
                 torch.ones_like(rewards[:, :, 0]),
             )
             stage_discount = (~(done | stage_end)).float()
@@ -6233,6 +6278,7 @@ class SActorLearner:
                 norm_mask=(
                     pg_masks[i] if self.dynamic_search else None
                 ),
+                differentiable_discount=(META_MODE.get() == "inner"),
             )
             v_trace_by_prefix[prefix] = v_trace
             self.norm_stats[i] = v_trace.norm_stat
@@ -6243,7 +6289,7 @@ class SActorLearner:
                 vs = v_trace.vs.detach()
 
             if not self.ppo_enable:
-                adv = v_trace.pg_advantages.detach()
+                adv = meta_target(v_trace.pg_advantages)
                 pg_loss = -adv * target_log_prob
             else:
                 log_is = target_log_prob - log_is_de
@@ -6298,6 +6344,8 @@ class SActorLearner:
         n = 0
         for prefix in self.rewards_ls[1:]:
             cost = getattr(self.flags, "%s_cost" % prefix)
+            if prefix == "think":
+                cost = getattr(self, "_meta_lambda", cost)
             n += 1
             if getattr(self.flags, "%s_cost_anneal" % prefix):
                 cost *= self.anneal_c
@@ -6374,10 +6422,11 @@ class SActorLearner:
                     norm_stat=None,
                     lamb=self.flags.v_trace_lamb,
                     norm_mask=policy_valid,
+                    differentiable_discount=(META_MODE.get() == "inner"),
                 )
             think_i = self.rewards_ls.index("think")
             task_i = self.rewards_ls.index("re")
-            effective_think_cost = float(self.flags.think_cost)
+            effective_think_cost = getattr(self, "_meta_lambda", float(self.flags.think_cost))
             if self.flags.think_cost_anneal:
                 effective_think_cost *= self.anneal_c
             voc_value_source = (
@@ -6385,6 +6434,8 @@ class SActorLearner:
                 if not self.ppo_enable
                 else train_actor_out.baseline
             )
+            if META_MODE.get() == "inner":
+                voc_value_source = voc_value_source.detach()
             voc_state_value = (
                 voc_value_source[:, :, task_i]
                 + effective_think_cost
@@ -8037,6 +8088,8 @@ class SActorLearner:
                 ),
                 "flags": vars(self.flags),
             }      
+        if getattr(self, "planning_meta", None) is not None:
+            d["planning_meta_state"] = self.planning_meta.state_dict()
         try:
             # Save regular checkpoint
             torch.save(d, self.ckp_path + ".tmp")
@@ -8063,6 +8116,9 @@ class SActorLearner:
 
     def load_checkpoint(self, ckp_path: str):
         train_checkpoint = torch.load(ckp_path, torch.device("cpu"), weights_only = False)
+        from thinker.planning_meta import restore_checkpoint_planning
+        restore_checkpoint_planning(getattr(self, "flags", None), train_checkpoint)
+        self._planning_meta_checkpoint = train_checkpoint.get("planning_meta_state")
         validate_planning_training_checkpoint(train_checkpoint, getattr(self, "flags", None))
         checkpoint_flags = train_checkpoint.get("flags", {})
         checkpoint_dynamic = bool(train_checkpoint.get(

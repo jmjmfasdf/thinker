@@ -48,6 +48,11 @@ def planning_training_contract(flags):
     if x_norm != "none":
         contract.update(version=3, actor_h_encoder_norm=norm,
                         actor_x_encoder_norm=x_norm)
+    if values.get("planning_meta_enabled", False):
+        from thinker.planning_meta import META_DEFAULTS, META_SCHEMA
+        contract.update(version=4, planning_meta_schema=META_SCHEMA,
+                        actor_h_encoder_norm=norm, actor_x_encoder_norm=x_norm,
+                        planning_meta={k: values.get(k, v) for k, v in META_DEFAULTS.items()})
     return contract
 
 

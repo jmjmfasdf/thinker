@@ -1972,6 +1972,8 @@ class DynamicImitationResult:
     burnin_executed: torch.Tensor
     augmented_steps: int
     noop_action_index: Optional[int] = None
+    meta_nll: Optional[torch.Tensor] = None
+    meta_search_log_probs: tuple = ()
 
     def detached_metrics(self) -> Dict[str, float]:
         count = max(self.count, 1)
@@ -2063,6 +2065,8 @@ class DynamicImitationRunner:
         self._planner = None
         self._behavior_env = None
         self._planner_key = None
+        self.planning_gamma = None
+        self.collect_meta = False
         self._validate_flags()
         self._validate_component_contracts()
         self.noop_action_index = noop_action_index
@@ -2346,6 +2350,12 @@ class DynamicImitationRunner:
         )
 
         planner = self._make_or_update_planner(batch, tree_carry)
+        if getattr(self.flags, "planning_backend", "cython") == "torch":
+            gamma = self.planning_gamma if self.planning_gamma is not None else self.flags.discounting
+            planner.set_planning_gamma(gamma)
+            if getattr(self.flags, "reward_clip", -1) > 0:
+                self.model_net.value_clip = self.flags.reward_clip / (1-float(torch.as_tensor(gamma).detach()))
+        meta_search_log_probs = []
         states, info = planner.reset(
             self.model_net,
             initial_action=_as_numpy(batch["initial_prev_action"], np.int64),
@@ -2466,6 +2476,13 @@ class DynamicImitationRunner:
                 else None
             )
             decision = adapter.prepare(actor_out, actions[:, cursor])
+            if self.collect_meta:
+                # REAL actions are human overrides and WAIT is a dummy. The
+                # exact executed SEARCH likelihood includes legal masks and
+                # epsilon; deterministic forced choices have zero gradient.
+                search = (env_out.phase[-1] == 0)
+                log_prob = actor_out.c_action_log_prob[-1]
+                meta_search_log_probs.append((cursor, torch.where(search, log_prob, torch.zeros_like(log_prob))))
             voc_diagnostics = (
                 _voc_trace_diagnostics(
                     actor_out,
@@ -2912,6 +2929,8 @@ class DynamicImitationRunner:
             burnin_executed=actions[:, 0].detach(),
             augmented_steps=augmented_steps,
             noop_action_index=self.noop_action_index,
+            meta_nll=per_stage_nll_all if self.collect_meta else None,
+            meta_search_log_probs=tuple(meta_search_log_probs),
         )
 
     def rollout(

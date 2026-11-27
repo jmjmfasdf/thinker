@@ -1,0 +1,90 @@
+# Fresh-run example: one subject x game, all four behavioral sessions.
+# From repository root (in the training environment):
+#   python thinker/train.py --config thinker/config/planning_meta.yaml
+# Override --icopro_data_path, --savedir and --xpid for the target machine.
+# For another game change BOTH name and icopro_game_id:
+#   Enduro-v5=0, Pong-v5=1, SpaceInvaders-v5=2.
+# Do not preload/resume a legacy checkpoint. This is a new opt-in protocol.
+# No scheduler job is submitted by this configuration.
+name: Pong-v5
+xpid: pong-sub001-planning-meta
+savedir: ./logs/thinker
+icopro_data_path: ./behavioral_data_block
+icopro_subjects: '1'
+icopro_game_id: 1
+icopro_train_sessions: '1,2,3,4'
+icopro_holdout_sessions: ''
+icopro_device: cuda
+icopro_batch_size: 16
+icopro_burn_in_steps: 16
+icopro_sampling_context: 16
+icopro_supervised_freq: 1
+batch_length: 8
+icopro_coef: 1.0
+icopro_action_diff_coef: 1.0
+icopro_margin_coef: 0.0
+icopro_pvp_coef: 0.0
+action_prior_weight: 0.0
+
+# Only outer human-action NLL updates these two meta parameters.
+# lambda below is think_cost, NOT v_trace_lamb.
+planning_meta_enabled: true
+planning_backend: torch
+discounting: 0.99
+think_cost: 0.0001
+think_cost_anneal: false
+planning_meta_every: 32
+planning_meta_warmup_steps: 100000
+planning_meta_batch_size: 4
+planning_meta_samples: 2
+planning_meta_lr: 0.001
+planning_meta_grad_clip: 1.0
+
+dynamic_search: true
+dynamic_factorized_control: true
+dynamic_search_state_reset: episode
+dynamic_voc_mode: control
+voc_critic_parameterization: common_contrast_v1
+voc_gru_connected: true
+voc_gru_gradient_scale: 10.0
+voc_gate_exact_projection: true
+voc_gate_epsilon_greedy_execution: false
+voc_gate_q_temperature: 0.01
+voc_gate_target_tau: 0.1
+voc_train_epsilon: 0.02
+voc_actor_policy_version_barrier: false
+min_search_steps: 1
+max_search_steps: 30
+max_depth: 30
+model_unroll_len: 30
+rec_t: 20
+tree_carry: true
+wrapper_type: 0
+sep_im_head: true
+actor_h_encoder_norm: layer
+actor_x_encoder_norm: layer
+model_sr_dynamics_norm: group
+
+# FP32 and ordinary Adam are required by the one-step functional update.
+float16: false
+model_float16: false
+actor_use_rms: false
+ppo_k: 1
+return_norm_type: -1
+critic_enc_type: 0
+sep_actor_critic: false
+envpool: true
+frame_stack_n: 4
+grayscale: false
+reward_clip: 1.0
+parallel: true
+parallel_actor: true
+train_actor: true
+train_model: true
+total_steps: 10000000
+schedule_total_steps: 100000000
+checkpoint_interval: 1000000
+base_seed: 701
+ray_cpu: 16
+ray_gpu: 2
+use_wandb: false

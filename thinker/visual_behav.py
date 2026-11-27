@@ -367,12 +367,33 @@ def _validate_loaded_checkpoint_payloads(
         )
     actor_flags = dict(embedded_flags["actor"])
     model_flags = dict(embedded_flags["model"])
+    learned_keys = set()
+    if actor_flags.get("planning_meta_enabled", False):
+        # These two fields are learned state, not immutable run configuration.
+        # The actor checkpoint (including its buffers) binds the replay value.
+        from thinker.planning_meta import restore_checkpoint_planning
+        from argparse import Namespace
+        try:
+            restore_checkpoint_planning(Namespace(**actor_flags), actor)
+        except (ValueError, KeyError) as exc:
+            raise VisualBehaviorError(f"invalid meta actor checkpoint: {exc}") from exc
+        snapshot = model.get("planning_parameters")
+        if not isinstance(snapshot, Mapping):
+            raise VisualBehaviorError("meta model checkpoint lacks planning parameters")
+        for key, state_key in (("discounting", "gamma"), ("think_cost", "think_cost")):
+            if model_flags.get(key) != snapshot.get(state_key):
+                raise VisualBehaviorError("meta model parameter snapshot disagrees with flags")
+            if actor_flags.get(key) != actor["planning_meta_state"][state_key]:
+                raise VisualBehaviorError("meta actor parameter snapshot disagrees with flags")
+        learned_keys = {"discounting", "think_cost"}
+        actor_flags = {k:v for k,v in actor_flags.items() if k not in learned_keys}
+        model_flags = {k:v for k,v in model_flags.items() if k not in learned_keys}
     if actor_flags != model_flags:
         raise VisualBehaviorError(
             "actor/model embedded flags differ outside their shared source-run identity"
         )
     if config_mapping is not None:
-        relocation_only = {"ckpdir", "savedir"}
+        relocation_only = {"ckpdir", "savedir"} | learned_keys
         frozen_config = {
             key: value
             for key, value in dict(config_mapping).items()
@@ -2464,6 +2485,9 @@ class _CaptureRuntime:
             label="actor checkpoint",
             torch=self.torch,
         )
+        if getattr(self.flags, "planning_meta_enabled", False) or "planning_meta_state" in self.actor_checkpoint:
+            from thinker.planning_meta import restore_checkpoint_planning
+            restore_checkpoint_planning(self.flags, self.actor_checkpoint)
         self.model_checkpoint = _torch_load_stable(
             config.checkpoint.model,
             label="model checkpoint",
@@ -2672,6 +2696,10 @@ class _CaptureRuntime:
             ),
             "voc_ema_head_available": self.voc_ema_head_state_dict is not None,
             "effective_think_cost": self.effective_think_cost,
+            **({"planning_meta": {"gamma": float(self.flags.discounting),
+                                   "think_cost": self.effective_think_cost,
+                                   "version": int(self.actor_checkpoint["planning_meta_state"]["updates"])}}
+               if getattr(self.flags, "planning_meta_enabled", False) else {}),
         }
 
     def _stream_episode(

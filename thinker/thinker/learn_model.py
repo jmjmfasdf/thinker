@@ -167,6 +167,7 @@ def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_p
 class SModelLearner:
     def __init__(self, name, ray_obj, model_param, flags, model_net=None, device=None):
         self.flags = flags
+        self.planning_param_buffer = (ray_obj or {}).get("actor_param_buffer")
         self.voc_model_input_seal_schema_version = (
             _resolve_model_input_seal_schema_version(flags)
         )
@@ -1022,6 +1023,16 @@ class SModelLearner:
         # model_buffer is only provided in non-parallel mode
         # which is required for updating the priorities of 
         # transition in the buffer
+        if getattr(self.flags, "planning_meta_enabled", False):
+            if self.planning_param_buffer is not None:
+                snapshot = ray.get(self.planning_param_buffer.get_data.remote("planning_parameters"))
+                if snapshot is not None:
+                    self.flags.discounting = float(snapshot["gamma"])
+                    self.flags.think_cost = float(snapshot["think_cost"])
+                    self.planning_parameter_version = int(snapshot["version"])
+            self.model_net.flags.discounting = self.flags.discounting
+            if self.flags.reward_clip > 0:
+                self.model_net.value_clip = self.flags.reward_clip/(1-self.flags.discounting)
         self.n += 1
         self._pending_model_observability = _empty_model_observability()
         self.update_real_step(data)
@@ -2019,6 +2030,10 @@ class SModelLearner:
             "flags": vars(self.flags),
         }
         d.update(self._gradient_clip_checkpoint_state())
+        if getattr(self.flags, "planning_meta_enabled", False):
+            d["planning_parameters"] = dict(gamma=self.flags.discounting,
+                think_cost=self.flags.think_cost,
+                version=getattr(self, "planning_parameter_version", 0))
         if getattr(self, "voc_model_input_seal_runtime", False):
             d.update(self._schema7_model_input_checkpoint_evidence(
                 require_terminal=terminal
@@ -2059,6 +2074,16 @@ class SModelLearner:
 
     def load_checkpoint(self, ckp_path: str):
         train_checkpoint = torch.load(ckp_path, torch.device("cpu"))
+        if getattr(self.flags, "planning_meta_enabled", False):
+            snapshot = train_checkpoint.get("planning_parameters")
+            if snapshot is None:
+                raise ValueError("meta model learner cannot resume a legacy checkpoint")
+            gamma, cost = float(snapshot["gamma"]), float(snapshot["think_cost"])
+            if not 0 < gamma < 1 or not np.isfinite(cost) or cost <= 0:
+                raise ValueError("invalid model planning parameters")
+            self.flags.discounting, self.flags.think_cost = gamma, cost
+            self.planning_parameter_version = int(snapshot["version"])
+            self.model_net.value_clip = self.flags.reward_clip/(1-gamma)
         self.step = train_checkpoint["step"]
         self.real_step = train_checkpoint["real_step"]
         self._initialize_gradient_clip_counters(train_checkpoint)

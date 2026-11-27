@@ -1366,6 +1366,9 @@ class ModelNet(BaseNet):
         v_enc_logits = vp_net_out.v_enc_logits
         policy = vp_net_out.policy
 
+        if getattr(self.flags, "planning_backend", "cython") == "torch":
+            self.planning_raw_values = vs[:, :, 0].detach().clone()
+
         if self.reward_clip > 0.:
             if rs is not None:
                 rs[:, :, 0] = torch.clamp(rs[:, :, 0], -self.reward_clip, +self.reward_clip)         

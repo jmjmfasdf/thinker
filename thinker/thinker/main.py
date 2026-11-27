@@ -728,6 +728,25 @@ class Env(gym.Wrapper):
         self.status_ptr = self.model_buffer.get_status.remote()
         return dict(status)
 
+    def apply_planning_parameters(self, gamma, cost, version):
+        if not getattr(self.flags, "planning_meta_enabled", False):
+            raise RuntimeError("planning parameter update requires meta mode")
+        self.flags.discounting, self.flags.think_cost = float(gamma), float(cost)
+        self.planning_parameter_version = int(version)
+        self.model_net.flags.discounting = float(gamma)
+        local_learner = self.__dict__.get("model_learner")
+        if not self.flags.parallel and local_learner is not None:
+            local_learner.flags.discounting, local_learner.flags.think_cost = float(gamma), float(cost)
+            local_learner.planning_parameter_version = int(version)
+        if self.flags.reward_clip > 0:
+            self.model_net.value_clip = self.flags.reward_clip/(1-float(gamma))
+        # PostWrapper directly contains cModelWrapper. Cython's __getattr__
+        # delegates Gym lookups to the underlying environment, bypassing its
+        # own methods, so address this core wrapper explicitly.
+        core = self.env.env
+        core.set_planning_gamma(gamma)
+        return core.planning_current_state()
+
     def reset(self, seed=None):
         if seed is None: seed = self.env_seed
         state = self.env.reset(self.model_net, seed=seed)

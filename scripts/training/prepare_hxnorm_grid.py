@@ -28,10 +28,13 @@ def main():
     shutil.copytree((previous/'source').resolve(), source)
     changed = ['thinker/thinker/actor_net.py', 'thinker/thinker/util.py',
                'thinker/thinker/planning_protocol.py', 'thinker/thinker/learn_actor.py',
+               'thinker/thinker/planning_meta.py', 'thinker/thinker/planning_meta_context.py',
+               'thinker/thinker/core/rnn.py', 'thinker/thinker/core/vtrace.py',
                'thinker/thinker/numeric_diagnostics.py', 'thinker/tests/test_actor_encoder_scale.py']
     for relative in changed:
         shutil.copy2(root/relative, source/relative)
     records = [line.split('  ', 1)[1] for line in (source/'SOURCE.sha256').read_text().splitlines()]
+    records = sorted(set(records) | set(changed))
     (source/'SOURCE.sha256').write_text(''.join(f'{sha(source/rel)}  {rel}\n' for rel in records))
     shutil.copy2(__file__, out/'prepare.py')
     (out/'slurm').mkdir()

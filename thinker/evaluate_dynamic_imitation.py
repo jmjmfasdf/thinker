@@ -4947,6 +4947,9 @@ def build_networks(
     from thinker import util
     from gymnasium import spaces
 
+    if getattr(flags, "planning_meta_enabled", False) or "planning_meta_state" in actor_checkpoint:
+        from thinker.planning_meta import restore_checkpoint_planning
+        restore_checkpoint_planning(flags, actor_checkpoint)
     obs = _array(first_batch["obs_seq"])
     actions = _array(first_batch["actions_seq"], np.int64)
     validate_holdout_batch(first_batch, spec)

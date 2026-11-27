@@ -45,6 +45,9 @@ TrainActorOut = namedtuple("TrainActorOut", _fields)
 VersionedTrainActorOut = namedtuple(
     "VersionedTrainActorOut", tuple(TrainActorOut._fields) + ("policy_version",)
 )
+PlanningTrainActorOut = namedtuple(
+    "PlanningTrainActorOut", tuple(TrainActorOut._fields) + ("planning_version",)
+)
 
 @ray.remote
 class SelfPlayWorker:
@@ -227,6 +230,9 @@ class SelfPlayWorker:
                 if terminal:
                     raise RuntimeError("initial actor policy bundle is terminal")
             n = 0
+            if getattr(self.flags, "planning_meta_enabled", False):
+                self.env.apply_planning_parameters(float(self.actor_net.planning_gamma),
+                    float(self.actor_net.planning_cost), int(self.actor_net.planning_version))
             state, info = self.env.reset()
             env_out = self.init_env_out(state, info)                        
             actor_state = self.actor_net.initial_state(
@@ -238,7 +244,17 @@ class SelfPlayWorker:
             start_time = timer()
 
             self.actor_net.train(False)
+            planning_version = -1
             while True:
+
+                if getattr(self.flags, "planning_meta_enabled", False):
+                    new_version = int(self.actor_net.planning_version)
+                    if planning_version != new_version:
+                        reps = self.env.apply_planning_parameters(
+                            float(self.actor_net.planning_gamma), float(self.actor_net.planning_cost), new_version)
+                        if reps is not None:
+                            env_out = env_out._replace(tree_reps=reps.unsqueeze(0))
+                        planning_version = new_version
           
                 if self.time: self.timing.reset()
                 # prepare train_actor_out data to be written
@@ -512,6 +528,8 @@ class SelfPlayWorker:
             if self.voc_actor_policy_barrier_runtime and not log_only
             else TrainActorOut
         )
+        if getattr(self.flags, "planning_meta_enabled", False) and not log_only:
+            tuple_type = PlanningTrainActorOut
         if t == 0:
             out = {}
             
@@ -519,7 +537,7 @@ class SelfPlayWorker:
                 out[field] = None
                 if log_only and field not in include_fields: continue
                 if field in ["id"]: continue                
-                if field == "policy_version":
+                if field in ("policy_version", "planning_version"):
                     if self.flags.parallel_actor:
                         out[field] = torch.empty(
                             (self.flags.actor_unroll_len + 1, self.env_n),
@@ -567,12 +585,14 @@ class SelfPlayWorker:
                         dtype=torch.int64,
                         device=self.device,
                     )
+                elif field == "planning_version":
+                    new_val = self.actor_net.planning_version.expand(self.env_n)
                 else:
                     new_val = getattr(
                         env_out if field in EnvOut._fields else actor_out, field
                     )
                 assert new_val is not None, f"{field} cannot be None"
-                if field != "policy_version":
+                if field not in ("policy_version", "planning_version"):
                     new_val = new_val[0]
                 if self.flags.parallel_actor:
                     if (not self.disable_thinker and field == "real_states"

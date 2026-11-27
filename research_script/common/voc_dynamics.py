@@ -78,7 +78,11 @@ class Readout:
         self.state = {k:v.detach().double().numpy() for k,v in checkpoint['actor_net_state_dict'].items()}
         self.ema = {k:v.detach().double().numpy() for k,v in checkpoint['voc_ema_gate_head_state_dict'].items()}
         self.phase = self.state['phase_embedding.weight']
-        self.clip = cfg['reward_clip']/(1-cfg['discounting']) if cfg['reward_clip'] > 0 else np.inf
+        gamma = checkpoint.get('planning_meta_state', {}).get('gamma', cfg['discounting'])
+        self.planning_values = (dict(discounting=gamma,
+            think_cost=checkpoint['planning_meta_state']['think_cost'])
+            if 'planning_meta_state' in checkpoint else {})
+        self.clip = cfg['reward_clip']/(1-gamma) if cfg['reward_clip'] > 0 else np.inf
 
     def linear(self, x, name):
         return x @ self.state[name+'.weight'].T + self.state[name+'.bias']
@@ -132,6 +136,7 @@ def extract(prepared, actor, cfg, chunk_size=256):
     """Stream features in bounded chunks; retain only numerical endpoint tables."""
     d = prepared['decisions'].copy(); unique(d, KEYS)
     metadata = prepared['metadata']; head = Readout(actor, cfg)
+    cfg = dict(cfg, **getattr(head, 'planning_values', {}))
     choices, transitions, decisions, endpoints, quality = [], [], [], [], []
     episodes = {e['metadata']['episode_id']:e for e in metadata['episodes']}
     for episode, part in d.groupby('episode', sort=False):

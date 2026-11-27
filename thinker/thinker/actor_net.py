@@ -6,6 +6,7 @@ from torch.nn import functional as F
 from torch.cuda.amp import autocast
 from thinker import util
 from thinker.core.rnn import ConvAttnLSTM, MaskedGRU
+from thinker.planning_meta_context import gate_features
 from thinker.core.module import MLP, OneDResBlock, tile_and_concat_tensors
 from thinker.model_net import RVTran
 from gymnasium import spaces
@@ -672,6 +673,10 @@ class ActorBaseNet(nn.Module):
     # base class for all actor network
     def __init__(self, obs_space, action_space, flags, tree_rep_meaning=False, record_state=False):
         super(ActorBaseNet, self).__init__()
+        if getattr(flags, "planning_meta_enabled", False):
+            self.register_buffer("planning_gamma", torch.tensor(float(flags.discounting)))
+            self.register_buffer("planning_cost", torch.tensor(float(flags.think_cost)))
+            self.register_buffer("planning_version", torch.tensor(0, dtype=torch.long))
         self.disable_thinker = flags.wrapper_type == 1
         self.dynamic_search = bool(getattr(flags, "dynamic_search", False)) and not self.disable_thinker
         self.dynamic_voc_mode = str(
@@ -1038,6 +1043,9 @@ class ActorBaseNet(nn.Module):
         # A strict Dynamic checkpoint is required to match every key and shape.
         if strict:
             self.load_state_dict(incoming, strict=True)
+            if hasattr(self, "planning_gamma"):
+                from thinker.planning_meta import sync_actor_planning
+                sync_actor_planning(self, self.flags)
             return
 
         # Dynamic search deliberately replaces the flattened tree MLP with a
@@ -1267,6 +1275,7 @@ class ActorNetSingle(ActorBaseNet):
                     input_size=in_size,
                     hidden_size=tree_hidden_size,
                     num_layers=tree_layer_n,
+                    higher_order=bool(getattr(flags, "planning_meta_enabled", False)),
                 )
                 self.tree_rep_out_size = tree_hidden_size
                 last_out_size += tree_hidden_size
@@ -1723,7 +1732,7 @@ class ActorNetSingle(ActorBaseNet):
                 raw_voc_gate_log_odds = None
                 if self.voc_control and self.voc_dedicated_gate:
                     raw_voc_gate_log_odds = self.voc_gate_head(
-                        final_out.detach()
+                        gate_features(final_out)
                     ).view(T, B)
                     if compute_loss:
                         # ``misc`` is learner-only and excluded from
@@ -2216,8 +2225,10 @@ class ActorNetSingle(ActorBaseNet):
             if self.enc_type == 0:
                 baseline = self.baseline(final_out)
                 if self.flags.reward_clip > 0:
+                    bound = (self.flags.reward_clip / (1-self.planning_gamma)
+                             if hasattr(self, "planning_gamma") else self.baseline_clamp)
                     baseline = torch.clamp(
-                        baseline, -self.baseline_clamp, +self.baseline_clamp
+                        baseline, -bound, +bound
                     )
                 baseline_enc = None
             elif self.enc_type == 1:

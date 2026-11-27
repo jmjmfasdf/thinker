@@ -16,13 +16,14 @@ class MaskedGRU(nn.Module):
     tuple convention as the other recurrent modules in this file.
     """
 
-    def __init__(self, input_size, hidden_size, num_layers=1):
+    def __init__(self, input_size, hidden_size, num_layers=1, higher_order=False):
         super().__init__()
         if num_layers < 1:
             raise ValueError("MaskedGRU requires at least one layer")
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.higher_order = higher_order
         self.cells = nn.ModuleList(
             [
                 nn.GRUCell(input_size if layer == 0 else hidden_size, hidden_size)
@@ -101,7 +102,18 @@ class MaskedGRU(nn.Module):
                 base_hidden = torch.where(
                     reset_t, torch.zeros_like(hidden[layer]), hidden[layer]
                 )
-                candidate = cell(layer_input, base_hidden)
+                if self.higher_order:
+                    # CUDA's fused GRUCell backward is not a portable mixed-
+                    # derivative interface. Keep the same r/z/n convention
+                    # with elementary operations for the opt-in meta protocol.
+                    ir, iz, inn = F.linear(layer_input, cell.weight_ih, cell.bias_ih).chunk(3, -1)
+                    hr, hz, hn = F.linear(base_hidden, cell.weight_hh, cell.bias_hh).chunk(3, -1)
+                    reset = torch.sigmoid(ir+hr)
+                    update = torch.sigmoid(iz+hz)
+                    candidate = torch.tanh(inn+reset*hn)
+                    candidate = candidate + update*(base_hidden-candidate)
+                else:
+                    candidate = cell(layer_input, base_hidden)
                 layer_hidden = torch.where(update_t, candidate, base_hidden)
                 next_hidden.append(layer_hidden)
                 layer_input = layer_hidden

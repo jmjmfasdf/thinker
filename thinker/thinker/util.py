@@ -10562,6 +10562,9 @@ def process_flags(flags):
 
     assert flags.wrapper_type != 5, "wrapper-type 5 (meta-learning) not yet supported"
 
+    from thinker.planning_meta import configure_meta
+    configure_meta(flags)
+
     return flags
 
 
@@ -10725,6 +10728,12 @@ def add_parse(filename, parser=None, prefix=''):
         option = f"--{prefix}{name}"
         if option not in parser._option_string_actions:
             parser.add_argument(option, type=kind, default=None)
+    from thinker.planning_meta import META_DEFAULTS
+    for name, value in META_DEFAULTS.items():
+        option = f"--{prefix}{name}"
+        kind = (lambda x: str(x).lower() == "true") if isinstance(value, bool) else type(value)
+        if option not in parser._option_string_actions:
+            parser.add_argument(option, type=kind, default=None)
     return parser
 
 def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
@@ -10772,6 +10781,11 @@ def create_flags(filename, save_flags=True, post_fn=None, **kwargs):
     for name in ("icopro_burn_in_steps", "icopro_sampling_context",
                  "voc_gru_gradient_scale", "voc_critic_parameterization", "actor_h_encoder_norm",
                  "actor_x_encoder_norm"):
+        if kwargs.get(name) is not None:
+            config[name] = kwargs[name]
+            explicit_config_keys.add(name)
+    from thinker.planning_meta import META_DEFAULTS
+    for name in META_DEFAULTS:
         if kwargs.get(name) is not None:
             config[name] = kwargs[name]
             explicit_config_keys.add(name)
