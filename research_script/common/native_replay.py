@@ -502,7 +502,8 @@ def value_summary(v):
 
 
 def timeline_segments(d):
-    bad=d.episode.ne(d.episode.shift())|d.decision.diff().ne(1)|d.time.diff().le(0)|d.time.diff().gt(.25)
+    from common.sampling import sequence_index
+    bad=d.episode.ne(d.episode.shift())|sequence_index(d).diff().ne(1)|d.time.diff().le(0)|d.time.diff().gt(.25)
     d=d.copy();d['segment']=bad.cumsum();return d
 
 

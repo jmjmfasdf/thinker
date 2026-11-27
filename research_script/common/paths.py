@@ -16,5 +16,14 @@ def output(number, root=OUTPUTS):
         raise ValueError(f"Unknown theme: {number}")
     return Path(root) / number
 
+def output_base(args):
+    """Both sample modes replace the same public numbered result.
+
+    Publication policy is separate from sampling.py so path-only changes do not
+    invalidate the independently verified 00 extraction of both sample views.
+    """
+    return Path(args.outputs_root)
+
+
 def tag(subject, game):
     return f"sub{subject:03d}_game{game}"

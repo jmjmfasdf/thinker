@@ -2809,6 +2809,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         target_size=tuple(int(value) for value in obs_space.shape[-2:]),
         grayscale=bool(flags.grayscale),
         normalize=unit_float_contract,
+        decision_hz=None,
+        max_time_gap=2.5 / 15.0,
         seed=args.seed,
     )
     batch = loader.get_sequence_batch(
@@ -3466,7 +3468,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--subjects", type=_parse_ids, default=(1,))
     parser.add_argument("--sessions", type=_parse_ids, default=(1, 2, 3))
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--scored-length", type=int, default=4)
+    parser.add_argument("--scored-length", type=int, default=8)
     parser.add_argument("--device", type=torch.device, default=torch.device("cuda"))
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--config", type=Path, default=None)

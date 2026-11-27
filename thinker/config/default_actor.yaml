@@ -142,7 +142,7 @@ icopro_game_id: 0 # behavioral archive game entity; action count comes from the 
 icopro_train_sessions: '1,2,3' # explicit training-session filter
 icopro_holdout_sessions: '4'
 icopro_batch_size: 32
-batch_length: 4 # number of scored real decisions after one unscored burn-in
+batch_length: 8 # scored original-frame decisions after the configured unscored burn-in
 icopro_margin: 1.0 # DQfD margin size
 icopro_margin_coef: 1.0
 icopro_action_diff_coef: 1.0 # normalized cross-entropy coefficient

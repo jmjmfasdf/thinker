@@ -173,7 +173,7 @@ def _bouts(a, t, boundary, meta, representation):
     return d
 
 
-def _source(task):
+def _source(task, sample_mode='all'):
     with np.load(task['path'], allow_pickle=False) as z:
         action = z['action']
         t = z['time'].reshape(-1).astype(float)
@@ -212,6 +212,27 @@ def _source(task):
         audit.update(nonvocab_frames=nonvocab, mapped_mismatch_frames=0, bk2_input_sha256=digest)
     elif action.shape[1] != len(ATARI[task['game']]):
         raise ValueError(f'Atari action vocabulary mismatch: {task["path"]}')
+    original_n = n
+    source_frames = np.arange(n)
+    if sample_mode == '15hz':
+        from common.sampling import causal_grid
+        segments = np.cumsum(boundary)
+        selected = []
+        for segment in np.unique(segments):
+            ids = np.flatnonzero(segments == segment)
+            _, rows = causal_grid(t[ids])
+            selected.extend(ids[np.unique(rows)])
+        source_frames = np.asarray(selected, int)
+        representations = [(rep, a[source_frames]) for rep,a in representations]
+        t, canonical = t[source_frames], canonical[source_frames]
+        boundary = np.r_[True, np.diff(segments[source_frames]) != 0]
+        n = len(t)
+        elapsed = np.r_[np.where(~boundary[1:], np.diff(t), 0.), 0.]
+        audit.update(n_frames=n, n_segments=int(boundary.sum()), observed_seconds=float(elapsed.sum()),
+            switches_canonical=int(((canonical[1:] != canonical[:-1]) & ~boundary[1:]).sum()))
+    elif sample_mode != 'all':
+        raise ValueError('sample_mode must be all or 15hz')
+    audit.update(sample_mode=sample_mode, n_original_frames=original_n)
     exact = representations[0][1]
     audit['switches_exact'] = int(((exact[1:] != exact[:-1]) & ~boundary[1:]).sum())
     bouts = pd.concat([_bouts(a, t, boundary, meta, rep) for rep, a in representations], ignore_index=True)
@@ -223,7 +244,7 @@ def _source(task):
     age[boundary] = np.nan
     previous = np.r_[-1, exact[:-1]]
     previous[boundary] = -1
-    observations = pd.DataFrame(dict(frame=np.arange(n), time_seconds=t, human_action=exact,
+    observations = pd.DataFrame(dict(frame=source_frames, time_seconds=t, human_action=exact,
         incumbent_action=previous, canonical_action=canonical, boundary=boundary,
         segment=np.cumsum(boundary), age_seconds=age, elapsed_seconds=elapsed,
         unknown_bout_onset=boundary[before]))
@@ -418,13 +439,13 @@ def _summary_tables(b, obs, audit, game):
     return result
 
 
-def analyze(subject, game, behavior_root=None):
+def analyze(subject, game, behavior_root=None, sample_mode='all'):
     """Return reproducible human-only tables plus QA without writing artifacts."""
     game, subject = normalize_game(game), _subject(subject)
     sources=discover(subject,game,behavior_root)
     bout_frames,observation_frames,audits=[],[],[]
     for task in sources:
-        bouts,observations,audit=_source(task)
+        bouts,observations,audit=_source(task,sample_mode=sample_mode)
         bout_frames.append(bouts);observation_frames.append(observations);audits.append(audit)
     b=pd.concat(bout_frames,ignore_index=True)
     obs=pd.concat(observation_frames,ignore_index=True)
@@ -442,8 +463,9 @@ def analyze(subject, game, behavior_root=None):
         frame['subject']=subject;frame['game']=game
     qa=dict(status='completed',subject=subject,game=game,n_files=len(sources),n_observations=len(obs),
         uses_replay_sampling=False,model_dependencies=False,image_arrays_read=False,
-        n_original_observations=len(obs),duplicated_checkpoint_copies=0,switch_checks=checks,
-        cohort='all original observations; exact actions primary; complete-bout distributions exclude both boundary ends',
+        n_original_observations=int(audit.n_original_frames.sum()),duplicated_checkpoint_copies=0,switch_checks=checks,
+        sample_mode=sample_mode,
+        cohort=f'{sample_mode} observations; exact actions primary; complete-bout distributions exclude both boundary ends',
         boundaries='file, is_first, previous terminal, nonincreasing clock, gap > max(0.25 s, 10 median dt)',
         duration_prediction='leave-session-out; predictor scaling fit on training sessions; probabilities per native observation',
         survival='COSYNE boundary-start-inclusive panel preserved; observed-onset sensitivity also shown; right-censoring respected',
@@ -460,6 +482,32 @@ def _subject_curves(d,x,y,keys=()):
 
 
 def render(root,tables,title):
+    """Render title-free paper figures without changing other analyses' style.
+
+    ``title`` remains accepted for the shared CLI, but is deliberately not drawn.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    with matplotlib.rc_context({
+        'font.size': 22,
+        'axes.labelsize': 26,
+        'xtick.labelsize': 22,
+        'ytick.labelsize': 22,
+        'legend.fontsize': 22,
+        'legend.title_fontsize': 22,
+        'axes.labelpad': 12,
+        'axes.linewidth': 1.2,
+        'lines.linewidth': 2.2,
+        'lines.markersize': 7,
+        'xtick.major.size': 6,
+        'ytick.major.size': 6,
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+    }):
+        return _render_figures(root,tables)
+
+
+def _render_figures(root,tables):
     """Render participant or group panels using stored tables only; no source IO."""
     import matplotlib
     matplotlib.use('Agg')
@@ -467,10 +515,9 @@ def render(root,tables,title):
     root=Path(root);out=root/'figures';out.mkdir(parents=True,exist_ok=True)
     artifacts=[]
     def save(fig,name):
-        fig.suptitle(title,fontsize=13)
-        fig.tight_layout()
+        fig.tight_layout(pad=1.2,w_pad=2.,h_pad=2.)
         for suffix in ('png','pdf'):
-            path=out/f'{name}.{suffix}';fig.savefig(path,dpi=180,bbox_inches='tight');artifacts.append(str(path))
+            path=out/f'{name}.{suffix}';fig.savefig(path,dpi=300,bbox_inches='tight');artifacts.append(str(path))
         plt.close(fig)
     def curve(ax,d,x,y,label,**kwargs):
         if not len(d):return
@@ -490,24 +537,24 @@ def render(root,tables,title):
         values=d.set_index(['subject','action'])[['observation_fraction','time_fraction']].reindex(index,fill_value=0).reset_index()
         labels=d.drop_duplicates('action').set_index('action').action_name
         z=values.groupby('action')[['observation_fraction','time_fraction']].mean()
-        fig,ax=plt.subplots(figsize=(max(7,len(z)*.65),4));x=np.arange(len(z));w=.38
+        fig,ax=plt.subplots(figsize=(max(10,len(z)*.9),6.5));x=np.arange(len(z));w=.38
         ax.bar(x-w/2,z.observation_fraction,w,label='Recorded observations');ax.bar(x+w/2,z.time_fraction,w,label='Recorded time')
-        ax.set(xticks=x,xticklabels=[labels.loc[a] for a in z.index],ylabel='Fraction (equal participant weight)')
+        ax.set(xticks=x,xticklabels=[labels.loc[a] for a in z.index],ylabel='Fraction\n(equal participant weight)')
         ax.tick_params(axis='x',rotation=45);ax.legend(frameon=False);save(fig,'action_distribution')
     d=tables.get('duration_density',pd.DataFrame())
     if len(d):
         exact=d.loc[d.representation.eq('exact')]
-        fig,ax=plt.subplots(figsize=(7,4))
+        fig,ax=plt.subplots(figsize=(10,6.5))
         for pop,label,c in [('all','All exact actions','#566573'),('noop','NOOP','#2e86c1'),('active','Active inputs','#d98d25')]:
             curve(ax,exact[exact.population.eq(pop)],'seconds','smoothed_density',label,color=c)
         style_time(ax);ax.legend(frameon=False);save(fig,'bout_duration_noop_active')
         actions=sorted(exact.loc[exact.population.str.startswith('action_'),'population'].unique(),key=lambda v:int(v.split('_')[1]))
         if actions:
-            fig,axes=plt.subplots((len(actions)+2)//3,3,figsize=(12,2.7*((len(actions)+2)//3)),squeeze=False)
+            fig,axes=plt.subplots((len(actions)+2)//3,3,figsize=(21,6*((len(actions)+2)//3)),squeeze=False)
             names=tables['action_summary'].loc[lambda x:x.representation.eq('exact')].drop_duplicates('action').set_index('action').action_name
             for pop,ax in zip(actions,axes.flat):
-                r=exact[exact.population.eq(pop)];curve(ax,r,'seconds','density','Histogram',color='#a5b3bd');curve(ax,r,'seconds','smoothed_density','Smoothed',color='#176b98')
-                style_time(ax);ax.set_title(names.get(int(pop.split('_')[1]),pop),fontsize=10)
+                r=exact[exact.population.eq(pop)];curve(ax,r,'seconds','density','_nolegend_',color='#a5b3bd');curve(ax,r,'seconds','smoothed_density',names.get(int(pop.split('_')[1]),pop),color='#176b98')
+                style_time(ax);ax.legend(frameon=False)
             for ax in axes.flat[len(actions):]:ax.axis('off')
             save(fig,'duration_by_action')
     d=tables.get('transitions',pd.DataFrame())
@@ -521,15 +568,15 @@ def render(root,tables,title):
                 p=d.loc[d.source.eq(a)&d.target.eq(b)].set_index('subject').conditional_probability
                 mat[i,j]=p.reindex(eligible,fill_value=0).mean()
         name_map=dict(zip(d.source,d.source_name));name_map.update(zip(d.target,d.target_name))
-        fig,ax=plt.subplots(figsize=(max(6,len(order)*.5),max(5,len(order)*.45)))
+        fig,ax=plt.subplots(figsize=(max(10,len(order)*.9),max(8.5,len(order)*.8)))
         im=ax.imshow(mat,vmin=0,vmax=1,cmap='Blues');names=[name_map[a] for a in order]
         ax.set(xticks=range(len(order)),xticklabels=names,yticks=range(len(order)),yticklabels=names,xlabel='Next exact action',ylabel='Current exact action')
         ax.tick_params(axis='x',rotation=70);fig.colorbar(im,ax=ax,label='P(next action | switch)');save(fig,'switch_destinations')
     d=tables.get('boundary_sensitivity',pd.DataFrame())
     if len(d):
-        fig,ax=plt.subplots(figsize=(7,4))
+        fig,ax=plt.subplots(figsize=(12,8))
         for (rep,cohort),r in d.groupby(['representation','cohort']):curve(ax,r,'seconds','density',f'{rep}: {cohort.replace("_"," ")}')
-        style_time(ax);ax.legend(frameon=False,fontsize=8);save(fig,'boundary_vocabulary_sensitivity')
+        style_time(ax);ax.legend(frameon=False,loc='lower left',bbox_to_anchor=(0,1.02));save(fig,'boundary_vocabulary_sensitivity')
     d=tables.get('native_sample_counts',pd.DataFrame())
     if len(d):
         d=d.loc[d.representation.eq('exact')&d.action.eq(0)].copy()
@@ -538,45 +585,49 @@ def render(root,tables,title):
             for sub,r in d.groupby('subject'):
                 counts=np.histogram(r.n_samples,bins=edges,weights=r['count'])[0]
                 records.append(counts/counts.sum() if counts.sum() else counts)
-            fig,ax=plt.subplots(figsize=(7,4));ax.stairs(np.mean(records,axis=0),edges,fill=True,alpha=.6)
-            ax.set(xscale='log',xlabel='Native recorded samples in NOOP bout',ylabel='Bout fraction (equal participant weight)')
+            fig,ax=plt.subplots(figsize=(10,6.5));ax.stairs(np.mean(records,axis=0),edges,fill=True,alpha=.6)
+            ax.set(xscale='log',xlabel='Native recorded samples in NOOP bout',ylabel='Bout fraction\n(equal participant weight)')
             save(fig,'noop_native_samples')
     d=tables.get('persistence_curves',pd.DataFrame())
     if len(d):
         for cohort,suffix in [('include_boundary_starts',''),('observed_onset','_observed_onset')]:
             part=d.loc[d.cohort.eq(cohort)]
-            fig,axes=plt.subplots(1,2,figsize=(10,4))
+            fig,axes=plt.subplots(1,2,figsize=(17,6.5))
             for active,label,c in [(0,'No input','#2e86c1'),(1,'Active input','#d98d25')]:curve(axes[0],part[part.active.eq(active)],'seconds','survival',label,color=c)
             for column,label,c in [('to_noop','Release input','#2e86c1'),('to_active','Different active action','#d98d25')]:curve(axes[1],part[part.active.eq(1)],'seconds',column,label,color=c)
             for ax in axes:ax.set(xlabel='Elapsed bout duration (s)',ylim=(0,1));ax.legend(frameon=False)
-            axes[0].set(ylabel='Survival probability',title='Action persistence' + (' (observed onset)' if suffix else ' (including boundary starts)'))
-            axes[1].set(ylabel='Cumulative incidence',title='Competing active-bout exits')
+            axes[0].set(ylabel='Survival probability')
+            axes[1].set(ylabel='Cumulative incidence')
             save(fig,'cosyne_fig2A_action_persistence'+suffix)
     d=tables.get('duration_prediction',pd.DataFrame())
     if len(d):
-        fig,axes=plt.subplots(1,3,figsize=(12,4))
+        fig,axes=plt.subplots(1,3,figsize=(21,7))
+        labels={'overall':'Any action switch','noop_to_active':'NOOP → active','active_to_noop':'Active → NOOP'}
         for ax,pop in zip(axes,['overall','noop_to_active','active_to_noop']):
             z=d[d.population.eq(pop)].groupby(['subject','model']).log_score.mean().unstack('model')
             columns=['previous_action','action_and_duration']
             if all(c in z for c in columns):
-                for _,r in z.iterrows():ax.plot([0,1],r[columns],'-o',alpha=.6)
+                for i,(_,r) in enumerate(z.iterrows()):ax.plot([0,1],r[columns],'-o',alpha=.6,color='#5c7890',label=labels[pop] if i==0 else '_nolegend_')
                 ax.plot([0,1],z[columns].mean(),'k_',ms=14)
-            ax.set(xticks=[0,1],xticklabels=['Previous action','+ Duration'],ylabel='Held-out log score (nat / observation)',title=pop.replace('_',' '))
+                ax.legend(frameon=False,loc='lower left',bbox_to_anchor=(0,1.02))
+            ax.set(xticks=[0,1],xticklabels=['Previous\naction','+ Duration'],ylabel='Held-out log score\n(nat / observation)')
         save(fig,'cosyne_fig2B_duration_prediction')
     d=tables.get('duration_curves',pd.DataFrame())
     if len(d):
         d=d.copy();d.loc[d.n.lt(20),'probability']=np.nan
         d['seconds']=np.sqrt(d.lower_seconds.clip(lower=.0025)*d.upper_seconds.replace(np.inf,20))
-        fig,axes=plt.subplots(1,3,figsize=(12,4))
+        fig,axes=plt.subplots(1,3,figsize=(21,7))
+        labels={'noop_to_active':'NOOP → active','active_to_other':'Active → any other action','active_to_noop':'Active → NOOP'}
         for ax,pop in zip(axes,['noop_to_active','active_to_other','active_to_noop']):
-            curve(ax,d[d.population.eq(pop)],'seconds','probability','Switch probability',color='#176b98')
-            ax.set(xscale='log',xlabel='Elapsed action duration (s)',ylabel='Probability per recorded observation',title=pop.replace('_',' '))
+            curve(ax,d[d.population.eq(pop)],'seconds','probability',labels[pop],color='#176b98')
+            ax.set(xscale='log',xlabel='Elapsed action duration (s)',ylabel='Probability per\nrecorded observation')
+            ax.legend(frameon=False,loc='lower left',bbox_to_anchor=(0,1.02))
         save(fig,'cosyne_fig2C_duration_switch_probability')
     d=tables.get('return_patterns',pd.DataFrame())
     if len(d):
         z=d.groupby('action_name')[['return_fraction','conditional_reference']].mean()
-        fig,ax=plt.subplots(figsize=(max(7,len(z)*.5),4));x=np.arange(len(z));w=.38
+        fig,ax=plt.subplots(figsize=(max(10,len(z)*.9),7));x=np.arange(len(z));w=.38
         ax.bar(x-w/2,z.return_fraction,w,label='Observed A → B → A');ax.bar(x+w/2,z.conditional_reference,w,label='Conditional independence reference')
-        ax.set(xticks=x,xticklabels=z.index,ylabel='Return fraction',xlabel='Middle action B');ax.tick_params(axis='x',rotation=50);ax.legend(frameon=False)
+        ax.set(xticks=x,xticklabels=z.index,ylabel='Return fraction',xlabel='Middle action B');ax.tick_params(axis='x',rotation=50);ax.legend(frameon=False,loc='lower left',bbox_to_anchor=(0,1.02))
         save(fig,'descriptive_return_patterns')
     return artifacts

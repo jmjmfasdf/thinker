@@ -323,6 +323,8 @@ def test_coordinator_indexes_only_selected_sources(tmp_path, monkeypatch):
 
     class DescriptorSource:
         def __init__(self, loader, **kwargs):
+            assert loader.decision_hz is None
+            assert all(np.all(np.diff(e.observation_source_index) == 1) for e in loader._episodes)
             assert [record.path for record in loader.file_records] == [
                 selected_path.resolve()
             ]
@@ -903,11 +905,15 @@ def test_root_manifest_proves_exact_episode_set_then_publishes_completion(tmp_pa
         "observation_dtype": "uint8",
         "source_logical_observation_count": 9,
         "source_logical_edge_count": 8,
-        "replay_observation_count": 8,
-        "replay_edge_count": 7,
+        "replay_sampling": "original-order-v1",
+        "decision_hz": None,
+        "initial_transition_retained": True,
+        "unscored_initial_edges": 2,
+        "replay_observation_count": 9,
+        "replay_edge_count": 8,
         "scored_edge_count": 6,
-        "logical_observation_count": 8,
-        "logical_action_count": 7,
+        "logical_observation_count": 9,
+        "logical_action_count": 8,
     }
     validation = {
         "event_count": 7,
@@ -1098,6 +1104,8 @@ def test_episode_metadata_binds_backend_and_canonical_seed(tmp_path):
     runtime.effective_think_cost = 0.0
     descriptor = SimpleNamespace(
         logical_observation_count=9,
+        observation_source_index=np.arange(9),
+        decision_times=np.arange(9)/60,
         edge_count=8,
         scored_edge_count=6,
         local_episode_index=2,
@@ -1108,6 +1116,9 @@ def test_episode_metadata_binds_backend_and_canonical_seed(tmp_path):
     )
     seed = recorder.episode_seed(runtime.config.base_seed, source, 2)
     metadata = runtime._episode_metadata(source, descriptor, seed, "episode")
+    assert metadata['replay_edge_count'] == descriptor.edge_count
+    assert metadata['source_first_frame'] == 0
+    assert metadata['initial_transition_retained']
     assert metadata["episode_seed"] == seed
     assert metadata["seed_protocol"] == recorder.SEED_PROTOCOL
     assert metadata["determinism_backend_fingerprint"] == (

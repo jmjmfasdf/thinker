@@ -19,6 +19,16 @@ from test_dynamic_imitation_actor import _batch, _FrozenFakeModel, _StopThenProp
 from thinker.dynamic_imitation import DynamicImitationRunner
 
 
+def test_fresh_training_defaults_to_eight_scored_steps_and_keeps_burnin_16():
+    args = ['--dynamic_search', 'true', '--icopro_burn_in_steps', '16',
+            '--icopro_sampling_context', '16']
+    flags = util.create_setting(args=args, save_flags=False)
+    assert flags.batch_length == 8
+    assert flags.icopro_burn_in_steps == flags.icopro_sampling_context == 16
+    legacy = util.create_setting(args=args + ['--batch_length', '4'], save_flags=False)
+    assert legacy.batch_length == 4
+
+
 def _loss(raw, target=None, mode="common_contrast_v1"):
     n = raw.shape[1]
     policy = torch.tensor([.009, .001, .99]).log().expand(1, n, 3)
@@ -76,39 +86,41 @@ def test_epsilon_changes_support_not_q_temperature():
     assert evaluation.continue_prob[0, 1] > .999
 
 
-def test_burnin_conditions_score_identical_targets_and_preserve_boundaries(tmp_path):
+@pytest.mark.parametrize('scored_length', [4, 8])
+def test_burnin_conditions_score_identical_targets_and_preserve_boundaries(tmp_path, scored_length):
     _archive(_modern_path(tmp_path, 1), length=100, times=False,
              episode_starts=(0, 50), episode_ends=(49, 99))
     batches, signatures = [], []
     for burn in (1, 8, 16):
         loader = FrameStackedBehavioralDataLoader(tmp_path, num_actions=9,
-            sessions=(1,), scored_length=4, burn_in_steps=burn, sampling_context=16,
+            sessions=(1,), scored_length=scored_length, burn_in_steps=burn, sampling_context=16,
             frame_stack_n=1, target_size=(6, 7), seed=123)
         batch = loader.get_sequence_batch(16)
-        assert validate_behavior_batch(batch) == (16, burn+4)
-        assert batch['score_mask'].sum() == 4
+        assert validate_behavior_batch(batch) == (16, burn+scored_length)
+        assert batch['score_mask'].sum() == scored_length
         assert not np.any(batch['done_seq'][:, :-1])
         assert not np.any(batch['truncated_seq'][:, :-1])
         batches.append(batch)
         signatures.append(behavioral_data_signature(loader, tmp_path))
     for batch in batches[1:]:
         for name in ('actions_seq', 'rewards_seq'):
-            np.testing.assert_array_equal(batch[name][:, -4:], batches[0][name][:, -4:])
-        np.testing.assert_array_equal(batch['observation_source_index'][:, -5:],
-                                      batches[0]['observation_source_index'][:, -5:])
-        np.testing.assert_array_equal(batch['obs_seq'][:, -5:], batches[0]['obs_seq'][:, -5:])
+            np.testing.assert_array_equal(batch[name][:, -scored_length:], batches[0][name][:, -scored_length:])
+        np.testing.assert_array_equal(batch['observation_source_index'][:, -(scored_length+1):],
+                                      batches[0]['observation_source_index'][:, -(scored_length+1):])
+        np.testing.assert_array_equal(batch['obs_seq'][:, -(scored_length+1):], batches[0]['obs_seq'][:, -(scored_length+1):])
     assert len(set(signatures)) == 3
 
 
 @pytest.mark.parametrize('burn', [1, 8, 16])
-def test_burnin_coverage_and_validation(tmp_path, burn):
+@pytest.mark.parametrize('scored_length', [4, 8])
+def test_burnin_coverage_and_validation(tmp_path, burn, scored_length):
     _archive(_modern_path(tmp_path, 1), length=50, times=False)
     loader = FrameStackedBehavioralDataLoader(tmp_path, num_actions=9,
-        sessions=(1,), burn_in_steps=burn, sampling_context=16, target_size=(6, 7))
+        sessions=(1,), scored_length=scored_length, burn_in_steps=burn, sampling_context=16, target_size=(6, 7))
     batches = list(loader.iter_batches(batch_size=2))
-    targets = [tuple(row) for b in batches for row in b['observation_source_index'][:, -5:-1]]
+    targets = [tuple(row) for b in batches for row in b['observation_source_index'][:, -(scored_length+1):-1]]
     coverage = loader.evaluation_coverage()
-    assert len(targets)*4 == coverage['unique_scored_targets']
+    assert len(targets)*scored_length == coverage['unique_scored_targets']
     batch = loader.get_sequence_batch(1)
     batch['score_mask'][-2] = False
     with pytest.raises(ValueError, match='after burn-in'):
@@ -116,19 +128,20 @@ def test_burnin_coverage_and_validation(tmp_path, burn):
 
 
 @pytest.mark.parametrize('burn', [8, 16])
-def test_full_planner_replay_processes_warmup_and_scores_four_actions(burn):
+@pytest.mark.parametrize('scored_length', [4, 8])
+def test_full_planner_replay_processes_warmup_and_scores_actions(burn, scored_length):
     flags = util.create_setting(args=["--dynamic_search", "true", "--max_search_steps", "2",
         "--max_depth", "2", "--see_h", "false", "--see_x", "false",
         "--parallel", "false", "--float16", "false"], save_flags=False)
-    batch = _batch(scored_length=burn+3)
-    batch['score_mask'] = np.array([False]*burn + [True]*4)
-    batch['actions_seq'][:] = np.arange(burn+4) % 5
+    batch = _batch(scored_length=burn+scored_length-1)
+    batch['score_mask'] = np.array([False]*burn + [True]*scored_length)
+    batch['actions_seq'][:] = np.arange(burn+scored_length) % 5
     actor = _StopThenProposeActor(num_actions=5)
     runner = DynamicImitationRunner(actor, _FrozenFakeModel(num_actions=5), flags, device='cpu')
     try:
         result = runner.rollout(batch, tree_carry=True, training=True)
-        assert result.count == 8
-        assert result.augmented_steps == 2*(burn+4)
+        assert result.count == 2*scored_length
+        assert result.augmented_steps == 2*(burn+scored_length)
         result.loss.backward()
         assert torch.isfinite(actor.real_logits.grad).all()
     finally:

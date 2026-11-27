@@ -141,6 +141,12 @@ def analyze(args, subject, game, prepared, workdir):
     d['game'] = d.game.map(_game)
     game = _game(game)
     d = d.loc[d.game.eq(game)].copy().reset_index(drop=True)
+    if getattr(args,'sample_mode','all') == '15hz':
+        from common.sampling import KEYS
+        if not set(KEYS).issubset(d) or manifest.get('capture_manifest_sha256') != prepared['metadata']['manifest_sha256']:
+            return _blocked('15-Hz utility selection requires episode/real_event keys and capture_manifest_sha256 matching the current capture; independent paired trials cannot be resampled as human replay')
+        keys = pd.MultiIndex.from_frame(prepared['decisions'][KEYS])
+        d = d.loc[pd.MultiIndex.from_frame(d[KEYS]).isin(keys)].copy().reset_index(drop=True)
     if d.empty:
         return _blocked('No paired outcomes for the requested participant/game', subject=int(subject), game=game)
     numeric = ['utility','task_reward_difference','computation_cost','nominal_step']

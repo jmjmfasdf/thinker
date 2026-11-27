@@ -38,7 +38,8 @@ def log(message):
 
 def build_risk_set(d, actor, args, parent):
     """Only the current bout's observed prefix enters each prospective row."""
-    ts = d.time.to_numpy(); dec = d.decision.to_numpy(); ep = d.episode.to_numpy()
+    from common.sampling import sequence_index
+    ts = d.time.to_numpy(); dec = sequence_index(d).to_numpy(); ep = d.episode.to_numpy()
     bouts, risk = [], []
     coverage = dict(raw_observed_bouts=0, left_censored=0, too_short=0,
                     gap_truncated=0, no_valid_future_interval=0)
@@ -172,7 +173,7 @@ def episode_samples(d, episode_indices, episode, center, grid, max_gap):
     local = np.searchsorted(ts, target, side='right')-1
     span = slice(local[0], local[-1]+1)
     if (np.any(np.diff(ts[span]) <= 0) or np.any(np.diff(ts[span]) > max_gap)
-            or np.any(np.diff(d.decision.to_numpy()[ix][span]) != 1)
+            or np.any(np.diff((d['sample_index'] if 'sample_index' in d else d.decision).to_numpy()[ix][span]) != 1)
             or np.any(target-ts[local] > max_gap)):
         return None
     # Last-observed values: interpolation could leak post-switch values leftward.

@@ -661,6 +661,55 @@ def test_imitation_checkpoint_cannot_resume_with_behavior_disabled():
         learner._init_imitation_components()
 
 
+@pytest.mark.parametrize('checkpoint_hz', [None, 15.0])
+@pytest.mark.parametrize('scored_length', [4, 8])
+def test_training_uses_original_order_and_rejects_legacy_sampling_resume(
+    tmp_path, checkpoint_hz, scored_length,
+):
+    import logging
+    from thinker.bc_loader import FrameStackedBehavioralDataLoader, behavioral_data_signature
+    from test_dynamic_imitation_data import _archive, _modern_path
+
+    _archive(_modern_path(tmp_path, 1), length=100)
+    learner = SActorLearner.__new__(SActorLearner)
+    learner.imitation_enabled = True
+    learner.dynamic_search = True
+    learner.device = torch.device('cpu')
+    learner.action_prior_ema = None
+    learner._checkpoint_imitation_rng_state = None
+    learner._logger = logging.getLogger(__name__)
+    learner.flags = SimpleNamespace(
+        sep_im_head=True, max_search_steps=16, frame_stack_n=4,
+        grayscale=False, icopro_data_path=str(tmp_path), icopro_subjects='1',
+        icopro_train_sessions='1', icopro_holdout_sessions='4',
+        icopro_burn_in_steps=16, icopro_sampling_context=16,
+        batch_length=scored_length, base_seed=701,
+    )
+    learner.actor_net = SimpleNamespace(
+        discrete_action=True, dim_actions=1, num_actions=9,
+        pri_action_space=spaces.Discrete(9),
+        online_real_state_space=spaces.Box(0, 255, shape=(12, 6, 7), dtype=np.uint8),
+    )
+    checkpoint_loader = FrameStackedBehavioralDataLoader(
+        tmp_path, subjects=(1,), sessions=(1,), num_actions=9,
+        scored_length=scored_length, burn_in_steps=16, sampling_context=16,
+        frame_stack_n=4, target_size=(6, 7), decision_hz=checkpoint_hz,
+        seed=701,
+    )
+    learner._checkpoint_imitation_data_signature = behavioral_data_signature(checkpoint_loader, tmp_path)
+    if checkpoint_hz is not None:
+        with pytest.raises(ValueError, match='legacy 15-Hz'):
+            learner._init_imitation_components()
+        return
+
+    learner._init_imitation_components()
+    assert learner.bc_loader.decision_hz is None
+    assert learner.bc_loader.max_time_gap == pytest.approx(2.5 / 15.0)
+    source = learner.bc_loader.get_sequence_batch(2)['observation_source_index']
+    np.testing.assert_array_equal(np.diff(source, axis=1), np.ones((2, 16 + scored_length), dtype=int))
+    assert learner.imitation_data_signature == learner._checkpoint_imitation_data_signature
+
+
 def test_float_observations_keep_unit_scale_through_real_cenv():
     flags = util.create_setting(
         args=[

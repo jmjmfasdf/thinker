@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+from common.figure_style import paper_style
 
 RESEARCH = Path(__file__).resolve().parent
 REPO = RESEARCH.parent
@@ -342,6 +343,7 @@ def summarize_curves(curves, args, parent):
     return pd.DataFrame(records)
 
 
+@paper_style()
 def render(d, a, b, w, display, pairs, curves_summary, scores, out, args):
     import matplotlib
     matplotlib.use('Agg')

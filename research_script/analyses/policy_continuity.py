@@ -66,16 +66,25 @@ def _actor_readout(d):
             'actor_predictions':pd.concat(predictions,ignore_index=True) if predictions else pd.DataFrame()}
 
 
-def _rich_policy(args, subject, game, d, e, metadata, qa):
-    """Verified numeric trace reads; no latent images or new model rollout."""
+def _captured_actor_head(metadata, num_actions):
+    """Load the matching head and its pickled buffer from the owning capture."""
     import yaml
-    from common.native_replay import Trace, ActorHeads, verify_chunks, decision_edges, js_distance
-    from analyses.replay_themes import find_checkpoint
-    cp, actor, config = find_checkpoint({'semantic':{'checkpoint':metadata['checkpoint']}})
+    from common.native_replay import ActorHeads, frozen_import
+    from common.voc_dynamics import checkpoint_for_capture
+    cp, actor, config = checkpoint_for_capture(metadata)
     cfg = yaml.safe_load(config.read_text())
     if cfg['critic_enc_type'] != 0 or cfg['last_layer_n'] != 0 or cfg['sep_actor_critic']:
         raise ValueError('Same-phase policy analysis requires the captured linear actor head')
-    head = ActorHeads(dict(checkpoint=str(cp), config=cfg, num_actions=int(d.n_actions.iloc[0])))
+    # Checkpoints include a serialized return-stat buffer even though this
+    # analysis reads only linear weights. A reused VoC cache has not imported it.
+    frozen_import(Path(actor).parents[4], 'buffer')
+    return ActorHeads(dict(checkpoint=str(cp), config=cfg, num_actions=int(num_actions)))
+
+
+def _rich_policy(args, subject, game, d, e, metadata, qa):
+    """Verified numeric trace reads; no latent images or new model rollout."""
+    from common.native_replay import Trace, verify_chunks, decision_edges, js_distance
+    head = _captured_actor_head(metadata, d.n_actions.iloc[0])
     d, e = d.copy(), e.copy()
     quality = []
     episodes = {x['metadata']['episode_id']:x for x in metadata['episodes']}
@@ -185,7 +194,8 @@ def _history(d, metadata):
         # Use the last raw action strictly BEFORE the target action. Resetting
         # on action[frames] would put the current switch outcome into a predictor.
         d.loc[part.index,'prior_raw_bout_id']=bouts[np.maximum(frames-1,0)]
-    start=d.episode.ne(d.episode.shift())|d.decision.diff().ne(1)|d.time.diff().le(0)|d.time.diff().gt(.25)
+    from common.sampling import sequence_index
+    start=d.episode.ne(d.episode.shift())|sequence_index(d).diff().ne(1)|d.time.diff().le(0)|d.time.diff().gt(.25)
     d['segment']=start.cumsum()
     for name in ['M','A_V','U_V','D_V','ema_initial','log_budget']:
         d['lag1_'+name]=d.groupby('segment',sort=False)[name].shift(1)

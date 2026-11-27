@@ -1,0 +1,26 @@
+#!/bin/bash
+#PBS -N hxln-allframes
+#PBS -q workq
+#PBS -r n
+#PBS -l select=1:ncpus=16:mem=32gb:host=bml2-slave5
+#PBS -l walltime=168:00:00
+#PBS -j oe
+set -euo pipefail
+REPO=/home/jeongmin/thinker-dynamic-imitation
+CAMPAIGN="$REPO/logs/visualization/campaigns/visualization_hxln_10m_allframes_20261126"
+SOURCE="$CAMPAIGN/runtime_source"
+RUNTIME=/home/jeongmin/vbenv-25d766c04fe7
+SIF=/home/jeongmin/ubuntu-24.04-amd64-1e0a86e57d24.sif
+INDEX=${VISUAL_INDEX:?VISUAL_INDEX is required}
+cd "$CAMPAIGN"
+exec > >(tee -a "$CAMPAIGN/pbs/task-${INDEX}.${PBS_JOBID}.log") 2>&1
+echo "job=$PBS_JOBID index=$INDEX host=$(hostname) started=$(date -u +%FT%TZ)"
+exec /usr/local/bin/singularity exec --cleanenv \
+  --bind "$REPO:$REPO:ro" --bind "$REPO/logs/visualization:$REPO/logs/visualization:rw" \
+  --bind "$RUNTIME:$RUNTIME:ro" \
+  --env "PYTHONPATH=$SOURCE/thinker" --env PYTHONNOUSERSITE=1 --env PYTHONDONTWRITEBYTECODE=1 \
+  --env "LD_LIBRARY_PATH=$RUNTIME/lib:$RUNTIME/lib/python3.10/site-packages/torch/lib" \
+  --env CUDA_VISIBLE_DEVICES= --env PYTHONHASHSEED=0 --env "PBS_JOBID=$PBS_JOBID" \
+  --env OMP_NUM_THREADS=2 --env MKL_NUM_THREADS=2 --env OPENBLAS_NUM_THREADS=1 \
+  --env NUMEXPR_NUM_THREADS=1 --env BLOSC_NTHREADS=1 \
+  "$SIF" "$RUNTIME/bin/python" -B -u "$CAMPAIGN/campaign.py" run --index "$INDEX"

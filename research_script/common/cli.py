@@ -1,7 +1,9 @@
 """Same arguments and numbered output roots for every research theme."""
 import argparse
 from .paths import INPUT_CACHE,OUTPUTS
+from .figure_style import paper_style
 
+@paper_style()
 def main(number):
     from analyses.runner import run_unit
     from .reporting import aggregate

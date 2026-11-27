@@ -656,6 +656,15 @@ def self_test():
     import unittest
     import tempfile
     from types import SimpleNamespace
+    def bind_checkpoint_fixture(capture, cp):
+        # game_inputs now authenticates a completed capture's exact files.
+        # Empty directories no longer constitute a valid checkpoint fixture.
+        binding = {}
+        for kind in ('actor','model','config'):
+            path = cp/kind
+            path.write_text(str(cp)+kind)
+            binding[kind] = dict(name=kind,sha256=sha(path))
+        write_json(capture/'capture_plan.json',dict(semantic=dict(checkpoint=binding)))
     class Contracts(unittest.TestCase):
         def test_checkpoint_resolution_separates_participants(self):
             with tempfile.TemporaryDirectory() as tmp:
@@ -664,6 +673,7 @@ def self_test():
                     capture=root/'captures'/f'pong-sub{subject:03d}-all'
                     capture.mkdir(parents=True);(capture/'COMPLETED.json').write_text('{}')
                     cp=root/'checkpoints'/f'pong-s{subject:03d}-test'/'milestones/10000000';cp.mkdir(parents=True)
+                    bind_checkpoint_fixture(capture,cp)
                 capture,cp=game_inputs(root,'pong',2)
                 self.assertEqual(capture.name,'pong-sub002-all')
                 self.assertIn('pong-s002-test',str(cp));self.assertNotIn('s001',str(cp))
@@ -672,6 +682,7 @@ def self_test():
                 root=Path(tmp)/'current';capture=root/'captures'/'spaceinvaders-sub002-all'
                 capture.mkdir(parents=True);(capture/'COMPLETED.json').write_text('{}')
                 cp=Path(tmp)/'previous/checkpoints/spaceinvaders-s002-test/milestones/10000000';cp.mkdir(parents=True)
+                bind_checkpoint_fixture(capture,cp)
                 self.assertEqual(game_inputs(root,'spaceinvaders',2)[1],cp)
                 with self.assertRaises(ValueError):game_inputs(root,'spaceinvaders',1)
         def test_zero_and_one_computation_values(self):

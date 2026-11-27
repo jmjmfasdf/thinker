@@ -574,7 +574,8 @@ def test_ordered_decision_semantic_hash_is_repeatable_and_sensitive():
     assert fixed_eval.decision_rows_semantic_sha256([row, changed]) != repeated_a
 
 
-def test_behavioral_training_data_signature_is_recomputed(monkeypatch, tmp_path):
+@pytest.mark.parametrize('burn_in_steps', [1, 16])
+def test_behavioral_training_data_signature_is_recomputed(monkeypatch, tmp_path, burn_in_steps):
     from thinker import bc_loader
 
     archive = tmp_path / "training.npz"
@@ -583,6 +584,10 @@ def test_behavioral_training_data_signature_is_recomputed(monkeypatch, tmp_path)
     class DummyLoader:
         def __init__(self, **kwargs):
             assert Path(kwargs["base_path"]) == tmp_path
+            assert kwargs['decision_hz'] is None
+            assert kwargs['max_time_gap'] == pytest.approx(2.5 / 15.0)
+            assert kwargs['burn_in_steps'] == burn_in_steps
+            assert kwargs['sampling_context'] == burn_in_steps
             self.data_files = [archive]
 
     monkeypatch.setattr(bc_loader, "FrameStackedBehavioralDataLoader", DummyLoader)
@@ -609,7 +614,7 @@ def test_behavioral_training_data_signature_is_recomputed(monkeypatch, tmp_path)
         num_actions=9,
     )
     state = fixed_eval.validate_behavioral_training_data(
-        flags=SimpleNamespace(),
+        flags=SimpleNamespace(icopro_burn_in_steps=burn_in_steps, icopro_sampling_context=burn_in_steps),
         spec=spec,
         actor_checkpoint={"imitation_data_signature": "a" * 64},
         data_root=tmp_path,
@@ -636,7 +641,7 @@ def test_behavioral_training_data_signature_is_recomputed(monkeypatch, tmp_path)
     )
     with pytest.raises(RuntimeError, match="between signature passes"):
         fixed_eval.validate_behavioral_training_data(
-            flags=SimpleNamespace(),
+            flags=SimpleNamespace(icopro_burn_in_steps=burn_in_steps, icopro_sampling_context=burn_in_steps),
             spec=spec,
             actor_checkpoint={"imitation_data_signature": "a" * 64},
             data_root=tmp_path,

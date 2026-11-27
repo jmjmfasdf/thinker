@@ -3,7 +3,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from thinker.bc_loader import FrameStackedBehavioralDataLoader
+from thinker.bc_loader import (
+    FrameStackedBehavioralDataLoader,
+    behavioral_data_signature,
+)
 from thinker.dataset_env import BehaviorSequenceVectorEnv
 
 
@@ -277,7 +280,7 @@ def test_generic_five_action_archive_uses_runtime_action_count(tmp_path):
 
     assert loader.num_actions == 5
     assert loader.action_distribution.shape == (5,)
-    assert batch["actions_seq"].shape == (2, 5)
+    assert batch["actions_seq"].shape == (2, 9)
     assert np.all((batch["actions_seq"] >= 0) & (batch["actions_seq"] < 5))
 
 
@@ -380,6 +383,83 @@ def test_legacy_layout_is_supported(tmp_path):
     assert loader.file_records[0].block == 3
 
 
+@pytest.mark.parametrize('scored_length', [4, 8])
+def test_default_training_preserves_irregular_original_frames_and_alignment(tmp_path, scored_length):
+    times = np.r_[0.0, np.cumsum(np.resize([0.011, 0.025, 0.04, 0.02], 99))]
+    _archive(_modern_path(tmp_path, 1), length=100, time_values=times)
+    kwargs = dict(
+        base_path=tmp_path, subjects=(1,), sessions=(1,), split=None,
+        game_id=0, num_actions=9, scored_length=scored_length, burn_in_steps=16,
+        sampling_context=16, frame_stack_n=2, target_size=(6, 7),
+        grayscale=True, seed=7,
+    )
+    loader = FrameStackedBehavioralDataLoader(**kwargs)
+    assert loader.decision_hz is None
+    assert loader.max_time_gap == pytest.approx(2.5 / 15.0)
+    episode = loader._episodes[0]
+    np.testing.assert_array_equal(episode.observation_source_index, np.arange(100))
+    np.testing.assert_array_equal(episode.decision_times, times)
+    np.testing.assert_array_equal(episode.actions, np.arange(99) % 9)
+    np.testing.assert_array_equal(episode.rewards, np.arange(99))
+    counts = np.bincount(np.arange(99) % 9, minlength=9)
+    np.testing.assert_allclose(loader.action_distribution, counts / counts.sum())
+
+    batch = loader.get_sequence_batch(3, replace=False)
+    np.testing.assert_array_equal(batch['score_mask'], [False] * 16 + [True] * scored_length)
+    for row, source in enumerate(batch['observation_source_index']):
+        np.testing.assert_array_equal(np.diff(source), np.ones(16 + scored_length, dtype=int))
+        np.testing.assert_array_equal(batch['decision_times'][row], times[source])
+        np.testing.assert_array_equal(batch['actions_seq'][row], source[:-1] % 9)
+        np.testing.assert_array_equal(batch['rewards_seq'][row], source[:-1])
+        assert batch['initial_prev_action'][row] == (source[0] - 1) % 9
+        np.testing.assert_array_equal(batch['obs_seq'][row, :, -1, 0, 0], source)
+        np.testing.assert_array_equal(batch['obs_seq'][row, :, 0, 0, 0], source - 1)
+
+    explicit = FrameStackedBehavioralDataLoader(**kwargs, decision_hz=None)
+    legacy = FrameStackedBehavioralDataLoader(**kwargs, decision_hz=15.0)
+    assert behavioral_data_signature(loader, tmp_path) == behavioral_data_signature(explicit, tmp_path)
+    assert behavioral_data_signature(loader, tmp_path) != behavioral_data_signature(legacy, tmp_path)
+
+
+def test_default_scored_length_is_eight_and_changes_checkpoint_signature(tmp_path):
+    _archive(_modern_path(tmp_path, 1), length=100)
+    kwargs = dict(base_path=tmp_path, num_actions=9, sessions=(1,),
+                  burn_in_steps=16, sampling_context=16, target_size=(6, 7))
+    loader = FrameStackedBehavioralDataLoader(**kwargs)
+    assert loader.scored_length == 8
+    batch = loader.get_sequence_batch(2)
+    assert batch['actions_seq'].shape == (2, 24)
+    assert batch['obs_seq'].shape[:2] == (2, 25)
+    np.testing.assert_array_equal(batch['score_mask'], [False] * 16 + [True] * 8)
+    four = FrameStackedBehavioralDataLoader(**kwargs, scored_length=4)
+    assert behavioral_data_signature(loader, tmp_path) != behavioral_data_signature(four, tmp_path)
+
+
+@pytest.mark.parametrize('boundary', ['gap', 'clock_reset', 'terminal', 'is_first'])
+def test_original_order_keeps_boundaries_without_resampling(tmp_path, boundary):
+    times = np.arange(80) * .025
+    if boundary == 'gap':
+        times[40:] += 1.0
+    elif boundary == 'clock_reset':
+        times[40:] -= times[40]
+    _archive(
+        _modern_path(tmp_path, 1), length=80, time_values=times,
+        episode_starts=(0, 40) if boundary == 'is_first' else (0,),
+        episode_ends=(39, 79) if boundary == 'terminal' else None,
+    )
+    loader = FrameStackedBehavioralDataLoader(
+        tmp_path, num_actions=9, sessions=(1,), scored_length=4,
+        burn_in_steps=16, frame_stack_n=1, target_size=(6, 7),
+    )
+    assert len(loader._episodes) == 2
+    np.testing.assert_array_equal(loader._episodes[0].observation_source_index, np.arange(40))
+    np.testing.assert_array_equal(loader._episodes[1].observation_source_index, np.arange(40, 80))
+    for batch in loader.iter_batches(4, stride=1):
+        for source in batch['observation_source_index']:
+            assert np.all(source < 40) or np.all(source >= 40)
+            np.testing.assert_array_equal(np.diff(source), np.ones(20, dtype=int))
+
+
 def test_causal_resampling_alignment_and_exact_sequence_schema(tmp_path):
     path = _archive(_modern_path(tmp_path, 1), length=50, episode_ends=(49,))
     loader = FrameStackedBehavioralDataLoader(
@@ -468,15 +548,16 @@ def test_windows_never_cross_episode_or_timestamp_gap(tmp_path):
     assert seen_episodes == {0, 1}
 
 
+@pytest.mark.parametrize('decision_hz', [None, 15.0])
 def test_terminal_marker_is_attached_to_the_edge_ending_at_terminal_observation(
-    tmp_path,
+    tmp_path, decision_hz,
 ):
     _archive(
         _modern_path(tmp_path, 1),
         length=12,
         episode_ends=(11,),
-        # 0.55 s is off the default 15-Hz decision grid, so the loader must
-        # append the genuine terminal observation as the last endpoint.
+        # The explicit legacy 15-Hz grid needs an off-grid terminal endpoint;
+        # original-order loading must also preserve that terminal observation.
         times=True,
     )
     loader = FrameStackedBehavioralDataLoader(
@@ -489,6 +570,7 @@ def test_terminal_marker_is_attached_to_the_edge_ending_at_terminal_observation(
         scored_length=4,
         frame_stack_n=1,
         target_size=(6, 7),
+        decision_hz=decision_hz,
     )
 
     batches = list(loader.iter_batches(16, shuffle=False, stride=1))

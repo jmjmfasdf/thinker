@@ -27,6 +27,7 @@ def _spec(
     subjects=(1,),
     train_sessions=(1, 2, 3),
     holdout_sessions=(4,),
+    scored_length=4,
 ):
     return evaluation.EvaluationSpec(
         subjects=subjects,
@@ -35,7 +36,7 @@ def _spec(
         game_id=game_id,
         env_name=env_name,
         num_actions=num_actions,
-        scored_length=4,
+        scored_length=scored_length,
         frame_stack_n=4,
         grayscale=False,
         observation_shape=observation_shape,
@@ -100,6 +101,19 @@ def test_actor_observation_space_restores_online_vector_shapes():
     # ActorBase removes the first dimension and therefore reconstructs the
     # same feature shapes used when the checkpoint was trained online.
     assert actor_space["real_states"].shape[1:] == (12, 84, 84)
+
+
+@pytest.mark.parametrize('scored_length', [4, 8])
+def test_checkpoint_flag_loaders_keep_configured_scored_length(tmp_path, scored_length):
+    values = _flag_values()
+    values['batch_length'] = scored_length
+    payload = yaml.safe_dump(values).encode('utf-8')
+    (tmp_path / 'config_c.yaml').write_bytes(payload)
+    flags = evaluation._load_flags(tmp_path)
+    bound = evaluation._load_flags_from_validated_config_bytes(
+        tmp_path, payload, hashlib.sha256(payload).hexdigest())
+    assert flags.batch_length == bound.batch_length == scored_length
+    assert evaluation.required_imitation_protocol(_spec(scored_length=scored_length))['batch_length'] == scored_length
 
 
 def _batch(tmp_path: Path, spec=None):

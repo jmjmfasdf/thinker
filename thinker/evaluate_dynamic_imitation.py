@@ -2,7 +2,7 @@
 """Paired held-out-session evaluation for teacher-forced Dynamic Thinker.
 
 The canonical evaluation tiles each recorded episode with non-overlapping
-``L=4`` scored targets.  Every window first executes one unscored human
+``L=checkpoint.batch_length`` scored targets. Every window first executes one unscored human
 burn-in action, then compares the same actor/model checkpoint and recorded
 inputs with tree carry disabled and enabled.  This script reports descriptive
 NLL differences only; it deliberately performs no significance testing.
@@ -478,7 +478,8 @@ class EvaluationSpec:
 
 
 def required_imitation_protocol(spec: EvaluationSpec) -> Dict[str, Any]:
-    return {**IMITATION_PROTOCOL, "icopro_game_id": spec.game_id}
+    return {**IMITATION_PROTOCOL, "icopro_game_id": spec.game_id,
+            "batch_length": spec.scored_length}
 
 CSV_FIELDS = (
     "window_id",
@@ -3112,7 +3113,7 @@ def build_paired_rows(
                     "episode_index": episode,
                     "window_start": start,
                     "scored_position": position,
-                    # Edge zero is burn-in, so scored targets occupy 1..4.
+                    # Edge zero is burn-in, so scored targets occupy 1..L.
                     "edge_position": position + 1,
                     "decision_time": float(decision_times[b, position + 1]),
                     "observation_source_index": int(
@@ -4753,6 +4754,10 @@ def _load_flags(checkpoint_dir: Path) -> Any:
         raise ValueError("checkpoint is not a Dynamic Thinker checkpoint")
     for key, expected in {**DYNAMIC_PROTOCOL, **IMITATION_PROTOCOL}.items():
         actual = getattr(flags, key, None)
+        if key == "batch_length":
+            if type(actual) is int and actual > 0:
+                continue
+            raise ValueError("checkpoint batch_length must be a positive integer")
         if not _protocol_value_matches(actual, expected):
             raise ValueError(
                 f"checkpoint protocol mismatch: {key}={actual!r}, expected {expected!r}"
@@ -4863,6 +4868,10 @@ def _load_flags_from_validated_config_bytes(
         raise ValueError("checkpoint is not a Dynamic Thinker checkpoint")
     for key, expected in {**DYNAMIC_PROTOCOL, **IMITATION_PROTOCOL}.items():
         actual = getattr(flags, key, None)
+        if key == "batch_length":
+            if type(actual) is int and actual > 0:
+                continue
+            raise ValueError("checkpoint batch_length must be a positive integer")
         if not _protocol_value_matches(actual, expected):
             raise ValueError(
                 f"checkpoint protocol mismatch: {key}={actual!r}, "
@@ -5311,12 +5320,17 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Path]:
         target_size=spec.target_size,
         grayscale=spec.grayscale,
         normalize=spec.observation_dtype == "float32",
-        decision_hz=15.0,
+        decision_hz=None,
+        max_time_gap=2.5 / 15.0,
         num_actions=spec.num_actions,
     )
     train_loader = FrameStackedBehavioralDataLoader(
         **loader_kwargs,
         sessions=spec.train_sessions,
+        # Attest the training window separately from this evaluator's
+        # existing one-burn-in paired-rollout contract.
+        burn_in_steps=getattr(training_flags, "icopro_burn_in_steps", 1),
+        sampling_context=getattr(training_flags, "icopro_sampling_context", None),
         seed=args.seed,
     )
     computed_training_signature = behavioral_data_signature(

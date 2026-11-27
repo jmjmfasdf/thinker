@@ -7,7 +7,9 @@ The native all-session model is not a held-out behavioral predictor.
 from __future__ import annotations
 
 from pathlib import Path
+from itertools import combinations, product
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -15,6 +17,7 @@ from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 
 from common.inference import fit_pooled
+from common.research_inputs import sha
 
 REPO=Path(__file__).resolve().parents[2]
 CONFIG_KEYS=('min_search_steps','max_search_steps','voc_gate_q_temperature','voc_gru_connected',
@@ -34,6 +37,340 @@ TRAIN_KEYS=('rmean_episode_return','rmean_len','mean_budget','max_budget','searc
     'actor/voc_gru_grad_ratio','actor/voc_gru_gradient_ratio','actor/learning_rate',
     'model/rs_loss','model/done_loss','model/img_loss','model/fea_loss','model/vs_loss',
     'model/policy_loss','model/total_loss_m','model/total_loss_p')
+
+BASELINE_MODELS=('dqn','drc','fixed_rollout')
+COMPARISON_MODELS=(*BASELINE_MODELS,'dynamic_thinker')
+COMPARISON_LABELS=('DQN + BC','DRC + BC','Fixed rollout + BC','Dynamic Thinker')
+COMPARISON_NOTE=('Decision-matched behavioral fit on identical run/source-frame keys, with '
+                 'verified times, current and previous human actions. Training/replay overlap '
+                 'remains: not held-out generalization or matched training/compute budgets. '
+                 'Historical Thinker probabilities are not used.')
+COMPARISON_INFERENCE=('Exploratory two-sided exact paired sign-flip test of aggregate accuracy; '
+    'Holm correction over all six pairs within each game/figure. Group units are participants; '
+    'individual units are sessions (all runs in a session flip together). Seeds and frames are '
+    'not independent replicates. Requires independent, sign-exchangeable unit differences under '
+    'the null. Matching evaluation decisions does not match training or compute budgets and '
+    'does not remove training/replay overlap. * p<.05, ** p<.01, *** p<.001; ns otherwise.')
+EPISODE_COMPARISON_INFERENCE=('Exploratory within-participant two-sided exact paired sign-flip '
+    'test of episode/run accuracy, with equal episode weight and Holm correction over six model '
+    'pairs within each participant/game panel. Episode means the original behavioral source run '
+    '(session/block/game file), not an Atari life or a frame. Seeds are averaged before pairing. '
+    'Assumes independent, sign-exchangeable run differences; within-session dependence can make '
+    'these p-values optimistic. Session-clustered sensitivity tests and participant-level group '
+    'tests are saved separately. This is not population inference or held-out generalization. '
+    '* p<.05, ** p<.01, *** p<.001; ns otherwise.')
+
+
+def comparison_points(tables):
+    """Preserve the existing boxplot units and average baseline seeds first."""
+    subjects=tables.get('baseline_comparison_subject_scores',pd.DataFrame())
+    if subjects.empty:return pd.DataFrame(),None
+    if 'group_inputs' in tables or subjects.subject.nunique()>1:
+        points=subjects[['subject','model','accuracy']].copy();ident='subject'
+    else:
+        runs=tables['baseline_comparison_run_scores']
+        points=runs.groupby(['subject','model','run'],sort=False).accuracy.mean().reset_index()
+        ident='run'
+    if set(points.model)!=set(COMPARISON_MODELS):raise ValueError('Four-model comparison requires all four models')
+    if points.duplicated([ident,'model']).any():raise ValueError('Duplicate comparison point identity')
+    if not np.isfinite(points.accuracy).all() or not points.accuracy.between(0,1).all():
+        raise ValueError('Invalid comparison accuracy')
+    return points,ident
+
+
+def comparison_accuracy_tests(tables, *, unit=None):
+    """Six paired tests; never use decision or seed counts as sample size.
+
+    Individual boxes retain run means, but randomization flips whole sessions.
+    Session contributions are weighted by their run counts so the test's effect
+    remains the difference of the plotted equal-run means, not a new estimator.
+    Explicit unit='episode' instead flips each source run within one participant.
+    """
+    if unit not in (None,'episode'):raise ValueError('Unknown comparison inference unit')
+    episode_test=unit=='episode'
+    points,ident=comparison_points(tables)
+    if points.empty:return pd.DataFrame()
+    wide=points.pivot(index=ident,columns='model',values='accuracy').reindex(columns=COMPARISON_MODELS)
+    if wide.isna().any().any():raise ValueError('Unpaired comparison identities; refusing to drop observations')
+    if episode_test:
+        if ident!='run':raise ValueError('Episode inference requires one participant at a time')
+        clusters=np.asarray(wide.index);unit='episode'
+    elif ident=='subject':clusters=np.asarray(wide.index);unit='participant'
+    else:
+        sessions=pd.Series(wide.index).str.extract(r'_ses(\d+)_',expand=False)
+        if sessions.isna().any():raise ValueError('Comparison runs need session identities for clustered inference')
+        clusters=sessions.to_numpy();unit='session'
+    n_units=len(np.unique(clusters))
+    if n_units>20:raise ValueError('Exact comparison inference supports at most 20 independent units')
+    signs=np.asarray(list(product((-1.,1.),repeat=n_units)))
+    rows=[]
+    subject_scores=tables['baseline_comparison_subject_scores']
+    decision_matched=('decision_matched' in subject_scores and subject_scores.decision_matched.eq(True).all())
+    for left,right in combinations(COMPARISON_MODELS,2):
+        difference=(wide[left]-wide[right]).to_numpy(float)
+        contributions=pd.Series(difference).groupby(clusters).sum().to_numpy()/len(difference)
+        effect=float(difference.mean())
+        p=float(np.mean(np.abs(signs@contributions)>=abs(effect)-1e-12)) if n_units>=2 else np.nan
+        rows.append(dict(model_a=left,model_b=right,metric='accuracy',effect_a_minus_b=effect,
+            effect_percentage_points=100*effect,n_pairs=len(difference),n_units=n_units,unit=unit,
+            p_raw=p,status='ok' if n_units>=2 else 'insufficient_units',
+            method='exact paired sign-flip (two-sided)',correction='Holm',family_size=6,
+            decision_matched=bool(decision_matched),
+            interpretation=EPISODE_COMPARISON_INFERENCE if episode_test else COMPARISON_INFERENCE))
+    result=pd.DataFrame(rows);result['p_holm']=np.nan
+    valid=result.index[result.p_raw.notna()]
+    ordered=result.loc[valid,'p_raw'].sort_values(kind='stable')
+    corrected=np.maximum.accumulate(ordered.to_numpy()*(6-np.arange(len(ordered))))
+    result.loc[ordered.index,'p_holm']=np.minimum(corrected,1.)
+    result['significance']=[('NA' if not np.isfinite(p) else '***' if p<.001 else
+                             '**' if p<.01 else '*' if p<.05 else 'ns') for p in result.p_holm]
+    return result
+
+
+def comparison_subject_panels(tables):
+    """Validated participant slices; episode is the shared behavioral source run."""
+    scores=tables.get('baseline_comparison_subject_scores',pd.DataFrame())
+    if scores.empty:return []
+    runs=tables.get('baseline_comparison_run_scores',pd.DataFrame())
+    if runs.empty:raise ValueError('Participant panels require saved episode/run scores')
+    subjects=set(scores.subject)
+    requested=tables.get('group_inputs',pd.DataFrame({'subject':sorted(subjects)}))
+    if subjects!=set(requested.subject) or subjects!=set(runs.subject):
+        raise ValueError('Participant panel coverage differs from requested subjects')
+    if 'game' in runs and runs.game.nunique(dropna=False)!=1:
+        raise ValueError('Participant panels must contain exactly one game')
+    keys=['subject','run','model']+(['seed'] if 'seed' in runs else [])
+    if runs.duplicated(keys).any():raise ValueError('Duplicate episode/model/seed score')
+    panels=[]
+    for subject in sorted(subjects):
+        subset={'baseline_comparison_subject_scores':scores.loc[scores.subject.eq(subject)].copy(),
+                'baseline_comparison_run_scores':runs.loc[runs.subject.eq(subject)].copy()}
+        points,ident=comparison_points(subset)
+        assert ident=='run'
+        panels.append((subject,subset,points))
+    return panels
+
+
+def comparison_episode_tests(tables):
+    """Per-participant episode tests plus a session-clustered sensitivity analysis.
+
+    Keep the existing participant-level group test separate: pooling runs across
+    people would silently change the inferential population and sample size.
+    """
+    episodes=[];sessions=[]
+    for subject,subset,points in comparison_subject_panels(tables):
+        session=points.run.str.extract(r'_ses(\d+)_',expand=False)
+        if session.isna().any():raise ValueError('Episode runs need session identities')
+        for unit,destination in [('episode',episodes),(None,sessions)]:
+            result=comparison_accuracy_tests(subset,unit=unit)
+            result['subject']=subject
+            if 'game' in subset['baseline_comparison_subject_scores']:
+                result['game']=subset['baseline_comparison_subject_scores'].game.iloc[0]
+            result['n_sessions']=session.nunique()
+            result['correction_scope']='six pairs within participant/game'
+            result['unit_definition']=('original behavioral source file (session/block/game)' if unit else
+                                       'all source runs from the same session flip together')
+            destination.append(result)
+    return {name:pd.concat(rows,ignore_index=True) if rows else pd.DataFrame()
+        for name,rows in [('baseline_comparison_episode_accuracy_tests',episodes),
+                          ('baseline_comparison_session_accuracy_tests',sessions)]}
+
+
+def _comparison_run(label,subject,game_id):
+    """Normalize run identity only, never pretend the decision grids are matched."""
+    native=re.fullmatch(r'sub-(\d+)/ses-(\d+)/sub(\d+)-ses(\d+)-block(\d+)-game(\d+)\.npz',str(label))
+    legacy=re.fullmatch(r'sub(\d+)_ses(\d+)_block(\d+)_game(\d+)',str(label))
+    if native:
+        s0,se0,s,se,block,g=map(int,native.groups())
+        if (s0,se0)!=(s,se):raise ValueError('Inconsistent native source identity: '+str(label))
+    elif legacy:s,se,block,g=map(int,legacy.groups())
+    else:raise ValueError('Unrecognized comparison run identity: '+str(label))
+    if (s,g)!=(subject,game_id):raise ValueError('Comparison subject/game mismatch: '+str(label))
+    return f'sub{s:03d}_ses{se:02d}_block{block:02d}_game{g}'
+
+
+def baseline_prediction_files(args,subject,game):
+    """Explicit prediction input or the audited sibling of action_metrics."""
+    root=Path(getattr(args,'baseline_predictions_root',None) or
+              Path(args.baseline_root).parent/'full_data_scope_audit/aligned_arrays')
+    gid={'enduro':0,'pong':1,'spaceinvaders':2}[game]
+    return [root/f'sub{subject:03d}_game{gid}.npz',root.parent/'manifest.json',root.parent/'qa.json']
+
+
+def _matched_comparison(args,subject,game,decisions,official,paths,provenance):
+    """Audit archived probabilities, then score the identical pre-action targets.
+
+    Full mode must cover every archived target. 15Hz mode uses the intersection
+    with the separately selected native view and records all exclusions. Never
+    match by nearest time, row order or the old Thinker's internal event index.
+    """
+    if decisions is None:raise ValueError('Decision-matched comparison requires native decision scores')
+    for path in paths:
+        if not path.is_file():raise FileNotFoundError('Missing baseline prediction input: '+str(path))
+        provenance.append(dict(role='baseline_prediction_'+path.name,path=str(path.resolve()),sha256=sha(path)))
+    meta=json.loads(paths[1].read_text());qa=json.loads(paths[2].read_text())
+    gid={'enduro':0,'pong':1,'spaceinvaders':2}[game]
+    if (qa.get('complete') is not True or subject not in meta.get('subjects',[]) or
+        gid not in meta.get('games',[]) or not set(BASELINE_MODELS).issubset(meta.get('models',[]))):
+        raise ValueError('Baseline prediction manifest/QA does not support requested comparison')
+    keys=['run','source_frame']
+    with np.load(paths[0],allow_pickle=False) as z:
+        names=[_comparison_run(r,subject,gid) for r in z['run_names']]
+        if len(names)!=len(set(names)):raise ValueError('Duplicate baseline run names')
+        ix=z['run'];frames=z['target_index'];action=z['action'];previous=z['previous'];times=z['time']
+        for name,a in [('run',ix),('source frame',frames),('action',action),('previous',previous)]:
+            if a.ndim!=1 or not np.isfinite(a).all() or not np.equal(a,np.floor(a)).all():
+                raise ValueError('Invalid baseline prediction '+name)
+        if (len(ix)==0 or np.any(ix<0) or np.any(ix>=len(names)) or np.any(frames<0) or
+            np.any(action<0) or np.any(action>=6) or np.any(previous<0) or np.any(previous>=6) or
+            times.shape!=ix.shape or not np.isfinite(times).all()):
+            raise ValueError('Invalid baseline prediction index/action/time range')
+        b=pd.DataFrame(dict(run=np.asarray(names)[ix.astype(int)],source_frame=frames.astype(int),
+            human_action=action.astype(int),incumbent_action=previous.astype(int),time=times))
+        for model in BASELINE_MODELS:
+            p=z['p_'+model]
+            if (p.shape!=(len(b),6) or not np.isfinite(p).all() or (p<0).any() or (p>1).any() or
+                not np.allclose(p.sum(1),1,atol=1e-6,rtol=0)):
+                raise ValueError('Invalid archived probabilities: '+model)
+            b[model+'_correct']=(p.argmax(1)==action).astype(int)
+            b[model+'_log_score']=np.log(np.maximum(p[np.arange(len(b)),action.astype(int)],1e-12))
+    if b.duplicated(keys).any():raise ValueError('Duplicate baseline decision key')
+    if set(b.run)!=set(official.run):raise ValueError('Archived/official baseline run coverage differs')
+    reproduction=[]
+    for model in BASELINE_MODELS:
+        r=b.groupby('run').agg(accuracy=(model+'_correct','mean'),log_score=(model+'_log_score','mean'),
+                               n_decisions=('source_frame','size'))
+        ref=official.loc[official.model.eq(model)].set_index('run').reindex(r.index)
+        if (not np.allclose(r.accuracy,ref.action_accuracy,atol=1e-10,rtol=0) or
+            not np.allclose(r.log_score,ref.LL,atol=1e-10,rtol=0) or not r.n_decisions.eq(ref.decisions).all()):
+            raise ValueError('Archived predictions do not reproduce official baseline scores: '+model)
+        reproduction.append(dict(model=model,max_accuracy_error=float((r.accuracy-ref.action_accuracy).abs().max()),
+                                 max_log_score_error=float((r.log_score-ref.LL).abs().max())))
+    # Check the archived target identity against original behavior, not only two derived tables.
+    behavior=Path(getattr(args,'behavior_root',None) or REPO/'behavioral_data_block')
+    for run,r in b.groupby('run'):
+        s,se,block,g=map(int,re.fullmatch(r'sub(\d+)_ses(\d+)_block(\d+)_game(\d+)',run).groups())
+        path=behavior/f'sub-{s:03d}/ses-{se:02d}/sub{s:03d}-ses{se:02d}-block{block}-game{g}.npz'
+        provenance.append(dict(role='original_behavior',path=str(path.resolve()),sha256=sha(path)))
+        with np.load(path,allow_pickle=False) as raw:
+            a=raw['action'];a=a.argmax(1) if a.ndim==2 else a.reshape(-1)
+            t=raw['time'].reshape(-1);f=r.source_frame.to_numpy(int)
+            if (np.any(f>=len(a)) or not np.array_equal(a[f],r.human_action) or
+                not np.allclose(t[f],r.time,atol=1e-6,rtol=0)):
+                raise ValueError('Archived baseline targets do not match original behavior: '+run)
+    cols=['run','source_frame','time','human_action','incumbent_action','model_correct','log_score']
+    d=decisions[cols].copy();d['run']=d.run.map(lambda r:_comparison_run(r,subject,gid))
+    if d.duplicated(keys).any():raise ValueError('Duplicate native decision key')
+    for key in ['source_frame','human_action','incumbent_action','model_correct','time','log_score']:
+        if not np.isfinite(d[key]).all():raise ValueError('Nonfinite native comparison '+key)
+    if (not d.source_frame.eq(np.floor(d.source_frame)).all() or not d.model_correct.isin([0,1]).all() or
+        (d.log_score>1e-7).any()):raise ValueError('Invalid native comparison values')
+    shared=b.merge(d,on=keys,how='inner',validate='one_to_one',suffixes=('','_native')).sort_values(keys)
+    if len(shared)==0 or set(shared.run)!=set(b.run):raise ValueError('No shared comparison decisions in one or more runs')
+    if (not shared.human_action.eq(shared.human_action_native).all() or
+        not shared.incumbent_action.eq(shared.incumbent_action_native).all() or
+        not np.allclose(shared.time,shared.time_native,atol=1e-6,rtol=0)):
+        raise ValueError('Baseline/native target time or human action mismatch')
+    sample_mode=getattr(args,'sample_mode','all')
+    if sample_mode=='all' and len(shared)!=len(b):
+        raise ValueError('Full-order native replay is missing archived baseline evaluation targets')
+    shared['dynamic_thinker_correct']=shared.model_correct
+    shared['dynamic_thinker_log_score']=shared.log_score
+    score_rows=[]
+    for model in COMPARISON_MODELS:
+        r=shared.groupby('run').agg(accuracy=(model+'_correct','mean'),log_score=(model+'_log_score','mean'),
+                                   n_decisions=('source_frame','size')).reset_index()
+        r['model']=model;r['seed']=-1 if model=='dynamic_thinker' else 0
+        r['evaluation_sample']='exact shared run/source-frame targets ('+sample_mode+')';score_rows.append(r)
+    alignment=pd.DataFrame({'baseline_decisions':b.groupby('run').size(),'native_decisions':d.groupby('run').size(),
+                            'matched_decisions':shared.groupby('run').size()}).reset_index()
+    alignment['baseline_excluded']=alignment.baseline_decisions-alignment.matched_decisions
+    alignment['native_excluded']=alignment.native_decisions-alignment.matched_decisions
+    alignment['decision_matched']=True;alignment['sample_mode']=sample_mode
+    saved=shared[keys+['time','human_action','incumbent_action']+
+                 [model+'_correct' for model in COMPARISON_MODELS]].copy()
+    info=dict(matched_decisions=len(shared),baseline_decisions=len(b),native_decisions=len(d),
+        baseline_excluded=len(b)-len(shared),native_excluded=len(d)-len(shared),sample_mode=sample_mode,
+        max_timestamp_error=float((shared.time-shared.time_native).abs().max()),
+        action_mismatches=0,previous_action_mismatches=0,baseline_score_reproduction=reproduction,
+        original_behavior_targets_verified=True,
+        source_hash_matching='Current behavioral inputs hashed; archived time/action targets verified; historical image hashes unavailable')
+    return pd.concat(score_rows,ignore_index=True),alignment,saved,info
+
+
+def baseline_comparison(args,subject,game,run_scores,decision_scores=None):
+    """Recompute all four models on shared frame keys from saved predictions."""
+    supplied=getattr(args,'baseline_root',None)
+    if supplied is None:return {},{'status':'not_requested'}
+    root=Path(supplied)
+    paths=[root/name for name in ('run_metrics.csv','manifest.json','qa.json')]
+    for path in paths:
+        if not path.is_file():raise FileNotFoundError('Missing saved baseline input: '+str(path))
+    provenance=[dict(role=path.name,path=str(path.resolve()),sha256=sha(path)) for path in paths]
+    manifest=json.loads(paths[1].read_text());audit=json.loads(paths[2].read_text())
+    if audit.get('complete') is not True:raise ValueError('Saved baseline QA is not complete')
+    for key in ('duplicate_keys','cross_model_label_history_alignment_mismatches','invalid_probability_rows'):
+        if audit.get(key)!=0:raise ValueError('Saved baseline QA failed or missing: '+key)
+    game_id={'enduro':0,'pong':1,'spaceinvaders':2}[game]
+    source_table=pd.DataFrame(provenance)
+    scope=dict(subject=subject,game=game,decision_matched=True,interpretation=COMPARISON_NOTE)
+    if game_id not in manifest.get('games',[]):
+        scope['decision_matched']=False
+        qa=dict(scope,status='unavailable_game',reason='No saved baseline results for this game',sources=provenance)
+        return {'baseline_comparison_coverage':pd.DataFrame([dict(scope,status=qa['status'],reason=qa['reason'])]),
+                'baseline_comparison_sources':source_table},qa
+    if subject not in manifest.get('subjects',[]):
+        raise ValueError(f'Saved baseline manifest lacks requested subject {subject}')
+    frame=pd.read_csv(paths[0])
+    required={'model','subject','game','seed','run_label','decisions','action_accuracy','LL'}
+    if not required.issubset(frame):raise ValueError('Baseline run metrics lack '+str(sorted(required-set(frame))))
+    for key in ('subject','game','seed','decisions'):
+        v=pd.to_numeric(frame[key],errors='raise')
+        if not np.isfinite(v).all() or not v.eq(np.floor(v)).all():raise ValueError('Invalid baseline '+key)
+        frame[key]=v.astype(int)
+    frame=frame.loc[frame.subject.eq(subject)&frame.game.eq(game_id)&frame.model.isin(BASELINE_MODELS)].copy()
+    expected_seeds=manifest.get('baseline_seeds',[])
+    if not expected_seeds or len(expected_seeds)!=len(set(expected_seeds)):
+        raise ValueError('Baseline manifest must declare unique baseline seeds')
+    if expected_seeds!=[0]:raise ValueError('Audited aligned arrays bind baseline seed 0 only')
+    native=run_scores.loc[run_scores.population.eq('all')].copy()
+    native['run']=native.run.map(lambda r:_comparison_run(r,subject,game_id))
+    if native.empty or native.run.duplicated().any():raise ValueError('Missing or duplicate native run scores')
+    frame['run']=frame.run_label.map(lambda r:_comparison_run(r,subject,game_id))
+    if frame.duplicated(['model','seed','run']).any():raise ValueError('Duplicate baseline model/seed/run')
+    for model in BASELINE_MODELS:
+        z=frame.loc[frame.model.eq(model)]
+        if set(z.seed)!=set(expected_seeds):raise ValueError(f'Missing/unexpected baseline seeds for {model}')
+        for seed,r in z.groupby('seed'):
+            if set(r.run)!=set(native.run):
+                raise ValueError(f'Baseline/native run coverage differs: {model}, seed {seed}')
+    runs,alignment,matched,alignmentqa=_matched_comparison(args,subject,game,decision_scores,frame,
+        baseline_prediction_files(args,subject,game),provenance)
+    for key in ('accuracy','log_score','n_decisions'):
+        runs[key]=pd.to_numeric(runs[key],errors='raise')
+        if not np.isfinite(runs[key]).all():raise ValueError('Nonfinite comparison '+key)
+    if not runs.accuracy.between(0,1).all() or (runs.log_score>1e-7).any() or (runs.n_decisions<=0).any():
+        raise ValueError('Invalid comparison metric range/denominator')
+    runs['subject']=subject;runs['game']=game;runs['decision_matched']=True
+    seeds=runs.groupby(['model','seed'],sort=False).agg(accuracy=('accuracy','mean'),log_score=('log_score','mean'),
+        n_runs=('run','nunique'),n_decisions=('n_decisions','sum')).reset_index()
+    participants=seeds.groupby('model',sort=False).agg(accuracy=('accuracy','mean'),log_score=('log_score','mean'),
+        n_seeds=('seed','nunique'),n_runs=('n_runs','min'),n_decisions=('n_decisions','sum')).reset_index()
+    participants['subject']=subject;participants['game']=game
+    participants['decision_matched']=True
+    participants['aggregation']='Equal runs within seed, then equal seeds; one point per participant in group boxes'
+    coverage=participants[['model','n_seeds','n_runs','n_decisions']].assign(**scope,status='available_decision_matched')
+    qa=dict(scope,status='available_decision_matched',models=list(COMPARISON_MODELS),
+            baseline_seeds=expected_seeds,common_run_count=len(native),sources=provenance,
+            current_dynamic_seed_marker=-1,**alignmentqa,
+            aggregation='Equal runs within seed, then equal seeds within participant; equal participants in group')
+    for table in (alignment,matched):table['subject']=subject;table['game']=game
+    tables={'baseline_comparison_run_scores':runs,'baseline_comparison_subject_scores':participants,
+            'baseline_comparison_coverage':coverage,'baseline_comparison_sources':pd.DataFrame(provenance),
+            'baseline_comparison_alignment':alignment,'baseline_comparison_decisions':matched}
+    tables['baseline_comparison_accuracy_tests']=comparison_accuracy_tests(tables)
+    qa['accuracy_inference']=COMPARISON_INFERENCE
+    return tables,qa
 
 
 def _tables(prepared):
@@ -156,7 +493,9 @@ def validation(args,subject,game,prepared):
     tables={'decision_scores':d[columns],'run_scores':run_scores,'action_scores':by_action,
             'checkpoint_conditions':pd.DataFrame([checkpoint])}
     training,trainingqa=_training(args,cp,subject,game);tables.update(training)
+    comparison,comparisonqa=baseline_comparison(args,subject,game,run_scores,d[columns]);tables.update(comparison)
     qa={'status':'completed','model_generalization':'not held out from Thinker training',
+        'baseline_comparison':comparisonqa,
         'training_diagnostics':trainingqa,'final_REAL_decisions':len(d),
         'aggregation':'equal runs within subject then equal subjects',
         'checkpoint_step':'Use checkpoint binding if present; never infer learning progress from a single replay',
@@ -262,17 +601,99 @@ def _mean(d,keys,values):
     return per.groupby(keys,dropna=False)[values].mean().reset_index() if keys else per[values].mean().to_frame().T
 
 
+def _draw_comparison_accuracy(ax,points,ident,tests,expected_unit,limits):
+    """One accuracy panel with paired points, a visible axis break and saved tests."""
+    from matplotlib.transforms import ScaledTranslation
+    expected=set(combinations(COMPARISON_MODELS,2))
+    if len(tests)!=6 or set(zip(tests.model_a,tests.model_b))!=expected:
+        raise ValueError('Missing six saved accuracy tests; rerun 02 analysis before render-only')
+    if not tests.unit.eq(expected_unit).all():raise ValueError('Wrong inference unit for comparison figure')
+    if not tests.n_pairs.eq(points[ident].nunique()).all():
+        raise ValueError('Saved accuracy tests do not match the plotted paired units')
+    colors=['#8c9ca8','#4c91b1','#dfad5c','#b05370']
+    identities=sorted(points[ident].unique());offsets=dict(zip(identities,np.linspace(-.13,.13,len(identities))))
+    values=[points.loc[points.model.eq(model),'accuracy'].to_numpy(float) for model in COMPARISON_MODELS]
+    boxes=ax.boxplot(values,positions=np.arange(4),widths=.55,patch_artist=True,showfliers=False,
+                     medianprops={'color':'black','linewidth':1.8},whis=1.5)
+    for box,color in zip(boxes['boxes'],colors):box.set(facecolor=color,alpha=.55)
+    for i,model in enumerate(COMPARISON_MODELS):
+        z=points.loc[points.model.eq(model)]
+        ax.scatter(i+z[ident].map(offsets).to_numpy(),z.accuracy,s=45,
+                   color='#23313e',alpha=.8,zorder=3,edgecolors='white',linewidths=.5)
+    # Keep the stored 0–1 accuracy units; zooming must not turn them into percentages.
+    lo,hi=limits
+    ax.set(xticks=np.arange(4),xticklabels=['DQN + BC','DRC + BC','Fixed rollout\n+ BC','Dynamic\nThinker'],
+           ylabel='Accuracy',ylim=(lo,hi))
+    ax.grid(axis='y',alpha=.2);ax.spines[['top','right']].set_visible(False)
+    if lo>0:
+        # A wavy break on the y spine explicitly marks the omitted zero-to-lo range.
+        ax.plot([0,0],[.032,.078],transform=ax.transAxes,color='white',lw=5,clip_on=False,zorder=5)
+        x=np.linspace(-.012,.012,100)
+        for center in (.045,.065):
+            ax.plot(x,center+.006*np.sin(np.linspace(-np.pi,np.pi,len(x))),transform=ax.transAxes,
+                    color='black',lw=1.6,clip_on=False,zorder=6,gid='y-axis-break')
+    pairs=sorted(tests.itertuples(),key=lambda r:(COMPARISON_MODELS.index(r.model_b)-COMPARISON_MODELS.index(r.model_a),
+                                                COMPARISON_MODELS.index(r.model_a)))
+    for level,row in enumerate(pairs):
+        left=COMPARISON_MODELS.index(row.model_a);right=COMPARISON_MODELS.index(row.model_b)
+        # Fixed point spacing remains legible after tight_layout shrinks an axis.
+        transform=ax.get_xaxis_transform()+ScaledTranslation(0,(9+30*level)/72,ax.figure.dpi_scale_trans)
+        ax.plot([left,left,right,right],[.988,1.,1.,.988],transform=transform,
+                color='#303030',lw=1.3,clip_on=False,gid='accuracy-significance-bracket')
+        ax.annotate(row.significance,((left+right)/2,1.),xycoords=transform,
+                xytext=(0,2),textcoords='offset points',annotation_clip=False,
+                ha='center',va='bottom',fontsize=22,clip_on=False,gid='accuracy-significance')
+
+
+def _plot_baseline_comparison(tables,title,save):
+    """Group: participant panels with episode tests; individual: session tests."""
+    import matplotlib.pyplot as plt
+    from matplotlib.transforms import ScaledTranslation
+    points,ident=comparison_points(tables)
+    if points.empty:return
+    if ident=='subject':
+        panels=comparison_subject_panels(tables)
+        tests=tables.get('baseline_comparison_episode_accuracy_tests',pd.DataFrame())
+        if tests.empty or set(tests.subject)!={s for s,_,_ in panels}:
+            raise ValueError('Missing saved participant episode tests; rerun 02 --aggregate before render-only')
+        if 'game' in tests and tests.game.nunique(dropna=False)!=1:
+            raise ValueError('Mixed games in saved episode tests')
+        points=pd.concat([p for _,_,p in panels],ignore_index=True)
+    else:
+        panels=[(None,tables,points)]
+        tests=tables.get('baseline_comparison_accuracy_tests',pd.DataFrame())
+    # Identical scales across participants; never clip observations below 0.6.
+    lo=max(0.,.05*np.floor((points.accuracy.min()-.03)/.05))
+    hi=min(1.,max(lo+.10,.05*np.ceil((points.accuracy.max()+.03)/.05)))
+    columns=min(2,len(panels));rows=int(np.ceil(len(panels)/columns))
+    fig,axes=plt.subplots(rows,columns,figsize=(12*columns,8.5*rows),squeeze=False)
+    for ax,(subject,_,points) in zip(axes.flat,panels):
+        selected=tests if subject is None else tests.loc[tests.subject.eq(subject)]
+        _draw_comparison_accuracy(ax,points,'run',selected,
+                                 'session' if subject is None else 'episode',(lo,hi))
+        if subject is not None:
+            # Participant identifier, not a figure title or explanatory footer.
+            transform=ax.transAxes+ScaledTranslation(0,196/72,fig.dpi_scale_trans)
+            ax.text(0.,1.,f'sub{int(subject):03d}',transform=transform,
+                    ha='left',va='bottom',fontsize=26,fontweight='bold',gid='participant-label')
+    for ax in list(axes.flat)[len(panels):]:fig.delaxes(ax)
+    # Point unit, coverage and interpretation remain in saved tables/QA/README,
+    # not a small-print caption inside the exported paper figure.
+    save(fig,'human_action_four_model_boxplot',comparison=True)
+
+
 def render(number,root,tables,title,arrays=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     root=Path(root);figures=root/'figures';figures.mkdir(parents=True,exist_ok=True);out=[]
-    def save(fig,name):
-        fig.suptitle(title,fontsize=13);fig.tight_layout()
+    def save(fig,name,comparison=False):
+        fig.tight_layout()
         for ext in ('png','pdf'):
             p=figures/f'{name}.{ext}';fig.savefig(p,dpi=180,bbox_inches='tight');out.append(str(p))
         plt.close(fig)
     if int(number)==2:
+        _plot_baseline_comparison(tables,title,save)
         d=tables.get('run_scores',pd.DataFrame())
         if len(d):
             fig,axes=plt.subplots(1,2,figsize=(10,4))
@@ -294,7 +715,7 @@ def render(number,root,tables,title,arrays=None):
                     part=d.loc[d.metric.eq(metric)].copy();part['bin']=(part.real_step//50000).astype(int)
                     for sub,r in part.groupby('subject'):
                         z=r.groupby('bin')[['real_step','value']].mean();ax.plot(z.real_step/1e6,z.value,label=f'sub{int(sub):03d}')
-                    ax.set(title=metric,xlabel='Training environment actions (M)');ax.legend(fontsize=7,frameon=False)
+                    ax.set(ylabel=metric,xlabel='Training environment actions (M)');ax.legend(fontsize=7,frameon=False)
                 save(fig,name)
     elif int(number)==3:
         d=tables.get('budget_distribution',pd.DataFrame())
@@ -308,7 +729,7 @@ def render(number,root,tables,title,arrays=None):
             for ax,source in zip(axes[1:],['ema','online']):
                 z=_mean(sign.loc[sign.source.eq(source)],['sign'],['probability','actual']).set_index('sign').reindex(['negative','positive'])
                 ax.bar(np.arange(2)-.16,z.probability,.3,label='Gate probability',color='#2780a3');ax.bar(np.arange(2)+.16,z.actual,.3,label='Actual continue',color='#d68b40')
-                ax.set(xticks=[0,1],xticklabels=['VoC < 0','VoC > 0'],ylim=(0,1),title=source.upper());ax.legend(fontsize=8)
+                ax.set(xticks=[0,1],xticklabels=['VoC < 0','VoC > 0'],ylim=(0,1),ylabel=source.upper()+' continuation probability');ax.legend(fontsize=8)
             save(fig,'voc_and_actual_continuation')
         d=tables.get('state_budget',pd.DataFrame())
         if len(d):
@@ -417,7 +838,8 @@ def task_state(decisions,metadata):
             f=part.source_frame.to_numpy(int);source_count+=len(f)
             if not np.array_equal(action[f],part.human_action.to_numpy(int)):raise ValueError('Task-state action alignment mismatch')
             np.testing.assert_allclose(times[f],part.time,atol=1e-8,rtol=0)
-            ok=(np.diff(part.decision.to_numpy(int))==1)&(np.diff(f)>0)&(segment[f[1:]]==segment[f[:-1]])
+            from common.sampling import sequence_index
+            ok=(np.diff(sequence_index(part).to_numpy(int))==1)&(np.diff(f)>0)&(segment[f[1:]]==segment[f[:-1]])
             if visual is not None:
                 here=np.searchsorted(screen_frames,f);prior=np.searchsorted(screen_frames,np.maximum(f-1,0))
                 change=np.linalg.norm(visual[here]-visual[prior],axis=1);change[boundary[f]]=np.nan

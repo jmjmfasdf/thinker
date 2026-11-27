@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 from scipy import linalg
 from scipy.special import expit, softmax, logsumexp
+from common.figure_style import paper_style
 RESEARCH = Path(__file__).resolve().parent
 DEFAULT_INPUT = RESEARCH.parent / 'logs/visualization/campaigns/visualization_hxln_completed_10m_20261124'
 VERSION = 'control-patterns-v3.1'
@@ -1193,6 +1194,7 @@ def validate_game(args,game,out):
         predictions=len(predrows),conditional_associations_only=True,uncertainty='within-run time block bootstrap; equal-run mean',
         continuity_null='circularly shifted state sequence per segment, preserves overlap-induced temporal dependence'))
 
+@paper_style()
 def render_game(args,game,out):
     import html
     import matplotlib

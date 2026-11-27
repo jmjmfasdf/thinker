@@ -3,7 +3,6 @@ from pathlib import Path
 from argparse import ArgumentParser
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import ast
-import contextlib
 import importlib
 import inspect
 import json
@@ -12,10 +11,11 @@ import tempfile
 
 for key in ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS'):
     os.environ.setdefault(key,'1')
-from .paths import REPO, OUTPUTS
+from .paths import REPO, OUTPUTS, output_base
 from .research_inputs import DEFAULT_INPUT, BlockedInput, capture_metadata, prepare_native, sha
 from .result_store import ResultStore, ResultStoreError, _verify
 from .io import signature, clean
+from .sampling import mode
 
 THEMES={'00':'native_preparation','01':'behavioral_analysis','02':'model_validation',
 '03':'computation_allocation','04':'computation_utility','05':'evaluation_revision',
@@ -34,15 +34,26 @@ def parser(number):
     p.add_argument('--games','--game',nargs='+',choices=['pong','enduro','spaceinvaders','mario'],default=['pong','enduro','spaceinvaders'])
     p.add_argument('--input-root',type=Path,default=DEFAULT_INPUT)
     p.add_argument('--outputs-root',type=Path,default=OUTPUTS)
+    p.add_argument('--sample-mode',choices=['all','15hz'],default='all',
+                   help='Analysis sample only; 00 retains both views. Both modes replace the same numbered output.')
+    if number=='01':
+        p.add_argument('--legacy-output-layout',action='store_true',
+                       help='Deprecated compatibility flag; all results now use OUTPUTS_ROOT/NN directly.')
     p.add_argument('--behavior-root',type=Path)
     p.add_argument('--scalar-cache',type=Path)
     p.add_argument('--training-root',type=Path)
+    if number=='02':
+        p.add_argument('--baseline-root',type=Path,
+                       help='Saved action_metrics folder; audit scores and compare four models on identical decisions')
+        p.add_argument('--baseline-predictions-root',type=Path,
+                       help='Audited aligned_arrays folder; default: sibling full_data_scope_audit/aligned_arrays of baseline-root')
     p.add_argument('--utility-input',type=Path)
     p.add_argument('--forecast-input',type=Path)
     p.add_argument('--rich-reuse',type=Path)
     p.add_argument('--stage',choices=['all','prepare','analyze','render'],default='all')
     p.add_argument('--render-only',action='store_true')
-    p.add_argument('--resume',action='store_true',help='Reuse verified stages; changed analysis or plot signatures invalidate only descendants')
+    p.add_argument('--resume',action='store_true',default=True,
+                   help='Enabled by default: reuse verified stages and replace results when inputs, mode or code change')
     p.add_argument('--aggregate',action='store_true',help='Equal participant summaries from current saved results; no raw extraction')
     p.add_argument('--workers',type=int,default=1)
     p.add_argument('--seed',type=int,default=701)
@@ -65,13 +76,27 @@ def code_signature(module, render=False):
         # Plot-only changes cannot invalidate numerical analysis.
         return signature(ast.dump(ast.Module(body=nodes,type_ignores=[]),include_attributes=False))
     dependencies=[]
-    for name in ('inference.py','prediction.py','outcomes.py','matching.py','features.py','io.py','native.py','research_inputs.py','native_replay.py'):
+    for name in ('inference.py','prediction.py','outcomes.py','matching.py','features.py','io.py','native.py','research_inputs.py','native_replay.py','sampling.py'):
         dependencies.append(sha(Path(__file__).with_name(name)))
     backend={'temporal_pipeline':['evaluation_accumulation.py','bout_evaluation.py'],
         'control_pattern_pipeline':['control_patterns.py'], 'neural_current':['neural.py'],
         'validation_allocation':['behavior.py'], 'revision_behavior':['behavior.py','replay_themes.py','value_updates.py'],
         'policy_continuity':['replay_themes.py','value_updates.py']}.get(module.__name__.split('.')[-1],[])
     dependencies.extend(sha(Path(module.__file__).with_name(name)) for name in backend)
+    if module.__name__.split('.')[-1]=='temporal_pipeline':
+        dependencies.append(code_signature(importlib.import_module('analyses.action_support')))
+    if module.__name__.split('.')[-1]=='group_results':
+        # Group 02 recomputes participant tests with the same numerical helpers.
+        dependencies.append(code_signature(importlib.import_module('analyses.validation_allocation')))
+        dependencies.append(code_signature(importlib.import_module('analyses.action_support')))
+    if module.__name__.split('.')[-1] in ('validation_allocation','revision_behavior','policy_continuity',
+            'temporal_pipeline','control_pattern_pipeline','group_results'):
+        dependencies.append(sha(Path(__file__).with_name('voc_dynamics.py')))
+        voc = importlib.import_module('analyses.voc_relationships')
+        tree_voc = ast.parse(Path(voc.__file__).read_text())
+        numerical = [n for n in tree_voc.body if not (isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))
+                     and n.name.startswith('render'))]
+        dependencies.append(signature(ast.dump(ast.Module(body=numerical,type_ignores=[]),include_attributes=False)))
     if module.__name__.split('.')[-1]!='human_behavior':
         base=Path(__file__).resolve().parents[1]
         for name in ('analyses/replay_themes.py','analyses/value_updates.py','panels/mu_heatmaps.py','panels/data.py','panels/estimators.py'):
@@ -166,6 +191,7 @@ def render_neural(root,tables,title):
             fig,axs=plt.subplots(1,len(stages),squeeze=False,figsize=(7*len(stages),max(4,len(mean.roi.unique())*.28)))
             for ax,stage in zip(axs.ravel(),stages):
                 im=_plot_neural_heatmap(ax,mean.loc[mean.stage.eq(stage)],'roi','term',stage.replace('_',' '),limit)
+                ax.set_xlabel(stage.replace('_',' '));ax.set_ylabel('ROI')
                 fig.colorbar(im,ax=ax,label='Partial rank correlation')
             fig.suptitle(title+' · RSA\n'+averaging)
             save(fig,'rsa_control_sets')
@@ -184,8 +210,13 @@ def _render_signature(number,module):
     return dict(module=code_signature(module,True),
         delegated=code_signature(importlib.import_module('analyses.'+MODULES[number]),True) if number in MODULES else None,
         dispatcher=signature(inspect.getsource(render)),
+        group_dispatcher=signature(inspect.getsource(_render_group)),
+        style=sha(Path(__file__).with_name('figure_style.py')),
         neural=signature([inspect.getsource(render_neural),inspect.getsource(_plot_neural_heatmap)])
-               if number in ('11','12','13') else None,version='canonical-v3')
+               if number in ('11','12','13') else None,
+        action_support=code_signature(importlib.import_module('analyses.action_support'),True) if number=='09' else None,
+        voc=code_signature(importlib.import_module('analyses.voc_relationships'),True)
+            if number in ('03','05','06','07','08','09','10') else None,version='canonical-v4')
 
 
 def _qa_metadata(store,qa,tables=None):
@@ -202,6 +233,24 @@ def _scientific_status(meta):
     return str(meta.get('scientific_status',meta.get('analysis',{}).get('status','NOT_ANALYZED'))).upper()
 
 
+def _require_sample_mode(meta,args,path):
+    """A shared public path must never silently redraw or pool another sample."""
+    identity=meta.get('identity',{})
+    saved=identity.get('sample_mode',meta.get('analysis',{}).get('sample_mode'))
+    sources=identity.get('sources',{})
+    if isinstance(sources,dict) and sources:
+        source_modes={row.get('identity',{}).get('sample_mode') for row in sources.values()}
+        if len(source_modes)!=1 or None in source_modes:
+            raise ResultStoreError('Mixed or unknown sample modes in saved group: '+str(path))
+        source_mode=next(iter(source_modes))
+        if saved is not None and saved!=source_mode:
+            raise ResultStoreError('Group/source sample-mode mismatch: '+str(path))
+        saved=source_mode
+    if saved!=mode(args):
+        raise ResultStoreError(f'Saved sample_mode={saved!r}, requested={mode(args)!r}: {path}. '
+            'Run the requested analysis first; render-only and aggregation cannot change the sample.')
+
+
 def _legacy_guard(root):
     """Never overwrite an old numbered layout while its dependencies are live."""
     root=Path(root)
@@ -210,20 +259,80 @@ def _legacy_guard(root):
             +str(root)+'. Complete the explicit guarded output migration first; use --outputs-root for an isolated check.')
 
 
+def _archive_09(root):
+    """Preserve the completed public 09 before a numerical replacement.
+
+    Called while holding its ResultStore lock. Archives are immutable and
+    content-addressed by the completed stage manifests; frozen campaign source
+    directories are never touched. Render-only reruns do not make an archive.
+    """
+    import os
+    import shutil
+    root=Path(root)
+    marker=root/'logs/run.json'
+    if not marker.is_file():return None
+    saved=json.loads(marker.read_text())
+    if 'analyze' not in saved.get('stages',{}):return None
+    _verify(root,saved,required=('analyze',))
+    revision=signature(dict(identity=saved['identity'],stages=saved['stages']))
+    destination=root.parents[2]/'.archive'/'09'/root.parent.name/root.name/revision
+    if destination.exists():
+        archived=json.loads((destination/'logs/run.json').read_text())
+        _verify(destination,archived,required=('analyze',))
+        if signature(dict(identity=archived['identity'],stages=archived['stages']))!=revision:
+            raise ResultStoreError('Conflicting immutable 09 archive: '+str(destination))
+        return destination
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.archive-09-',dir=destination.parent) as temporary:
+        staged=Path(temporary)/'result'
+        shutil.copytree(root,staged)
+        _verify(staged,saved,required=('analyze',))
+        os.replace(staged,destination)
+    return destination
+
+
 def render(number,module,root,tables,title):
-    if number in ('02','03','05','06','07','08'):module.render(number,root,tables,title)
-    elif number in ('11','12','13'):render_neural(root,tables,title)
-    else:module.render(root,tables,title)
+    from analyses import voc_relationships as voc
+    from common.figure_style import paper_style
+    with paper_style():
+        if number in ('02','03','05','06','07','08'):module.render(number,root,tables,title)
+        elif number in ('11','12','13'):render_neural(root,tables,title)
+        else:module.render(root,tables,title)
+        if number in voc.THEMES:voc.render(root,tables)
+
+
+def _render_group(number,module,root,tables,title):
+    """All canonical group exports obey the same policy as individual exports."""
+    from common.figure_style import paper_style
+    from analyses import voc_relationships as voc
+    with paper_style():
+        if number in ('11','12','13'):render_neural(root,tables,title)
+        elif number=='10':
+            from analyses.control_pattern_pipeline import render_group
+            render_group(root,tables,title)
+        else:module.render(number,root,tables,title)
+        if number in voc.THEMES:voc.render(root,tables)
 
 
 def analyze(number,module,args,subject,game,prepared,workdir):
-    if number=='01':return (*module.analyze(subject,game,behavior_root=args.behavior_root),{})
-    if number=='09':return module.analyze(args,subject,game,workdir)
+    if number=='01':return (*module.analyze(subject,game,behavior_root=args.behavior_root,sample_mode=mode(args)),{})
     if number in ('11','12','13'):
         tables,qa=module.run_current_neural(number,prepared['decisions'],args.input_root,subject,game)
         return tables,qa,{}
-    if number in ('04','10'):return module.analyze(args,subject,game,prepared,workdir)
-    return module.analyze(number,args,subject,game,prepared,workdir)
+    from analyses import voc_relationships as voc
+    if number in voc.THEMES:
+        from common.voc_dynamics import prepare
+        vt,vqa=prepare(args,prepared)
+        prepared=dict(prepared,voc_tables=vt)
+    if number=='09':tables,qa,arrays=module.analyze(args,subject,game,workdir,prepared=prepared)
+    elif number in ('04','10'):tables,qa,arrays=module.analyze(args,subject,game,prepared,workdir)
+    else:tables,qa,arrays=module.analyze(number,args,subject,game,prepared,workdir)
+    if number in voc.THEMES:
+        extra,diagnostics=voc.extend(number,args,prepared,tables,vt)
+        tables.update(extra);qa['voc_dynamics']=dict(extraction=vqa,analysis=diagnostics)
+        if diagnostics['status']!='COMPLETED' and str(qa.get('status','')).upper()=='COMPLETED':
+            qa['status']='PARTIAL_FITS'
+    return tables,qa,arrays
 
 
 def _input_identity(number,args,subject,game):
@@ -264,6 +373,11 @@ def _external_signature(number,args,meta,subject,game):
         folder=base if (base/'logs.csv').is_file() else base/logical if logical else None
         if folder is not None:
             for name in ('logs.csv','logs_model.csv','meta.json','meta_model.json'):add(folder/name,'training')
+        baseline=getattr(args,'baseline_root',None)
+        if baseline is not None:
+            for name in ('run_metrics.csv','manifest.json','qa.json'):add(Path(baseline)/name,'saved_baseline')
+            from analyses.validation_allocation import baseline_prediction_files
+            for path in baseline_prediction_files(args,subject,game):add(path,'baseline_predictions')
     if number=='04' and getattr(args,'utility_input',None):
         supplied=Path(args.utility_input)
         csv=supplied/'utility_states.csv' if supplied.is_dir() else supplied
@@ -292,7 +406,7 @@ def _external_signature(number,args,meta,subject,game):
 
 
 def unit(number,args,subject,game):
-    number=f'{int(number):02d}';root=Path(args.outputs_root)/number/f'sub{subject:03d}'/game
+    number=f'{int(number):02d}';root=(Path(args.outputs_root) if number=='00' else output_base(args))/number/f'sub{subject:03d}'/game
     _legacy_guard(root)
     if number=='00':
         if args.render_only or args.stage=='render':
@@ -309,6 +423,7 @@ def unit(number,args,subject,game):
         if not (root/'logs/run.json').is_file():raise BlockedInput('No analyzed result to redraw: '+str(root))
         saved=json.loads((root/'logs/run.json').read_text())
         _verify(root,saved,required=('prepare','analyze'))
+        _require_sample_mode(saved,args,root)
         identity=saved['identity'];meta=saved.get('input',{})
     else:
         try:meta=_input_identity(number,args,subject,game)
@@ -317,8 +432,8 @@ def unit(number,args,subject,game):
             with ResultStore(root,identity,resume=True) as store:store.blocked_input(str(error))
             return dict(subject=subject,game=game,status='BLOCKED_INPUT',path=str(root),reason=str(error))
         identity=dict(theme=number,subject=subject,game=game,dataset=meta.get('dataset'),
-            source=signature(meta.get('sources') or meta.get('manifest_sha256')))
-    settings=clean({k:v for k,v in vars(args).items() if k not in ('subjects','games','workers','resume','stage','render_only','aggregate','outputs_root','input_root')})
+            source=signature(meta.get('sources') or meta.get('manifest_sha256')),sample_mode=mode(args))
+    settings=clean({k:v for k,v in vars(args).items() if k not in ('subjects','games','workers','resume','stage','render_only','aggregate','outputs_root','input_root','legacy_output_layout')})
     with ResultStore(root,identity,resume=args.resume or plot_only) as store:
         try:
             if not plot_only:
@@ -333,9 +448,12 @@ def unit(number,args,subject,game):
                                  dispatcher=inspect.getsource(analyze),settings=settings,
                                  external=_external_signature(number,args,meta,subject,game)))) as stage:
                     if not stage.reused:
+                        if number=='09':_archive_09(root)
                         prepared=None if number=='01' else prepare_native(args,subject,game)
                         with tempfile.TemporaryDirectory(prefix=f'research-{number}-') as workdir:
                             tables,qa,arrays=analyze(number,module,args,subject,game,prepared,Path(workdir))
+                        qa['sample_mode']=mode(args)
+                        if prepared is not None:qa['sampling_rule']=prepared['sampling_rule']
                         # Missing inputs must never commit an empty successful analysis stage.
                         if qa.get('status')=='BLOCKED_INPUT':raise BlockedInput(qa.get('reason',str(qa)))
                         write_outputs(stage,tables,arrays)
@@ -369,26 +487,28 @@ def group(number,args):
     number=f'{int(number):02d}';results=[]
     plot_only=args.render_only or args.stage=='render'
     for game in args.games:
-        root=Path(args.outputs_root)/number/'group'/game
+        root=output_base(args)/number/'group'/game
         _legacy_guard(root)
         if plot_only:
             if not (root/'logs/run.json').is_file():raise BlockedInput('No analyzed group result to redraw: '+str(root))
             saved=json.loads((root/'logs/run.json').read_text())
             _verify(root,saved,required=('prepare','analyze'));identity=saved['identity']
+            _require_sample_mode(saved,args,root)
         else:
-            units=[(s,game,Path(args.outputs_root)/number/f'sub{s:03d}'/game) for s in args.subjects]
+            units=[(s,game,output_base(args)/number/f'sub{s:03d}'/game) for s in args.subjects]
             missing=[str(r) for _,_,r in units if not (r/'logs/run.json').exists()]
             if missing:raise BlockedInput('Missing participant results: '+', '.join(missing))
             sources={}
             for subject,_,path in units:
                 meta=json.loads((path/'logs/run.json').read_text())
                 _verify(path,meta,required=('prepare','analyze'))
+                _require_sample_mode(meta,args,path)
                 # Redrawing or recording a later blocked attempt does not alter numbers.
                 sources[str(subject)]=dict(identity=meta['identity'],
                     analyze=meta['stages']['analyze']['signature'],scientific_status=_scientific_status(meta),
                     tables={k:v for record in meta['stages'].values() for k,v in record['artifacts'].items()
                             if k.startswith('tables/')})
-            identity=dict(theme=number,game=game,subjects=sorted(args.subjects),sources=sources)
+            identity=dict(theme=number,game=game,subjects=sorted(args.subjects),sources=sources,sample_mode=mode(args))
         with ResultStore(root,identity,resume=True) as store:
             if not plot_only:
                 with store.stage('prepare',identity):pass
@@ -399,6 +519,7 @@ def group(number,args):
                 qa=None
                 with store.stage('analyze',code_signature(group_results)) as stage:
                     if not stage.reused:
+                        if number=='09':_archive_09(root)
                         tables,qa,arrays=group_results.aggregate(number,args,units)
                         write_outputs(stage,tables,arrays)
                 if qa is not None:
@@ -414,11 +535,8 @@ def group(number,args):
             _group_scope(number,store)
             with store.stage('render',_render_signature(number,group_results)) as stage:
                 if not stage.reused:
-                    if number in ('11','12','13'):render_neural(stage.path,read_tables(stage.path),f'{game} · equal participant')
-                    elif number=='10':
-                        from analyses.control_pattern_pipeline import render_group
-                        render_group(stage.path,read_tables(stage.path),f'{game} · participant comparison')
-                    else:group_results.render(number,stage.path,read_tables(stage.path),f'{game} · equal participant')
+                    title=f'{game} · participant comparison' if number=='10' else f'{game} · equal participant'
+                    _render_group(number,group_results,stage.path,read_tables(stage.path),title)
             store.publish()
         results.append(dict(game=game,path=str(root),status=store.meta['status'],scientific_status=_scientific_status(store.meta)))
     return results
@@ -431,7 +549,7 @@ def _run_unit(task):
     except Exception as error:
         return dict(subject=subject,game=game,status='BLOCKED_INPUT' if isinstance(error,FileNotFoundError) else 'FAILED',
                     error_type=type(error).__name__,reason=str(error),
-                    path=str(Path(args.outputs_root)/number/f'sub{subject:03d}'/game))
+                    path=str((Path(args.outputs_root) if number=='00' else output_base(args))/number/f'sub{subject:03d}'/game))
 
 
 def main(number):
@@ -439,6 +557,8 @@ def main(number):
     if any(s<1 or s>6 for s in args.subjects):p.error('Subjects must be1–6')
     if number!='01' and 'mario' in args.games:p.error('Mario is currently available for model-independent01 only')
     if args.workers<1:p.error('--workers must be positive')
+    if getattr(args,'baseline_predictions_root',None) and not getattr(args,'baseline_root',None):
+        p.error('--baseline-predictions-root requires --baseline-root')
     if number=='00' and (args.render_only or args.stage=='render'):
         p.error('00 has no figures; --render-only / --stage render are unsupported')
     if args.aggregate:

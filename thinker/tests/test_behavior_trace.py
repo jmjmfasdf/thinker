@@ -852,6 +852,11 @@ def test_episode_source_matches_current_bc_loader_alignment(tmp_path):
             reference["initial_prev_action"][0]
         )
         np.testing.assert_array_equal(replay["score_mask"][:3], [False, True, True])
+        full = source.replay_spec(0, include_initial=True)
+        np.testing.assert_array_equal(full['observation_source_index'], np.arange(10))
+        np.testing.assert_array_equal(full['actions_seq'], np.arange(9) % 3)
+        np.testing.assert_array_equal(full['score_mask'], [False, False]+[True]*7)
+        assert full['initial_prev_action'] == 0
 
 
 def test_canonical_dynamic_events_round_trip_through_writer(tmp_path):

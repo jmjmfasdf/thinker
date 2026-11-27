@@ -4074,7 +4074,7 @@ class SActorLearner:
                 "training and holdout behavioral sessions overlap: "
                 f"{sorted(overlap)}"
             )
-        scored_length = int(getattr(self.flags, "batch_length", 4))
+        scored_length = int(getattr(self.flags, "batch_length", 8))
         if scored_length <= 0:
             raise ValueError("batch_length must be the positive scored length")
         game_id = int(getattr(self.flags, "icopro_game_id", 0))
@@ -4091,6 +4091,10 @@ class SActorLearner:
             target_size=tuple(int(value) for value in obs_space.shape[-2:]),
             grayscale=bool(self.flags.grayscale),
             normalize=unit_float_contract,
+            # Human imitation follows the original capture clock, not the
+            # online Atari frame-skip-four clock.  Match visual_behav.
+            decision_hz=None,
+            max_time_gap=2.5 / 15.0,
             seed=int(getattr(self.flags, "base_seed", 0)),
         )
         if int(self.bc_loader.num_actions) != int(self.actor_net.num_actions):
@@ -4107,7 +4111,9 @@ class SActorLearner:
                 != self.imitation_data_signature):
             raise ValueError(
                 "behavioral dataset signature differs from the actor checkpoint; "
-                "refusing a non-deterministic imitation resume"
+                "refusing a non-deterministic imitation resume. Original-order "
+                "training cannot resume a legacy 15-Hz imitation run; use a "
+                "new run or the original frozen training source."
             )
         self._restore_loader_rng_state(self._checkpoint_imitation_rng_state)
 
@@ -4140,12 +4146,14 @@ class SActorLearner:
             )
         self._logger.info(
             "Dynamic imitation enabled: subjects=%s train_sessions=%s "
-            "holdout_sessions=%s scored_length=%d frequency=%d",
+            "holdout_sessions=%s scored_length=%d frequency=%d "
+            "sampling=original-order-v1 decision_hz=None max_time_gap=%s",
             subjects,
             sessions,
             tuple(sorted(holdout)),
             scored_length,
             frequency,
+            self.bc_loader.max_time_gap,
         )
 
     def _refresh_imitation_model(self, require_weights=False):
@@ -4247,7 +4255,7 @@ class SActorLearner:
         )
 
     def _sample_imitation_batch(self):
-        scored_length = int(getattr(self.flags, "batch_length", 4))
+        scored_length = int(getattr(self.flags, "batch_length", 8))
         batch = self.bc_loader.get_sequence_batch(
             batch_size=int(getattr(self.flags, "icopro_batch_size", 32)),
             sequence_length=scored_length,
@@ -4262,7 +4270,7 @@ class SActorLearner:
 
         batch_size, edge_count = validate_behavior_batch(batch)
         burn = int(getattr(self.flags, "icopro_burn_in_steps", 1))
-        expected_edges = int(getattr(self.flags, "batch_length", 4)) + burn
+        expected_edges = int(getattr(self.flags, "batch_length", 8)) + burn
         score = np.asarray(batch["score_mask"], dtype=bool)
         if np.any(score[..., :burn]) or not np.all(score[..., burn:]):
             raise ValueError("behavior score mask differs from configured burn-in")

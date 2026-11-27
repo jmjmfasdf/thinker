@@ -195,6 +195,7 @@ def test_checkpoint_smoke_flags_preserve_configured_precision(tmp_path):
                 "sep_im_head": True,
                 "max_search_steps": 20,
                 "float16": True,
+                "batch_length": 4,
                 "model_float16": False,
                 "parallel": True,
                 "parallel_actor": True,
@@ -553,6 +554,7 @@ def test_smoke_parser_exposes_negative_alignment_boolean(tmp_path):
     ])
 
     assert args.voc_gate_param_align is False
+    assert args.scored_length == 8
 
 
 def test_smoke_parser_and_flags_expose_exact_projection(tmp_path):

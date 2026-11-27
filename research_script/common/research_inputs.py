@@ -13,9 +13,9 @@ from .paths import REPO, OUTPUTS
 from .result_store import ResultStore
 from .io import signature
 
-DEFAULT_INPUT = REPO/'logs/visualization/hxln_10m'
+DEFAULT_INPUT = REPO/'logs/visualization/hxln_10m_allframes'
 GAMES = ('pong', 'enduro', 'spaceinvaders')
-VERSION = 'native-preparation-v2'
+VERSION = 'native-preparation-v3-sampling'
 
 class BlockedInput(FileNotFoundError):
     pass
@@ -46,7 +46,8 @@ def capture_metadata(input_root, subject, game):
         raise ValueError('Capture plan differs from completed capture')
     return dict(capture=str(root.resolve()), manifest_sha256=claim,
                 checkpoint=plan['semantic']['checkpoint'], episodes=m['episodes'],
-                semantic_sha256=m['semantic_sha256'], dataset='latest_native_10m')
+                semantic_sha256=m['semantic_sha256'], dataset='latest_native_10m',
+                replay_sampling=m['semantic'].get('replay_sampling', 'legacy-15hz'))
 
 
 def aliases(d):
@@ -109,10 +110,11 @@ def validate_source_bindings(metadata, qa):
 
 
 def prepare_native(args, subject, game):
+    from . import sampling
     meta = capture_metadata(args.input_root, subject, game)
     root = Path(args.outputs_root)/'00'/f'sub{subject:03d}'/game
     identity = dict(dataset=meta['dataset'], subject=subject, game=game, manifest_sha256=meta['manifest_sha256'])
-    sig = signature(dict(version=VERSION, code=sha(__file__), manifest=meta['manifest_sha256']))
+    sig = signature(dict(version=VERSION, code=sha(__file__), sampling=sha(sampling.__file__), manifest=meta['manifest_sha256']))
     with ResultStore(root, identity, resume=True) as store:
         preparation = None
         with store.stage('prepare', sig) as stage:
@@ -126,17 +128,23 @@ def prepare_native(args, subject, game):
                     validate_source_bindings(meta, old['qa'])
                     d = aliases(pd.read_csv(cached/'decisions.csv.gz'))
                     e = pd.read_csv(cached/'choices.csv.gz')
-                    stage.write_table('decisions', d)
-                    stage.write_table('choices', e)
+                    tables = sampling.prepare_tables(d, e, sampling.inventory(meta))
+                    for name, frame in tables.items(): stage.write_table(name, frame)
                     preparation = dict(metadata=meta, qa=old['qa'],
-                        imported_signature=old['signature'], import_note=old.get('import_note'))
+                        imported_signature=old['signature'], import_note=old.get('import_note'),
+                        sampling_rule=sampling.RULE,
+                        sampling_counts={name:len(frame) for name,frame in tables.items()})
         if preparation is not None: store.meta['preparation'] = preparation
         # 00 contains preparation only; STAGE_COMPLETE is a successful 00 result.
         store.publish(required_stages=('prepare',))
     saved = read(root/'logs/run.json')['preparation']
     validate_source_bindings(meta, saved['qa'])
-    return dict(decisions=pd.read_csv(root/'tables/decisions.csv.gz'),
-                choices=pd.read_csv(root/'tables/choices.csv.gz'), metadata=meta,
+    selected_mode = sampling.mode(args)
+    suffix = '_15hz' if selected_mode == '15hz' else ''
+    return dict(decisions=pd.read_csv(root/f'tables/decisions{suffix}.csv.gz'),
+                choices=pd.read_csv(root/f'tables/choices{suffix}.csv.gz'), metadata=meta,
+                sample_mode=selected_mode, sampling_rule=saved['sampling_rule'],
+                decisions_path=root/f'tables/decisions{suffix}.csv.gz',
                 qa=saved['qa'], config=saved['qa']['config'], cache=root)
 
 

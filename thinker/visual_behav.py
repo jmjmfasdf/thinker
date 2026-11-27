@@ -1341,6 +1341,10 @@ def build_capture_plan(
     semantic: dict[str, Any] = {
         "schema_version": CAPTURE_SCHEMA_VERSION,
         "kind": "dynamic-thinker-behavior-capture-semantics",
+        "replay_sampling": "original-order-v1",
+        "decision_hz": None,
+        "initial_transition_retained": True,
+        "unscored_initial_edges": 2,
         "checkpoint": checkpoint_semantics,
         "seed_protocol": SEED_PROTOCOL,
         "base_seed": config.base_seed,
@@ -2111,7 +2115,7 @@ class _LazyObservationProvider:
 
 def _episode_batch(behavior_source: Any, descriptor: Any) -> Mapping[str, Any]:
     numpy = importlib.import_module("numpy")
-    replay = behavior_source.replay_spec(descriptor)
+    replay = behavior_source.replay_spec(descriptor, include_initial=True)
     provider = _LazyObservationProvider(
         behavior_source, descriptor, replay["observation_positions"]
     )
@@ -2362,7 +2366,9 @@ def _coordinator_source_tasks(
         target_size=spec.target_size,
         grayscale=spec.grayscale,
         normalize=spec.observation_dtype == "float32",
-        decision_hz=15.0,
+        decision_hz=None,
+        # Preserve the existing clock-gap boundary independently of sampling.
+        max_time_gap=2.5 / 15.0,
         seed=config.base_seed,
     )
     trace = _load_behavior_trace()
@@ -2604,11 +2610,9 @@ class _CaptureRuntime:
     ) -> dict[str, Any]:
         source_observations = int(descriptor.logical_observation_count)
         source_edges = int(descriptor.edge_count)
-        replay_observations = source_observations - 1
-        replay_edges = source_edges - 1
-        scored_edges = int(
-            getattr(descriptor, "scored_edge_count", max(0, replay_edges - 1))
-        )
+        replay_observations = source_observations
+        replay_edges = source_edges
+        scored_edges = max(0, replay_edges - 2)
         return {
             "schema_version": CAPTURE_SCHEMA_VERSION,
             "episode_id": store_id,
@@ -2619,11 +2623,17 @@ class _CaptureRuntime:
             "source_sha256": source.sha256,
             "source_size": source.size,
             "source_episode_index": int(descriptor.local_episode_index),
+            "replay_sampling": "original-order-v1",
+            "decision_hz": None,
+            "initial_transition_retained": True,
+            "unscored_initial_edges": 2,
+            "source_first_frame": int(descriptor.observation_source_index[0]),
+            "source_first_time": float(descriptor.decision_times[0]),
             "subject": int(descriptor.subject), "session": int(descriptor.session),
             "block": int(descriptor.block), "game": int(descriptor.game),
             # The unqualified logical counts describe the replay handed to the
             # runner and therefore retain obs = edges + 1.  Source-domain
-            # counts make the consumed burn-in edge explicit.
+            # counts now match: warm-up edges are retained, only scoring masked.
             "logical_observation_count": replay_observations,
             "logical_action_count": replay_edges,
             "source_logical_observation_count": source_observations,
@@ -2905,7 +2915,7 @@ class _CaptureRuntime:
                         queue_size=self.config.queue_size,
                         compression_level=self.config.compression_level,
                     )
-                    replay_alignment = behavior_source.replay_spec(descriptor)
+                    replay_alignment = behavior_source.replay_spec(descriptor, include_initial=True)
                     event_sink = _CanonicalEventSink(
                         writer,
                         images=self.config.images,
@@ -3209,12 +3219,22 @@ def _validate_episode_semantics(
         scored_edges = int(metadata["scored_edge_count"])
     except (KeyError, TypeError, ValueError) as error:
         raise VisualBehaviorError(f"episode alignment metadata is incomplete: {path}") from error
+    original_order = semantic.get("replay_sampling") == "original-order-v1"
+    if original_order and not (
+        metadata.get("replay_sampling") == "original-order-v1"
+        and metadata.get("initial_transition_retained") is True
+        and metadata.get("unscored_initial_edges") == 2
+        and metadata.get("decision_hz") is None
+    ):
+        raise VisualBehaviorError(f"episode original-order protocol mismatch: {path}")
+    skipped = 0 if original_order else 1
+    warmup = 2 if original_order else 1
     if not (
         source_observations == source_edges + 1
         and replay_observations == replay_edges + 1
-        and replay_observations == source_observations - 1
-        and replay_edges == source_edges - 1
-        and scored_edges == max(0, replay_edges - 1)
+        and replay_observations == source_observations - skipped
+        and replay_edges == source_edges - skipped
+        and scored_edges == max(0, replay_edges - warmup)
         and int(metadata.get("logical_observation_count", -1)) == replay_observations
         and int(metadata.get("logical_action_count", -1)) == replay_edges
     ):

@@ -13,9 +13,12 @@ import numpy as np
 import pandas as pd
 from common.result_store import _verify
 
-RAW_TABLES={'observations','bouts','decisions','choices','decision_scores','decision_allocation',
+RAW_TABLES={'observations','bouts','decisions','choices','decision_scores','decision_allocation','baseline_comparison_decisions',
+    'voc_choices','voc_transitions','voc_decisions','voc_endpoints','voc_readout_predictions',
+    'voc_temporal_records','voc_window_features',
     'choice_observations','task_state_observations','primary_predictions','primary_windows','primary_directional_features',
-    'risk','risk_set','risk_observations','matched_pairs','heatmap_points'}
+    'risk','risk_set','risk_observations','matched_pairs','heatmap_points',
+    'action_support_windows','action_support_predictions'}
 EXAMPLE_TABLES={'primary_examples','primary_example_trajectories','primary_example_human',
     'bout_examples','bout_example_trajectories'}
 POPS=('overall','noop_to_active','active_to_other','active_to_noop')
@@ -236,6 +239,8 @@ def aggregate(number,args,units):
         for key,d in tables.items():
             if len(d) and 'subject' in d and not d.subject.eq(int(subject)).all():
                 raise ValueError(f'Subject contamination in {root}/{key}')
+            if number=='09' and key.startswith('action_support_') and len(d) and 'game' in d and not d.game.eq(game).all():
+                raise ValueError(f'Action-support game contamination in {root}/{key}')
             d=d.copy();d['subject']=int(subject);d['game']=game
             if key=='heatmap_points':points.append(d)
             if key in RAW_TABLES or key in EXAMPLE_TABLES:continue
@@ -244,6 +249,12 @@ def aggregate(number,args,units):
             collected.setdefault(key,[]).append(d)
     tables={key:pd.concat(parts,ignore_index=True) for key,parts in collected.items()}
     tables['group_inputs']=pd.DataFrame(inputs)
+    if number=='02' and len(tables.get('baseline_comparison_subject_scores',[])):
+        from analyses.validation_allocation import comparison_accuracy_tests, comparison_episode_tests
+        # Recompute on paired participants, never concatenate/average individual p-values.
+        tables['baseline_comparison_accuracy_tests']=comparison_accuracy_tests(tables)
+        # The displayed group figure uses separate episode-level panels per person.
+        tables.update(comparison_episode_tests(tables))
     requested=sorted(set(int(x) for x in getattr(args,'subjects',subjects)))
     missing=sorted(set(requested)-set(subjects))
     if number=='05' and len(tables.get('decision_updates',[])):
@@ -270,6 +281,9 @@ def aggregate(number,args,units):
     if number=='09' and len(tables.get('matched_curve_summary',[])):
         d=tables['matched_curve_summary'];keys=[c for c in ['metric','condition','lag'] if c in d]
         if len(keys)==3 and 'gain' in d:tables['group_matched_curve_summary']=_summary(d,keys,'gain')
+    if number=='09':
+        from . import action_support
+        tables.update(action_support.aggregate(tables,requested))
     if number=='10' and len(tables.get('switch_curves',[])):
         d=tables['switch_curves']
         required={'subject','held','metric','lag','mean','shifted'}
@@ -288,6 +302,16 @@ def aggregate(number,args,units):
         heatmaps='Common pooled1–99% axes; original COSYNE Gaussian kernel per participant; mean of supported participant probabilities; minimum min(4,requested subjects).',
         population_inference='Descriptive participant comparison; few participants do not establish a population mechanism',
         input_scope='Persisted canonical tables only; no raw replay/checkpoint access')
+    if number=='02' and 'baseline_comparison_accuracy_tests' in tables:
+        from analyses.validation_allocation import COMPARISON_INFERENCE, EPISODE_COMPARISON_INFERENCE
+        qa['accuracy_inference']=COMPARISON_INFERENCE
+        qa['accuracy_figure_inference']=EPISODE_COMPARISON_INFERENCE
+        qa['accuracy_figure_layout']='One panel per participant; equal episode/run points, shared 0–1 accuracy scale'
+    if number=='09':
+        qa['action_support'] = dict(primary='Conditional switch destination, post minus pre',
+            aggregation='Equal runs within session, equal sessions within participant, then equal participants',
+            uncertainty='Individual 30-second block bootstrap; group descriptive mean +/- 1.96 SEM',
+            model_training='Thinker trained on all four sessions; exploratory, not model-held-out validation')
     return tables,qa,{}
 
 
@@ -338,6 +362,9 @@ def render(number,root,tables,title,arrays=None):
         for ext in ['png','pdf']:
             p=out/f'{name}.{ext}';fig.savefig(p,dpi=180,bbox_inches='tight');written.append(str(p))
         plt.close(fig)
+    if number=='09':
+        from . import action_support
+        written.extend(action_support.render(root,tables))
     if number in ('04','06','08'):
         _render_group_040608(number,tables,title,save)
         return written

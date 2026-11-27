@@ -123,6 +123,37 @@ python train.py --rec_t 11 --tree_rep_rnn false --see_h false
 
 ## Dynamic Thinker
 
+### Behavioral imitation input
+
+Human imitation uses **original-order behavioral frames**, not a 15 Hz
+resampling. Consecutive steps and the four-frame stack follow adjacent source
+rows with their original timestamps. Sampled training windows still use the
+configured burn-in and scored lengths (for example, 16 + 8 original steps);
+this change does not turn training into full-episode recurrent unrolling.
+Windows never cross files, episode boundaries, clock resets, or timestamp
+gaps longer than 2.5/15 seconds, matching all-frame visualization.
+
+`FrameStackedBehavioralDataLoader` defaults to `decision_hz=None`; explicit
+resampling remains available only when a caller requests it. The live
+imitation training, evaluation and smoke entrypoints use original order.
+The behavioral signature includes the sampling rate and gap threshold, so
+legacy 15 Hz imitation checkpoints cannot silently resume as original-order
+training. Start a separate run for the new input contract; use the preserved
+frozen source to reproduce or resume historical runs. Existing checkpoints,
+visualizations and research outputs are not converted by this code change.
+Online Atari frame skip and research-script 15 Hz analysis selection are
+separate and remain unchanged.
+
+The default scored length is now `batch_length: 8`. For the existing burn-in-16
+experiments, keep `icopro_burn_in_steps=16` and `icopro_sampling_context=16`:
+each window has 24 transitions, 25 observations, and eight scored targets.
+Historical run YAMLs and frozen protocol presets remain unchanged. When
+deriving a fresh run from a historical config, explicitly pass
+`--batch_length 8`; a saved `batch_length: 4` still overrides the default.
+Do not resume an existing four-target run with a changed window contract.
+
+### Planning
+
 Dynamic Thinker is opt-in.  It learns the number of planning transitions at
 each real decision with the same categorical policy-gradient objective used by
 the actor.  The original fixed-budget implementation and its checkpoint shapes

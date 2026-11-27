@@ -169,6 +169,11 @@ def behavior(d,prepared):
 def analyze(number,args,subject,game,prepared,workdir):
     d=prepared['decisions'].copy()
     result=revision(d,prepared) if str(number)=='05' else behavior(d,prepared)
+    # The canonical dispatcher also appends VoC fits. Give it an explicit
+    # base status so unsupported appended fits can downgrade it truthfully.
+    failed=sum(int(table.status.ne('ok').sum()) for name,table in result[0].items()
+               if name.endswith('fit_qa') and 'status' in table)
+    result[1].update(status='PARTIAL_FITS' if failed else 'COMPLETED',failed_readout_fits=failed)
     for name,table in list(result[0].items()):
         table=table.copy();table['subject']=subject;table['game']=game;result[0][name]=table
     return result

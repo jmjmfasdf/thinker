@@ -1908,7 +1908,7 @@ class BehaviorEpisodeSource:
         return np.concatenate(frames, axis=0)
 
     def replay_spec(
-        self, episode_index: int | BehaviorEpisodeDescriptor
+        self, episode_index: int | BehaviorEpisodeDescriptor, *, include_initial: bool = False
     ) -> dict[str, Any]:
         """Return full-episode transition metadata without materialising images.
 
@@ -1918,6 +1918,24 @@ class BehaviorEpisodeSource:
         """
 
         descriptor = self._resolve_descriptor(episode_index)
+        if include_initial:
+            if descriptor.edge_count < 1:
+                raise ValueError("episode has no recorded transition")
+            score_mask = np.ones(descriptor.edge_count, dtype=np.bool_)
+            # No observed predecessor at reset. Retain both warm-up transitions
+            # in the capture, but do not pretend they are scored targets.
+            score_mask[:2] = False
+            return {
+                "initial_prev_action": np.int64(0),  # reset/NOOP, never action[0]
+                "actions_seq": descriptor.actions.copy(),
+                "rewards_seq": descriptor.rewards.copy(),
+                "done_seq": descriptor.done.copy(),
+                "truncated_seq": descriptor.truncated.copy(),
+                "score_mask": score_mask,
+                "observation_positions": np.arange(descriptor.logical_observation_count, dtype=np.int64),
+                "decision_times": descriptor.decision_times.copy(),
+                "observation_source_index": descriptor.observation_source_index.copy(),
+            }
         if descriptor.edge_count < 3:
             raise ValueError("episode has fewer than the two predecessors plus target")
         score_mask = np.ones(descriptor.edge_count - 1, dtype=np.bool_)

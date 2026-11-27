@@ -1,9 +1,9 @@
 """Behavioral sequence loading for teacher-forced Dynamic Thinker training.
 
-The behavioral archives contain timestamped display frames, whereas Atari
-agents act once every four 60 Hz emulator frames.  This module constructs a
-causal 15 Hz view of each recorded episode and samples windows with the exact
-contract used by dynamic imitation:
+The behavioral archives contain timestamped display frames.  By default,
+windows retain every original frame in recorded order, without resampling to
+the online Atari agent's action clock.  Explicit ``decision_hz`` remains
+available for legacy resampling.  Dynamic imitation uses the exact contract:
 
 ``obs[0]`` / ``initial_prev_action`` initialise the burn-in root. The first
 ``burn_in_steps`` edges are unscored; the following ``L`` edges are scored.
@@ -99,7 +99,7 @@ class BehaviorFile:
 
 @dataclass
 class _LogicalEpisode:
-    """A source episode after causal decision-time resampling."""
+    """A source episode in original order or explicitly resampled time."""
 
     file_index: int
     episode_index: int
@@ -168,8 +168,14 @@ class FrameStackedBehavioralDataLoader:
         and must agree with the subject/session/game filters.  Omitting this
         argument preserves the normal recursive discovery used by training.
     decision_hz:
-        Causal sampling rate.  The Atari frame-skip-four default is 15 Hz.
-        Archives without timestamps are treated as already decision sampled.
+        Optional causal resampling rate.  The default, ``None``, retains
+        every original frame and timestamp.  Explicit ``15.0`` reproduces
+        the legacy frame-skip-four view.  Timestamp-free archives always
+        retain their row order.
+    max_time_gap:
+        Hard sequence boundary in seconds, independent of retaining all
+        frames.  When omitted, use 2.5 sampling intervals for explicit
+        resampling, or the existing 2.5/15-second boundary in original order.
     """
 
     def __init__(
@@ -182,14 +188,14 @@ class FrameStackedBehavioralDataLoader:
         num_actions: int,
         source_paths: Optional[Sequence[str | Path]] = None,
         split: Optional[str] = "train",
-        scored_length: int = 4,
+        scored_length: int = 8,
         burn_in_steps: int = 1,
         sampling_context: Optional[int] = None,
         frame_stack_n: int = 4,
         target_size: Tuple[int, int] = (84, 84),
         grayscale: bool = False,
         normalize: bool = False,
-        decision_hz: Optional[float] = 1.0 / ATARI_DECISION_INTERVAL_SECONDS,
+        decision_hz: Optional[float] = None,
         max_time_gap: Optional[float] = None,
         seed: int = 0,
     ) -> None:
@@ -234,10 +240,11 @@ class FrameStackedBehavioralDataLoader:
             None if self.decision_hz is None else 1.0 / self.decision_hz
         )
         if max_time_gap is None:
-            self.max_time_gap = (
-                None
-                if self.decision_interval is None
-                else 2.5 * self.decision_interval
+            # Keeping all frames must not silently disable clock-gap
+            # boundaries used by training and visualization.
+            self.max_time_gap = 2.5 * (
+                ATARI_DECISION_INTERVAL_SECONDS
+                if self.decision_interval is None else self.decision_interval
             )
         else:
             self.max_time_gap = float(max_time_gap)

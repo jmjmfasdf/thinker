@@ -39,7 +39,7 @@ def revision_summary(events, decisions):
 def add_history(d):
     d = d.sort_values(["run_label", "real_step"]).reset_index(drop=True)
     start = (d.run_label.ne(d.run_label.shift()) | d.episode_id.ne(d.episode_id.shift()) |
-             d.real_step.diff().ne(1) | d.prior_done.eq(1))
+             (d['sample_index'] if 'sample_index' in d else d.real_step).diff().ne(1) | d.prior_done.eq(1))
     d["segment"] = start.cumsum()
     for name in ["M", "U_all", "K", "ema_initial", "log_budget", "root_value"]:
         d[f"lag1_{name}"] = d.groupby("segment", sort=False)[name].shift(1)

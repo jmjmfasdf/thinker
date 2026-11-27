@@ -125,6 +125,8 @@ def _reuse_extract(source, destination, audit, smoke):
     if old_episodes != current_episodes or sorted(old['sources'].values()) != sorted(audit['sources'].values()):
         raise ValueError('Rich extraction input capture mismatch')
     extraction = native.read_json(source/'extraction.json')
+    if extraction.get('sample_mode','all') != 'all':
+        raise ValueError('Rich reuse must be a full extraction; selection is applied after provenance validation')
     if bool(extraction.get('smoke')) != bool(smoke):
         raise ValueError('Cannot mix smoke and full rich extractions')
     for name in RICH_FILES:
@@ -346,6 +348,33 @@ def collect_plot_sources(args, out, tables):
     return added, arrays
 
 
+def _select_rich(out, prepared):
+    """Subset disposable extraction and remap every endpoint/array together."""
+    from common.sampling import select_backend
+    d = _read(out/'decisions.csv.gz')
+    rows, selected = select_backend(d, prepared)
+    if prepared is None or prepared.get('sample_mode','all') == 'all':
+        return
+    if not len(selected): raise ValueError('No supported 15-Hz control-pattern decisions')
+    endpoints = np.concatenate([np.arange(int(r.start),int(r.end)) for r in selected.itertuples()])
+    e = _read(out/'computations.csv.gz').iloc[endpoints].copy().reset_index(drop=True)
+    counts = (selected.end-selected.start).to_numpy(int)
+    selected['row'] = np.arange(len(selected))
+    selected['end'] = np.cumsum(counts)
+    selected['start'] = selected.end-counts
+    e['row'] = np.repeat(selected.row.to_numpy(), counts)
+    selected = native.timeline_segments(selected)
+    selected.to_csv(out/'decisions.csv.gz',index=False)
+    e.to_csv(out/'computations.csv.gz',index=False)
+    for name in ('actor_features','policies','actual_policy','screen','tree_summary','screens'):
+        arr = np.load(out/(name+'.npy'))
+        ids = endpoints if name in ('actor_features','policies') else rows
+        np.save(out/(name+'.npy'),arr[ids])
+    metadata = native.read_json(out/'extraction.json')
+    metadata.update(sample_mode='15hz', full_decisions=len(d), n=len(selected), endpoints=len(e))
+    native.write_json(out/'extraction.json',metadata)
+
+
 def analyze(args, subject, game, prepared, workdir):
     """Preserve original computations; flatten only explicitly selected results."""
     original = args
@@ -357,10 +386,15 @@ def analyze(args, subject, game, prepared, workdir):
     out.mkdir(parents=True, exist_ok=True)
     native.audit_game(args, game, out)
     audit = native.read_json(out/'audit.json')
+    # Actor checkpoints also pickle a return-stat buffer. Load its owning frozen
+    # module before extract_game/representation_game unpickle the linear heads,
+    # including when the shared VoC cache was reused in this fresh process.
+    native.frozen_import(Path(audit['checkpoint']).parents[3], 'buffer')
     reused = _candidate_path(original, prepared, int(subject), game)
     reuse = _reuse_extract(reused, out, audit, args.smoke) if reused else None
     if reused is None:
         native.extract_game(args, game, out)
+    _select_rich(out, prepared)
     decisions = _read(out/'decisions.csv.gz')
     if sorted(decisions.session.unique()) != [1, 2, 3, 4]:
         raise ValueError('Full control-pattern analysis requires all four sessions')

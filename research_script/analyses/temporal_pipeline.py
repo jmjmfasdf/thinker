@@ -251,7 +251,7 @@ def _supplement(d, arrays, raw, args):
     return tables, qa
 
 
-def analyze(args, subject, game, workdir):
+def analyze(args, subject, game, workdir, prepared=None):
     """Run both temporal analyses; return only reusable scientific outputs.
 
     Missing inputs or integrity failures raise rather than producing artificial
@@ -270,9 +270,17 @@ def analyze(args, subject, game, workdir):
     capture = args.input_root / f'sub{subject:03d}' / game
     manifest = accumulation.validate_capture(capture)
     d, arrays = accumulation.extract(args, subject, game, workdir, manifest)
+    from common.sampling import select_backend
+    selected, d = select_backend(d, prepared)
+    arrays = {name:value[selected] for name,value in arrays.items()}
     raw = _load_raw(manifest)
     windows, coverage = accumulation.make_windows(d, arrays['actor_p'], args.window, args.horizon, args.max_gap)
     tables = {'decisions': d, 'primary_windows': windows}
+    if prepared is not None and 'voc_tables' in prepared and not windows.empty:
+        from .voc_relationships import window_features
+        vf = window_features(d,windows,prepared['voc_tables']['voc_decisions'])
+        tables['voc_window_features'] = vf
+        arrays['voc_windows'] = vf[['voc_window_mean','voc_window_slope','voc_window_revision']].to_numpy()
     if not windows.empty:
         predictions, comparisons, display = accumulation.fit_readouts(d, arrays, windows, args, primary_dir)
         fold_qa = accumulation.read_json(primary_dir/'fold_qa.json')
@@ -284,6 +292,13 @@ def analyze(args, subject, game, workdir):
         primary_fold_qa=_records(fold_qa), **_primary_examples(d, arrays, windows, display, raw))
     extra, supplementary_qa = _supplement(d, arrays, raw, args)
     tables.update(extra)
+    # Action-identified forecasting is independent of the legacy first-branch
+    # feature support. Its inputs come from all selected native decisions.
+    action_qa = None
+    if prepared is not None and 'voc_tables' in prepared:
+        from . import action_support
+        extra, action_qa = action_support.analyze(args, prepared)
+        tables.update(extra)
     # The published tables retain identity explicitly even when plotted alone.
     for table in tables.values():
         table['subject'] = subject
@@ -307,6 +322,17 @@ def analyze(args, subject, game, workdir):
             'Matched switch/persist curves are descriptive; human separation follows selection.',
             'Intervals condition on this participant and fitted models; no population or multiplicity-adjusted inference.',
             'Supplement excludes short and left-censored bouts; action-specific support is explicit.'])
+    if action_qa is not None:
+        qa['legacy_scientific_status'] = qa['status']
+        qa['legacy_primary_supported'] = qa['primary_supported']
+        qa['legacy_protocol'] = qa['protocol']
+        qa['action_support'] = action_qa
+        qa['primary_test'] = 'action_support: conditional future switch destination, post minus pre'
+        qa['primary_supported'] = action_qa.get('primary_supported', False)
+        qa['protocol'] = action_qa['protocol']
+        qa['status'] = action_qa['status']
+        if qa['status'] == 'COMPLETED' and not primary_supported:
+            qa['status'] = 'PARTIAL_FITS'
     # All rendered trajectories are tabular. There are no necessary persistent
     # high-dimensional arrays for this theme; upstream matrices stay in scratch.
     return tables, qa, {}
@@ -320,7 +346,8 @@ def render(root, tables, title):
     root = Path(root)
     figures = root/'figures'
     figures.mkdir(parents=True, exist_ok=True)
-    written = []
+    from . import action_support
+    written = action_support.render(root, tables)
     palette = {'switch': '#b44c3a', 'persist': '#2b739b'}
     def save(figure, name):
         for extension in ('png', 'pdf'):

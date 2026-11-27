@@ -34,6 +34,7 @@ from sklearn.decomposition import PCA
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
+from common.figure_style import paper_style
 
 RESEARCH = Path(__file__).resolve().parent
 REPO = RESEARCH.parent
@@ -504,6 +505,7 @@ def fit_readouts(d,a,w,args,out):
     return p,result,display
 
 
+@paper_style()
 def render(d,a,w,p,comparisons,display,out,args):
     import matplotlib
     matplotlib.use('Agg')

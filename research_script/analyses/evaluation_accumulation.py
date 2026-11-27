@@ -299,7 +299,8 @@ def make_windows(d, actor_p, width=.5, horizon=.5, max_gap=.25):
             if future >= len(rows) or ts[future]-(ts[end]+horizon) > max_gap:
                 counts['future_censored'] += 1; continue
             sl = slice(start, future+1)
-            if np.any(np.diff(dec[sl]) != 1) or np.any(np.diff(ts[sl]) <= 0) or np.any(np.diff(ts[sl]) > max_gap):
+            sequence = rows['sample_index'].to_numpy() if 'sample_index' in rows else dec
+            if np.any(np.diff(sequence[sl]) != 1) or np.any(np.diff(ts[sl]) <= 0) or np.any(np.diff(ts[sl]) > max_gap):
                 counts['past_gap_or_short'] += 1; continue
             if bouts[start] != bouts[end]: counts['action_changed'] += 1; continue
             # Disjoint input AND future spans; chosen using timestamps alone.
@@ -402,6 +403,10 @@ def fold_features(d, a, w, held, representation, args):
              'endpoint_magnitude':endpoint_mag,
              'endpoint_directional':np.column_stack([endpoint_mag,directions[:,0]])}
     for j in range(args.permutations):designs[f'order_null_{j:02d}']=np.column_stack([mag,np.asarray(nulls)[:,j,0]])
+    if 'voc_windows' in a:
+        designs['voc_full'] = np.column_stack([designs['directional'],a['voc_windows']])
+        designs['voc_no_voc'] = designs['directional']
+        designs['voc_no_direction'] = np.column_stack([mag,a['voc_windows']])
     # Out-of-session residual quality is an explicit diagnostic, not assumed.
     test_dec=np.flatnonzero(d.session.to_numpy()==held)
     mse=np.mean((ev[test_dec]-nuisance_fit.predict(nuisance[test_dec]))**2)
@@ -467,14 +472,20 @@ def fit_readouts(d,a,w,args,out):
                 for target in ['human_switch','policy_js','policy_away']:
                     y=w[target].to_numpy();binary=target=='human_switch'
                     for name,x in designs.items():
-                        pred,status,coef=predict_model(x,y,train,test,binary,args.penalty,args.minimum_train)
+                        model_train,model_test=train,test
+                        if name.startswith('voc_'):
+                            valid=np.isfinite(a['voc_windows']).all(axis=1)
+                            model_train=train[valid[train]];model_test=test[valid[test]]
+                        pred,status,coef=predict_model(x,y,model_train,model_test,binary,args.penalty,args.minimum_train)
                         statuses.append(dict(representation=representation,session=int(held),sampling=sampling,target=target,model=name,
-                            status=status,n_train=len(train),n_test=len(test),n_events=int(y[test].sum()) if binary else None,
-                            standardized_progress_coefficient=float(coef[-1]) if coef is not None and name in ['directional','endpoint_directional'] else None))
+                            status=status,n_train=len(model_train),n_test=len(model_test),n_events=int(y[model_test].sum()) if binary else None,
+                            standardized_progress_coefficient=(float(coef[-1]) if name in ['directional','endpoint_directional']
+                                else float(coef[designs['voc_no_voc'].shape[1]-1]) if name in ['voc_full','voc_no_voc']
+                                else None) if coef is not None else None))
                         if pred is None:continue
-                        r=w.iloc[test][['window_id','session','run','episode','time']].copy()
-                        r['representation']=representation;r['sampling']=sampling;r['target']=target;r['model']=name;r['truth']=y[test];r['prediction']=pred
-                        r['loss']=-(y[test]*np.log(np.clip(pred,1e-10,1-1e-10))+(1-y[test])*np.log(np.clip(1-pred,1e-10,1))) if binary else (pred-y[test])**2
+                        r=w.iloc[model_test][['window_id','session','run','episode','time']].copy()
+                        r['representation']=representation;r['sampling']=sampling;r['target']=target;r['model']=name;r['truth']=y[model_test];r['prediction']=pred
+                        r['loss']=-(y[model_test]*np.log(np.clip(pred,1e-10,1-1e-10))+(1-y[model_test])*np.log(np.clip(1-pred,1e-10,1))) if binary else (pred-y[model_test])**2
                         predictions.append(r)
     stat=pd.DataFrame(statuses);stat.to_csv(out/'fit_status.csv',index=False)
     write_json(out/'fold_qa.json',foldqa)
@@ -487,14 +498,16 @@ def fit_readouts(d,a,w,args,out):
         contrasts=[('level','baseline'),('magnitude','level'),('directional','magnitude'),
                    ('directional_profile','directional'),('endpoint_directional','endpoint_magnitude')]
         contrasts += [('directional',c) for c in wide if c.startswith('order_null_')]
+        contrasts += [('voc_full','voc_no_voc'),('voc_full','voc_no_direction')]
         for model,reference in contrasts:
             if model not in wide or reference not in wide:continue
             ok=wide[[model,reference]].dropna();rows=w.loc[w.window_id.isin(ok.index)].set_index('window_id').loc[ok.index]
+            if ok.empty:continue
             delta=(ok[reference]-ok[model]).to_numpy()
             interval=block_interval(rows,delta,args.bootstrap,args.seed)
             per=rows[['session','run']].copy();per['gain']=delta
             session=per.groupby(['session','run']).gain.mean().groupby('session').mean()
-            coef_model='endpoint_directional' if model=='endpoint_directional' else 'directional'
+            coef_model=model if model.startswith('voc_') else 'endpoint_directional' if model=='endpoint_directional' else 'directional'
             coefs=stat.loc[stat.representation.eq(rep)&stat.sampling.eq(sampling)&stat.target.eq(target)&stat.model.eq(coef_model)&stat.status.eq('ok'),'standardized_progress_coefficient']
             comparisons.append(dict(representation=rep,sampling=sampling,target=target,model=model,reference=reference,n=len(rows),
                 sessions=rows.session.nunique(),positive_sessions=int(session.gt(0).sum()),
